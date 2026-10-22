@@ -31,9 +31,10 @@ node --test                # the whole suite, no network
 ```
 
 The tests stub `fetch`; nothing here talks to ModelScope. Fixtures follow the
-clock, so they don't expire on a given day. The check-in window reads a config
-file the host would keep at `~/.config/magpie/msmoli.json`; the suite points
-`MAGPIE_MSMOLI_CONFIG` at a temp file so it never reads or writes a real one.
+clock, so they don't expire on a given day. The check-in window reads
+`msmoli.json` from the folder magpie reports as `input.directory`; the suite
+points `MAGPIE_MSMOLI_CONFIG` at a temp file so it never reads or writes a
+real one.
 
 ## Against the real API
 

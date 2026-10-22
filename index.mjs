@@ -161,20 +161,24 @@ const WINDOW_DEFAULT = ["08:30", "10:00"]
 
 const CONFIG_ENV = "MAGPIE_MSMOLI_CONFIG"
 
-function configPath() {
+// configPath is where the user's overrides live: beside magpie's own files,
+// which is ~/.config/magpie for an installed magpie and the data folder for a
+// portable one. The host hands that folder over as input.directory; guessing
+// ~/.config/magpie here would silently ignore the file on a portable magpie.
+function configPath(dir) {
   if (process.env[CONFIG_ENV]) return process.env[CONFIG_ENV]
-  const dir = process.env.XDG_CONFIG_HOME
+  const base = dir || (process.env.XDG_CONFIG_HOME
     ? join(process.env.XDG_CONFIG_HOME, "magpie")
-    : join(homedir(), ".config", "magpie")
-  return join(dir, "msmoli.json")
+    : join(homedir(), ".config", "magpie"))
+  return join(base, "msmoli.json")
 }
 
 // configOf reads the user's overrides, hot each call so a change reaches the
 // next ask without restarting magpie. Anything unreadable or not an object
 // is nothing.
-function configOf() {
+function configOf(dir) {
   try {
-    const raw = JSON.parse(readFileSync(configPath(), "utf8"))
+    const raw = JSON.parse(readFileSync(configPath(dir), "utf8"))
     return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}
   } catch {
     return {}
@@ -259,7 +263,11 @@ async function todayEarn(token) {
 
 const sumOf = (records) => records.reduce((n, r) => n + (Number(r?.total_amount) || 0), 0)
 
-export async function MsmoliPlugin(_input) {
+export async function MsmoliPlugin(input) {
+  // input.directory is magpie's own folder (host.go passes settings.Dir()),
+  // which is where a portable magpie keeps everything too.
+  const configDir = typeof input?.directory === "string" ? input.directory : ""
+
   return {
     auth: {
       provider: ID,
@@ -290,14 +298,14 @@ export async function MsmoliPlugin(_input) {
         const token = tokenOf(await getAuth())
         if (!token) return { outcome: "failed", message: "没有登录信息，请先登录" }
 
-        const win = windowOf(configOf())
+        const win = windowOf(configOf(configDir))
         if (win) {
           const day = todayCN()
           const p = plan(win, token, day)
           if (!p.due) {
             return {
               outcome: "failed",
-              message: `未到签到时段：今日 ${clock(p.target)} 起领取（${clock(win.start)}–${clock(win.end)}，改 msmoli.json 调整）`,
+              message: `未到签到时段：今日 ${clock(p.target)} 起领取（${clock(win.start)}–${clock(win.end)}，改 ${configPath(configDir)} 调整）`,
             }
           }
         }
@@ -385,7 +393,7 @@ export async function MsmoliPlugin(_input) {
 
           // 今天还没领到时，把时段里的目标时刻写在卡片上，别让「领 0」
           // 看起来像是出了问题。
-          const win = windowOf(configOf())
+          const win = windowOf(configOf(configDir))
           const ahead = win && earned === 0 ? plan(win, token, day) : null
           const hint = ahead && !ahead.due ? ` · ${clock(ahead.target)} 领取` : ""
 

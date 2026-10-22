@@ -77,7 +77,8 @@ ModelScope 没有公开的签到端点。它有的是一个副作用：`GET /api
 晚领不吃亏：每日魔粒**自到账起 24 小时过期**（15:35 到账就 15:35 过期），
 所以 9 点领的额度能用第二天 9 点。
 
-在 `~/.config/magpie/msmoli.json` 里改：
+在 magpie 自己的目录里放一个 `msmoli.json`（安装版是 `~/.config/magpie`，
+便携版是它的 data 目录）改：
 
 ```json
 { "checkinWindow": ["08:30", "10:00"] }

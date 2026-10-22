@@ -92,7 +92,8 @@ Waiting costs nothing: daily grants **expire 24 hours after they land**
 (a grant at 15:35 expires at 15:35 the next day), so claiming at 9am leaves
 the credits good until 9am tomorrow.
 
-Set it in `~/.config/magpie/msmoli.json`:
+Set it in `msmoli.json` in magpie's own folder (`~/.config/magpie` for an
+installed magpie, the data folder for a portable one):
 
 ```json
 { "checkinWindow": ["08:30", "10:00"] }

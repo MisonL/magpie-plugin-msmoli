@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { writeFileSync } from "node:fs"
+import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -438,6 +438,39 @@ test("checkinWindow off claims at once, as if there were no window", async () =>
       },
     )
   })
+})
+
+test("the window is read from the folder magpie reports, not a guessed one", async () => {
+  // a portable magpie keeps its files in its data folder, not ~/.config/magpie;
+  // a config read from the guessed path would be ignored without a word
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-portable-"))
+  const file = join(dir, "msmoli.json")
+  writeFileSync(file, JSON.stringify({ checkinWindow: ["13:00", "14:00"] }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const portable = await MsmoliPlugin({ directory: dir })
+    const at = Date.parse(`${today} 12:00:00`.replace(" ", "T") + "+08:00")
+    const realNow = Date.now
+    Date.now = () => at
+    let asked = 0
+    const realFetch = globalThis.fetch
+    globalThis.fetch = async () => {
+      asked += 1
+      return reply({ body: { success: true, data: { records: [] } } })
+    }
+    try {
+      const r = await portable.auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.match(r.message, /13:00–14:00/, "the window came from input.directory")
+      assert.equal(asked, 0)
+    } finally {
+      Date.now = realNow
+      globalThis.fetch = realFetch
+    }
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
 })
 
 test("an unusable window falls back to the default instead of never claiming", async () => {
