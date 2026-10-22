@@ -1,6 +1,6 @@
 # magpie-plugin-msmoli
 
-一个 [magpie](https://github.com/yetone/magpie) 插件，替你领取 ModelScope（魔搭）的每日**魔粒**——一个请求代替人工打开网页——并在账号卡片上显示余额与今日消耗。
+一个 [magpie](https://github.com/yetone/magpie) 插件，替你领取 ModelScope（魔搭）的每日**魔粒**——每天自动签到一次，代替人工打开网页——并在账号卡片上显示余额与今日消耗。
 
 ## 魔粒是什么
 
@@ -16,6 +16,8 @@ ModelScope 的 API-Inference 是免费的，用魔粒结算：
 
 ## 安装
 
+需要先装好 magpie（<https://usemagpie.ai>），并让 `magpie` 命令在 `PATH` 上；用 `magpie --version` 确认。
+
 ```bash
 git clone https://github.com/MisonL/magpie-plugin-msmoli.git
 cd magpie-plugin-msmoli
@@ -23,11 +25,14 @@ magpie plugin add "$PWD"
 printf 'ms-你的令牌\n' | magpie plugin login msmoli
 ```
 
-然后在 `~/.config/magpie/settings.json` 里把签到打开：
+然后把签到打开：设置 → 用量 → 插件 → `msmoli` 那一行，或者改 `settings.json`
+（在 magpie 自己的目录里，安装版是 `~/.config/magpie`）：
 
 ```json
-"pluginCheckins": {
-  "msmoli": true
+{
+  "pluginCheckins": {
+    "msmoli": true
+  }
 }
 ```
 
@@ -36,7 +41,7 @@ printf 'ms-你的令牌\n' | magpie plugin login msmoli
 之后 magpie 每天（北京日）每账号领取一次，失败当天稍后重试，结果直接显示在账号卡片上：
 
 ```
-● msmoli  API key …a1b2 · 魔搭社区  魔粒 1% (今日用 2 / 领 250 · 余额 249.5)
+● plugin:msmoli  API key …a1b2 · 魔搭社区  魔粒 1% (今日用 2 / 领 250 · 余额 249.5)
   ↻14h24m tomorrow 00:00  249.5 魔粒可用 left
 ```
 
@@ -57,6 +62,7 @@ ModelScope 没有公开的签到端点。它有的是一个副作用：`GET /api
 | `done` | 今天已经领过，带上当日合计 |
 | `claimed` | 这次领到了，带上金额 |
 | `inactive` | 登录通了，但没有到账 |
+| `failed` | 什么也没领到——包括下面的「还没到点」 |
 
 用到的接口都在 `modelscope.cn`，请求头 `Cookie: m_session_id=ms-…`，外加浏览器 UA 和 `Referer` 即可，不需要 CSRF 令牌：
 
@@ -66,7 +72,7 @@ ModelScope 没有公开的签到端点。它有的是一个副作用：`GET /api
 | 余额 | `GET /openapi/v1/magicubes/balance` |
 | 账单 | `GET /openapi/v1/magicubes/transactions?page=1&page_size=50` |
 
-账单里的 `type` 只有 `EARN`、`SPEND_CONFIRM`、`EXPIRE` 三种。
+账单里的 `type` 见到过 `EARN` 与 `SPEND_CONFIRM`，另有一种 `EXPIRE`（本插件不依赖它）。
 
 ### 什么时候领：签到时段
 
@@ -90,6 +96,7 @@ ModelScope 没有公开的签到端点。它有的是一个副作用：`GET /api
 会退回默认，而不是永远不领。结束时刻晚于 **23:30** 会被截到那里：
 magpie 失败后隔 30 分钟才再问，落在当天最后半小时里的目标时刻可能
 等不到下一次询问，午夜一过日期和目标一起换掉，那天的额度就丢了。
+整段都落在 23:30 之后的窗口同样退回默认窗口，因为已经没有地方放目标时刻了。
 文件每次被问都重读，改完不用重启 magpie。
 
 与宿主调度的衔接：magpie 在北京日切换时问一次，之后**失败才**每 30 分钟再问
@@ -112,11 +119,10 @@ magpie 没有给插件定时器、时钟，也不能决定自己什么时候被�
 
 ## 为什么是独立的 provider，且不注册模型
 
-插件注册的是 `msmoli`，而不是接管内置的 `modelscope` 预设，原因有三个：
+插件注册的是 `msmoli`，而不是内置的 `modelscope` 预设，原因有两个：
 
-1. 插件的 `config` 钩子写的是 `config.provider[id]`，接管 `modelscope` 会覆盖预设的模型列表与名称。
-2. 与预设撞名的插件 id 会被 magpie 命名空间化成 `<id>-plugin`，本来也就不是同一个 provider 了。
-3. **安全。** 用量窗口读到「已用尽」时，magpie 网关会跳过该账号。如果签到插件挂在推理实际路由的那个 provider 上，一旦报 100% 就会把整条聊天链路从 magpie 里摘掉。
+1. 与预设撞名的插件 id 会被 magpie 命名空间化成 `<id>-plugin`，本来也就不是同一个 provider 了；叫 `modelscope` 只会和预设并排显示，让人误以为是同一个账号。
+2. **安全。** 用量窗口读到「已用尽」时，magpie 网关会跳过该账号。如果签到插件挂在推理实际路由的那个 provider 上，一旦报 100% 就会把整条聊天链路从 magpie 里摘掉。
 
 所以聊天继续走 `providers.json` 里带 API key 的 `modelscope` 预设，本插件只承载签到所需的登录态。
 
@@ -126,9 +132,12 @@ magpie 没有给插件定时器、时钟，也不能决定自己什么时候被�
 
 ## 范围与边界
 
-- 只领你自己账号的每日额度，幂等：一次签到读账单、触达登录、再读账单（共三个请求，每天一次）。
+- 只领你自己账号的每日额度，幂等：一次签到读账单、触达登录、再读账单——三个请求，
+到账晚了要再读一次账单确认时是四个。每天一次。
 窗口开启之前的询问一个请求都不发。
 用量读取只发两个请求，且永不触达登录端点，所以菜单栏的轮询不会变成签到。
+- 每个请求 8 秒超时，响应体最多读 256 KiB，既拖不住宿主，也不会无限增长。
+- `MAGPIE_MSMOLI_CONFIG` 可以覆盖配置文件路径。它是为了让测试不碰真实文件而存在的，生产环境同样生效。
 - 每天另外 170 魔粒来自「喜欢 10 次（20）+ 发 AIGC 作品（100）+ 发 AIGC 模型（50）」。这些都没有 API，自动化等于驱动网页界面，本插件不碰。
 
 ## 排障
@@ -138,6 +147,8 @@ magpie 没有给插件定时器、时钟，也不能决定自己什么时候被�
 | `not signed in` | `printf 'ms-令牌\n' \| magpie plugin login msmoli` |
 | 卡片上没有魔粒窗口，或签到没跑 | 重启 magpie（插件宿主有缓存） |
 | `failed` + HTTP 401 | 令牌被吊销，重新生成并登录 |
+| `failed` + HTTP 403 | 魔搭风控拒了这次请求，令牌本身没问题，30 分钟后会重试 |
+| 窗口前卡片写着「签到失败 · 未到签到时段」 | 正常现象，见上面的「什么时候领」 |
 | 一直是 `inactive` | 登录通了但没到账：账号不在活动范围，或今天已被别的客户端领走 |
 | 改了插件代码没生效 | 路径式插件按位置引用，改完要重启 magpie |
 

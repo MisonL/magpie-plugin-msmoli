@@ -1,7 +1,7 @@
 # magpie-plugin-msmoli
 
 A [magpie](https://github.com/yetone/magpie) plugin that claims ModelScope's
-(魔搭) daily **魔粒** credits for you — one request a day instead of opening the
+(魔搭) daily **魔粒** credits for you — one check-in a day instead of opening the
 site — and shows the balance and today's spend on the account's usage card.
 
 ## What 魔粒 is
@@ -20,6 +20,9 @@ lightweight 0.5), so the daily 250 is roughly 125 calls.
 
 ## Install
 
+Needs magpie itself (<https://usemagpie.ai>) with `magpie` on your `PATH`; check
+with `magpie --version`.
+
 ```bash
 git clone https://github.com/MisonL/magpie-plugin-msmoli.git
 cd magpie-plugin-msmoli
@@ -27,11 +30,15 @@ magpie plugin add "$PWD"
 printf 'ms-your-token\n' | magpie plugin login msmoli
 ```
 
-Then turn the check-in on in `~/.config/magpie/settings.json`:
+Then turn the check-in on: Settings → Usage → Plugins → the `msmoli` row, or in
+`settings.json` (in magpie's own folder, `~/.config/magpie` for an installed
+magpie):
 
 ```json
-"pluginCheckins": {
-  "msmoli": true
+{
+  "pluginCheckins": {
+    "msmoli": true
+  }
 }
 ```
 
@@ -43,7 +50,7 @@ From then on magpie claims it once a Beijing day per signed-in account, retries
 later that day if it fails, and reports the outcome on the account's usage card:
 
 ```
-● msmoli  API key …a1b2 · 魔搭社区  魔粒 1% (今日用 2 / 领 250 · 余额 249.5)
+● plugin:msmoli  API key …a1b2 · 魔搭社区  魔粒 1% (今日用 2 / 领 250 · 余额 249.5)
   ↻14h24m tomorrow 00:00  249.5 魔粒可用 left
 ```
 
@@ -68,6 +75,7 @@ Three outcomes follow:
 | `done` | already claimed today, with the day's total |
 | `claimed` | this run claimed it, with the amount |
 | `inactive` | the sign-in went through but nothing was granted |
+| `failed` | nothing was claimed — including "not yet time", explained below |
 
 The endpoints it uses, all on `modelscope.cn` with `Cookie: m_session_id=ms-…`
 (a browser UA and a `Referer` are enough — no CSRF token):
@@ -106,8 +114,9 @@ One string works the same way: `{ "checkinWindow": "08:30-10:00" }`.
 rather than never claiming. An end past **23:30** is capped there: magpie asks
 again half an hour after a failure, so a target in the day's last half hour
 could have no ask left before midnight reset the day and the target with it.
-The file is read on every ask, so a change takes effect without restarting
-magpie.
+A window that sits entirely past 23:30 falls back to the default window too,
+since there would be nowhere left to put the target. The file is read on every
+ask, so a change takes effect without restarting magpie.
 
 How it fits magpie's schedule: magpie asks once when the Beijing day turns
 and re-asks every 30 minutes **after a failure** — `failed` is the only
@@ -134,14 +143,14 @@ the account card) want a line in
 
 ## Why its own provider, with no models
 
-The plugin registers `msmoli` rather than taking over the built-in `modelscope`
-preset, for three reasons:
+The plugin registers `msmoli` rather than the built-in `modelscope` preset, for
+two reasons:
 
-1. A plugin's `config` hook writes `config.provider[id]`; taking over
-   `modelscope` would overwrite the preset's model list and name.
-2. magpie namespaces a plugin id that collides with a preset into
-   `<id>-plugin`, so it would no longer be the same provider anyway.
-3. **Safety.** magpie's gateway passes over an account whose usage window reads
+1. magpie namespaces a plugin id that collides with a preset into
+   `<id>-plugin`, so a plugin that named itself `modelscope` would not be the
+   same provider anyway — it would only sit next to the preset and invite people
+   to take one for the other.
+2. **Safety.** magpie's gateway passes over an account whose usage window reads
    as used up. If a check-in plugin served the provider that inference actually
    routes through, reporting 100% would take the whole chat path out of magpie.
 
@@ -159,10 +168,15 @@ sends it anywhere but `modelscope.cn`.
 ## Scope and limits
 
 - One account's own daily grant, idempotent: a check-in reads the ledger, touches
-the sign-in endpoint, and reads the ledger again (three requests, once a day).
+the sign-in endpoint, and reads the ledger again — three requests, four when the
+grant is late and the ledger is read a second time to confirm. Once a day.
 Asks that arrive before the window open send nothing at all.
 The usage read makes two requests and never touches the sign-in endpoint, so the
 menu bar's polling cannot turn into check-ins.
+- Every request gives up after 8 seconds, and a response body is read to at most
+256 KiB; neither can hold the host or grow without bound.
+- `MAGPIE_MSMOLI_CONFIG` overrides the config file's path. It exists so the test
+  suite never touches a real file; it works in production too.
 - The other 170 魔粒 a day come from liking 10 items (20), posting AIGC works
   (100) and AIGC models (50). None of those have an API, and automating them
   means driving the web UI, so this plugin does not touch them.
@@ -174,6 +188,8 @@ menu bar's polling cannot turn into check-ins.
 | `not signed in` | `printf 'ms-token\n' \| magpie plugin login msmoli` |
 | No 魔粒 window on the card, or no check-in | restart magpie (the plugin host caches) |
 | `failed` with HTTP 401 | the token was revoked — make a new one and sign in again |
+| `failed` with HTTP 403 | ModelScope's risk control refused the request; the token is fine. It retries in 30 minutes |
+| Card says `签到失败 · 未到签到时段` before the window | expected — see "When it claims" above |
 | Always `inactive` | the sign-in works but nothing is granted: the account isn't eligible, or another client already claimed it today |
 | Edits to this plugin do nothing | path plugins are referenced in place; restart magpie |
 

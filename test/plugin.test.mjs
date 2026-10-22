@@ -14,6 +14,16 @@ import { MsmoliPlugin } from "../index.mjs"
 // ~/.config/magpie/msmoli.json. Tests point it at a temp file so the suite
 // doesn't depend on (or touch) a real one, and start with the window off, the
 // way a user would have it who wants the claim as soon as magpie asks.
+// MSMOLI_FAKE_NOW moves the whole suite's clock, for checking that no test
+// depends on the day it runs: the check-in target is a hash of the day, so a
+// fixed-clock assertion would pass today and fail on some other date.
+const SHIFT = Number(process.env.MSMOLI_FAKE_NOW ?? NaN)
+if (Number.isFinite(SHIFT)) {
+  const realNow = Date.now
+  const LOAD = realNow()
+  Date.now = () => SHIFT + (realNow() - LOAD)
+}
+
 const TEST_CONFIG = join(tmpdir(), `msmoli-test-${process.pid}.json`)
 process.env.MAGPIE_MSMOLI_CONFIG = TEST_CONFIG
 writeFileSync(TEST_CONFIG, JSON.stringify({ checkinWindow: false }))
@@ -31,6 +41,16 @@ const withWindow = async (window, cn, fn) => {
     Date.now = realNow
     writeFileSync(TEST_CONFIG, JSON.stringify({ checkinWindow: false }))
   }
+}
+
+// targetOf asks at a clock before any window and reads back the moment the
+// plugin will claim at. The moment is a hash of the day and the account, so a
+// test that assumed a fixed clock would fail on some days of the year.
+const targetOf = async (checkin) => {
+  const r = await checkin(async () => ({ type: "api", key: "ms-test" }))
+  const m = /今日 (\d{2}):(\d{2}) 起领取/.exec(r.message)
+  assert.ok(m, `the message should carry the target: ${r.message}`)
+  return { minute: +m[1] * 60 + +m[2], text: `${m[1]}:${m[2]}` }
 }
 
 const hooks = await MsmoliPlugin({})
@@ -448,7 +468,10 @@ test("before the window the check-in asks for nothing and answers failed", async
       const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
       assert.equal(r.outcome, "failed")
       assert.match(r.message, /未到签到时段/)
-      assert.match(r.message, /09:\d\d/, "the message says when today's claim will run")
+      const m = /今日 (\d{2}):(\d{2}) 起领取/.exec(r.message)
+      assert.ok(m, `the message says when today's claim will run: ${r.message}`)
+      const at = +m[1] * 60 + +m[2]
+      assert.ok(at >= 8 * 60 + 30 && at < 10 * 60, `the target ${m[1]}:${m[2]} is inside 08:30-10:00`)
       assert.equal(asked, 0, "nothing may be sent before the window")
     } finally {
       globalThis.fetch = real
@@ -457,7 +480,8 @@ test("before the window the check-in asks for nothing and answers failed", async
 })
 
 test("after the window opens the check-in claims as usual", async () => {
-  await withWindow(["08:30", "10:00"], `${today} 09:59:00`, async () => {
+  // 10:00 is past every target in [08:30, 10:00), whatever the day's hash
+  await withWindow(["08:30", "10:00"], `${today} 10:00:00`, async () => {
     // the claim's own target falls anywhere in the window; 09:59 is after
     // every one of them only if the window ends at 10:00 — assert the gate
     // passes by driving a full claim.
@@ -590,23 +614,24 @@ test("a window reaching into the last half hour is capped, so the claim keeps an
   delete process.env.MAGPIE_MSMOLI_CONFIG
   try {
     const late = await MsmoliPlugin({ directory: dir })
-    const at = Date.parse(`${today} 22:05:00`.replace(" ", "T") + "+08:00")
     const realNow = Date.now
-    Date.now = () => at
     const realFetch = globalThis.fetch
+    // ask from the first minute of the day: before any target in the window
+    Date.now = () => Date.parse(`${today} 00:01:00`.replace(" ", "T") + "+08:00")
     globalThis.fetch = async () => reply({ body: { success: true, data: { records: [] } } })
+    let target
     try {
       const r = await late.auth.checkin(async () => ({ type: "api", key: "ms-test" }))
       assert.match(r.message, /22:00–23:30/, "the window is reported as capped")
-      const m = /今日 (\d{2}):(\d{2}) 起领取/.exec(r.message)
-      assert.ok(m, `the target should be carried: ${r.message}`)
-      assert.ok(+m[1] * 60 + +m[2] <= 23 * 60 + 30, `target ${m[1]}:${m[2]} must leave an ask before midnight`)
+      target = await targetOf(late.auth.checkin)
+      assert.ok(target.minute <= 23 * 60 + 30, `target ${target.text} must leave an ask before midnight`)
+      assert.ok(target.minute >= 22 * 60, `target ${target.text} must stay inside the configured start`)
     } finally {
       Date.now = realNow
       globalThis.fetch = realFetch
     }
-    // the last minute of the day: whatever the capped target is, it is past
-    const late2 = Date.parse(`${today} 23:59:00`.replace(" ", "T") + "+08:00")
+    // one minute past that target the claim is due, on the same day
+    const late2 = Date.parse(`${today} ${target.text}:00`.replace(" ", "T") + "+08:00") + 60e3
     Date.now = () => late2
     let asked = 0
     globalThis.fetch = async () => {
