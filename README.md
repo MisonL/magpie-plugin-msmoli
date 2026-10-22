@@ -117,7 +117,7 @@ magpie gives a plugin no timer, no clock, and no say in when it is called:
 to ask again. Everything above is worked around within that contract, and
 the awkward parts (proving "not yet" as a failure, whole-day granularity for
 the account card) want a line in
-[this issue](https://github.com/yetone/magpie/issues/3231) proposing timers and
+[this issue](https://github.com/yetone/magpie/issues/3245) proposing timers and
 `recheck` for plugins.
 
 ## Why its own provider, with no models

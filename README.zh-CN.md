@@ -97,7 +97,7 @@ magpie 没有给插件定时器、时钟，也不能决定自己什么时候被�
 `auth.checkin(getAuth, info)` 只能返回一个结果，什么时候再问由宿主定。
 上面这些都是在那个契约里绕出来的，绕得别扭的两处（把「还没到点」说成失败、
 卡片只有整天的粒度）值得在
-[这个 issue](https://github.com/yetone/magpie/issues/3231) 里要一个插件能用的
+[这个 issue](https://github.com/yetone/magpie/issues/3245) 里要一个插件能用的
 定时器和 `recheck`。
 
 ## 为什么是独立的 provider，且不注册模型
