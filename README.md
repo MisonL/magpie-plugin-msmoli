@@ -21,7 +21,7 @@ lightweight 0.5), so the daily 250 is roughly 125 calls.
 ## Install
 
 ```bash
-git clone https://github.com/<you>/magpie-plugin-msmoli.git
+git clone https://github.com/MisonL/magpie-plugin-msmoli.git
 cd magpie-plugin-msmoli
 magpie plugin add "$PWD"
 printf 'ms-your-token\n' | magpie plugin login msmoli

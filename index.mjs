@@ -60,6 +60,9 @@ async function json(token, path) {
   const timer = setTimeout(() => ctl.abort(new Error("timeout")), TIMEOUT_MS)
   try {
     const res = await fetch(SITE + path, {
+      // a redirect that leaves modelscope.cn must not carry the session
+      // cookie off-site; the runtimes happen not to forward it, but say so
+      redirect: "error",
       headers: {
         Cookie: "m_session_id=" + token,
         "User-Agent": UA,
@@ -132,10 +135,32 @@ const okOf = (body) => {
   return code !== undefined && String(code) === "200"
 }
 
-const saidOf = (body) => String(body?.message ?? body?.Message ?? body?.msg ?? body?.code ?? "")
+// text makes a string from the server safe to put in a message. What the
+// server says (an error's message, a grant's title) ends up in the account
+// card, in magpie's log and on the terminal, and a remote answer is not
+// trusted with control characters: a newline forges a log line, an escape
+// sequence drives the terminal. Visible characters are kept, up to a length
+// that fits a card.
+const text = (value, max = 120) =>
+  String(value ?? "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .trim()
+    .slice(0, max)
+
+const saidOf = (body) => text(body?.message ?? body?.Message ?? body?.msg ?? body?.code ?? "")
 
 const dataOf = (body) => body?.data ?? body?.Data ?? {}
-const recordsOf = (body) => dataOf(body)?.records ?? []
+
+// recordsOf is the ledger's entries. A missing key is an empty ledger (the
+// keys are optional in ModelScope's answers), but a records that is there and
+// is not a list is a body we do not understand — a proxy's rewrite, a changed
+// API — and must fail: read as empty it would report "claimed 0 today".
+const recordsOf = (body) => {
+  const records = dataOf(body)?.records
+  if (records === undefined || records === null) return []
+  if (!Array.isArray(records)) throw new Error("账单格式不认识：records 不是列表")
+  return records
+}
 
 function todayCN() {
   return new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10)
@@ -144,8 +169,8 @@ function todayCN() {
 // cnTime turns ModelScope's "2026-10-22 15:35:35" (Beijing time, no zone) into
 // RFC 3339. Handed to new Date() as is, it would be read in the host's own
 // zone, which is 8 hours off on a machine set anywhere else.
-function cnTime(text) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(String(text ?? ""))
+function cnTime(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(String(value ?? ""))
   if (!m) return ""
   const [, y, mo, d, h, mi, s] = m
   const at = Date.UTC(+y, +mo - 1, +d, +h - 8, +mi, +s)
@@ -324,18 +349,18 @@ export async function MsmoliPlugin(input) {
           if (!okOf(body)) return { outcome: "failed", message: `登录接口失败：${saidOf(body) || `HTTP ${res.status}`}` }
 
           const me = dataOf(body)
-          const name = String(me.NickName || me.Name || "")
+          const name = text(me.NickName || me.Name || "", 40)
           rememberName(token, name)
 
           const daily = (await todayEarn(token)).filter((r) => DAILY_RULES.includes(r?.rule_key))
           const credit = sumOf(daily)
 
           if (claimed) {
-            const which = daily.map((r) => r.title).filter(Boolean).join(" + ")
+            const which = daily.map((r) => text(r.title, 40)).filter(Boolean).join(" + ")
             return { outcome: "done", credit, message: `今日已领取 ${credit} 魔粒` + (which ? `（${which}）` : "") }
           }
           if (daily.length) {
-            const which = daily.map((r) => `${r.title} +${r.total_amount}`).join("，")
+            const which = daily.map((r) => `${text(r.title, 40)} +${r.total_amount}`).join("，")
             return { outcome: "claimed", credit, message: `领取 ${credit} 魔粒：${which}` }
           }
           // 触达了却没有到账记录：可能是账本还没写出来（发放是异步的），
@@ -344,7 +369,7 @@ export async function MsmoliPlugin(input) {
           const later = (await todayEarn(token)).filter((r) => DAILY_RULES.includes(r?.rule_key))
           if (later.length) {
             const credit2 = sumOf(later)
-            const which = later.map((r) => `${r.title} +${r.total_amount}`).join("，")
+            const which = later.map((r) => `${text(r.title, 40)} +${r.total_amount}`).join("，")
             return { outcome: "claimed", credit: credit2, message: `领取 ${credit2} 魔粒：${which}` }
           }
           return { outcome: "inactive", message: "登录已触达，但今天没有到账记录（账号可能不在活动范围）" }

@@ -269,7 +269,14 @@ test("usage without a sign-in says so", async () => {
 
 test("a request that hangs gives up instead of holding the host", { timeout: 8000 }, async (t) => {
   const real = globalThis.fetch
-  t.mock.timers.enable({ apis: ["setTimeout"] })
+  // Node 20.4 took the object form ({ apis: […] }); 18 only knows the array
+  // form, and the array form on 20+ mocks setImmediate too, which the wait
+  // below needs. Try the newer shape, fall back for 18.
+  try {
+    t.mock.timers.enable({ apis: ["setTimeout"] })
+  } catch {
+    t.mock.timers.enable(["setTimeout"])
+  }
   globalThis.fetch = (url, init) =>
     new Promise((_, reject) => {
       init.signal.addEventListener("abort", () => reject(init.signal.reason ?? new Error("aborted")), { once: true })
@@ -334,6 +341,52 @@ test("an account whose grant has not landed yet is asked again, not written off"
   } finally {
     globalThis.fetch = real
   }
+})
+
+test("a remote message cannot forge a log line or drive the terminal", async () => {
+  // the server's own strings end up in magpie's log and on a terminal; a
+  // newline or an escape sequence from there is not ours to trust
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: false, message: "bad\u001b[31mred\n2026-10-23 00:00:00 FAKE LOG LINE" } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.ok(u.error, "still a failure")
+      assert.equal(/[\u0000-\u001f\u007f-\u009f]/.test(u.error), false, `control characters survived: ${JSON.stringify(u.error)}`)
+      assert.match(u.error, /red/, "the visible text is kept")
+    },
+  )
+})
+
+test("a grant's title from the ledger is sanitized before it reaches the card", async () => {
+  const nasty = day({ title: "注册并登录\u001b]0;pwned\u0007\nFAKE" })
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [nasty] } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "ali\nc e" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "done")
+      assert.equal(/[\u0000-\u001f\u007f-\u009f]/.test(r.message), false, `control characters survived: ${JSON.stringify(r.message)}`)
+    },
+  )
+})
+
+test("a ledger whose records is not a list is a failure, not a crash", async () => {
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 1 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: { nope: true } } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.ok(u.error, "a body without a real ledger is not a balance of zero")
+      assert.doesNotMatch(u.error, /is not a function/, "an internal error must not reach the card")
+    },
+  )
 })
 
 test("a token with a line break in it is refused before it can be echoed", async () => {

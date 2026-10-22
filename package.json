@@ -3,6 +3,14 @@
   "version": "0.2.0",
   "description": "ModelScope (魔搭) 魔粒 daily check-in and balance for magpie — one request a day instead of opening the site",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MisonL/magpie-plugin-msmoli.git"
+  },
+  "homepage": "https://github.com/MisonL/magpie-plugin-msmoli",
+  "bugs": {
+    "url": "https://github.com/MisonL/magpie-plugin-msmoli/issues"
+  },
   "main": "./index.mjs",
   "exports": "./index.mjs",
   "files": [

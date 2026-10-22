@@ -17,7 +17,7 @@ ModelScope 的 API-Inference 是免费的，用魔粒结算：
 ## 安装
 
 ```bash
-git clone https://github.com/<you>/magpie-plugin-msmoli.git
+git clone https://github.com/MisonL/magpie-plugin-msmoli.git
 cd magpie-plugin-msmoli
 magpie plugin add "$PWD"
 printf 'ms-你的令牌\n' | magpie plugin login msmoli
