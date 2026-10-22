@@ -24,53 +24,106 @@ const DAILY_RULES = ["daily_active", "aliyun_bindlogin"]
 
 const ID = "msmoli"
 
-const TIMEOUT_MS = 20000
+const TIMEOUT_MS = 8000
 const PAGE_SIZE = 50
 
-const tokenOf = (auth) => (auth?.type === "api" ? String(auth.key ?? "").trim() : "")
+const tokenOf = (auth) => {
+  const token = auth?.type === "api" ? String(auth.key ?? "").trim() : ""
+  // A token with anything but visible ASCII in it would put the whole value
+  // into a fetch error message ("…is an invalid header value"), which magpie
+  // logs and shows. Refused here, before it can be echoed anywhere.
+  return token && /^[\x21-\x7e]+$/.test(token) ? token : ""
+}
 
-// timedAbort is a signal that aborts on its own after TIMEOUT_MS, and when the
-// caller's signal does. Written by hand rather than with AbortSignal.any, which
-// older Node releases don't have.
-function timedAbort(signal) {
+// handleOf is a short, non-reversible stand-in for the token, so the caches
+// below never hold the secret itself.
+function handleOf(token) {
+  let h = 0x811c9dc5
+  for (let i = 0; i < token.length; i++) {
+    h ^= token.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(16)
+}
+
+// json asks one of ModelScope's web endpoints as the account. The timeout is
+// its own: magpie gives a usage read 20s in total, and this plugin makes two
+// or three requests within it.
+async function json(token, path) {
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(new Error("timeout")), TIMEOUT_MS)
-  const stop = () => {
-    clearTimeout(timer)
-    ctl.abort(signal?.reason)
-  }
-  if (signal) {
-    if (signal.aborted) stop()
-    else signal.addEventListener("abort", stop, { once: true })
-  }
-  ctl.signal.addEventListener("abort", () => clearTimeout(timer), { once: true })
-  return ctl.signal
-}
-
-// json asks one of ModelScope's web endpoints as the account.
-async function json(token, path, signal) {
-  const res = await fetch(SITE + path, {
-    headers: {
-      Cookie: "m_session_id=" + token,
-      "User-Agent": UA,
-      Referer: SITE + "/",
-      Accept: "application/json",
-    },
-    signal: timedAbort(signal),
-  })
-  let body = {}
   try {
-    body = await res.json()
-  } catch {}
-  return { res, body }
+    const res = await fetch(SITE + path, {
+      headers: {
+        Cookie: "m_session_id=" + token,
+        "User-Agent": UA,
+        Referer: SITE + "/",
+        Accept: "application/json",
+      },
+      signal: ctl.signal,
+    })
+    const text = await readBounded(res)
+    let body = null
+    try {
+      body = text ? JSON.parse(text) : {}
+    } catch {}
+    return { res, body, parsed: body !== null }
+  } finally {
+    // the answer is here: the timer has nothing left to guard, and one left
+    // pending would hold the host's event loop open after the work is done
+    clearTimeout(timer)
+  }
 }
 
-// okOf reads either envelope ModelScope uses: {success} or {Code: 200}.
+// MAX_BODY is how much of a response is read. ModelScope's answers are a few
+// kilobytes; a proxy's error page or a hostile endpoint must not be able to
+// take the plugin host's memory with it (magpie itself caps its own upstream
+// reads at 1MiB).
+const MAX_BODY = 256 * 1024
+
+// readBounded reads a response's text, refusing one that is too large.
+async function readBounded(res) {
+  const declared = Number(res.headers?.get?.("content-length") ?? NaN)
+  if (Number.isFinite(declared) && declared > MAX_BODY) throw new Error(`响应过大（${declared} 字节）`)
+  if (!res.body) {
+    const text = await res.text()
+    if (text.length > MAX_BODY) throw new Error("响应过大")
+    return text
+  }
+  const reader = res.body.getReader()
+  const chunks = []
+  let size = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      size += value.byteLength
+      if (size > MAX_BODY) {
+        await reader.cancel()
+        throw new Error("响应过大")
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock?.()
+  }
+  const merged = new Uint8Array(size)
+  let at = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, at)
+    at += chunk.byteLength
+  }
+  return new TextDecoder().decode(merged)
+}
+
+// okOf reads either envelope ModelScope uses: {success} or {Code: 200}. A
+// body with neither is not an answer we understand — a proxy's error page, a
+// captive portal, an empty reply — and must not pass for a success.
 const okOf = (body) => {
   if (typeof body?.success === "boolean") return body.success
   if (typeof body?.Success === "boolean") return body.Success
   const code = body?.Code ?? body?.code
-  return code === undefined || String(code) === "200"
+  return code !== undefined && String(code) === "200"
 }
 
 const saidOf = (body) => String(body?.message ?? body?.Message ?? body?.msg ?? body?.code ?? "")
@@ -99,18 +152,31 @@ function cnTime(text) {
 // restarts and comes back with the next check-in; it is not worth keeping the
 // token on disk for.
 const names = new Map()
+const NAMES_MAX = 8
+
+function rememberName(token, name) {
+  if (!name) return
+  const h = handleOf(token)
+  names.delete(h)
+  names.set(h, name)
+  while (names.size > NAMES_MAX) names.delete(names.keys().next().value)
+}
 
 const signedOut = (e) => Boolean(e?.signIn === "expired" || e?.expired)
 
 function fail(status) {
-  return Object.assign(new Error(`HTTP ${status}`), { signIn: status === 401 || status === 403 ? "expired" : "" })
+  return Object.assign(new Error(`HTTP ${status}`), { signIn: status === 401 ? "expired" : "" })
 }
 
 // todayEarn are today's credit grants, by the day ModelScope records them.
-async function todayEarn(token, signal) {
-  const { res, body } = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, signal)
-  if (res.status === 401 || res.status === 403) throw Object.assign(new Error("令牌失效或不属于国内站"), { signIn: "expired" })
-  if (res.status !== 200 || !okOf(body)) throw new Error(`账单查询失败：${saidOf(body) || `HTTP ${res.status}`}`)
+async function todayEarn(token) {
+  const { res, body, parsed } = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`)
+  if (res.status === 401) throw Object.assign(new Error("令牌失效或不属于国内站"), { signIn: "expired" })
+  // 403 is ModelScope's risk control, not a bad token: the account may be
+  // perfectly fine and only the request was refused.
+  if (res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
+  if (res.status !== 200 || !parsed) throw new Error(`账单查询失败：响应不是 JSON（HTTP ${res.status}）`)
+  if (!okOf(body)) throw new Error(`账单查询失败：${saidOf(body) || `HTTP ${res.status}`}`)
   const day = todayCN()
   return recordsOf(body).filter((r) => r?.type === "EARN" && r?.gmt_created === day)
 }
@@ -146,15 +212,18 @@ export async function MsmoliPlugin(_input) {
           const before = await todayEarn(token)
           const claimed = before.some((r) => r?.rule_key === "daily_active")
 
-          const { res, body } = await json(token, LOGIN_INFO)
-          if (res.status === 401 || res.status === 403)
-            return { outcome: "failed", message: `令牌失效或不属于国内站（HTTP ${res.status}）`, signIn: "expired" }
-          if (res.status !== 200 || !okOf(body))
-            return { outcome: "failed", message: `登录接口失败：${saidOf(body) || `HTTP ${res.status}`}` }
+          const { res, body, parsed } = await json(token, LOGIN_INFO)
+          if (res.status === 401)
+            return { outcome: "failed", message: "令牌失效或不属于国内站（HTTP 401）", signIn: "expired" }
+          // 403 是风控，不是令牌坏了：账号可能是好的，只是这次请求被拒
+          if (res.status === 403) return { outcome: "failed", message: "被魔搭风控拒绝（HTTP 403），稍后会自动重试" }
+          if (res.status !== 200 || !parsed)
+            return { outcome: "failed", message: `登录接口失败：响应不是 JSON（HTTP ${res.status}）` }
+          if (!okOf(body)) return { outcome: "failed", message: `登录接口失败：${saidOf(body) || `HTTP ${res.status}`}` }
 
           const me = dataOf(body)
           const name = String(me.NickName || me.Name || "")
-          if (name) names.set(token, name)
+          rememberName(token, name)
 
           const daily = (await todayEarn(token)).filter((r) => DAILY_RULES.includes(r?.rule_key))
           const credit = sumOf(daily)
@@ -166,6 +235,15 @@ export async function MsmoliPlugin(_input) {
           if (daily.length) {
             const which = daily.map((r) => `${r.title} +${r.total_amount}`).join("，")
             return { outcome: "claimed", credit, message: `领取 ${credit} 魔粒：${which}` }
+          }
+          // 触达了却没有到账记录：可能是账本还没写出来（发放是异步的），
+          // 也可能这个账号本来就不在活动范围。magpie 把 inactive 当作当天
+          // 已了结、不再重试，所以再读一次账本确认，别把晚到的发放丢掉。
+          const later = (await todayEarn(token)).filter((r) => DAILY_RULES.includes(r?.rule_key))
+          if (later.length) {
+            const credit2 = sumOf(later)
+            const which = later.map((r) => `${r.title} +${r.total_amount}`).join("，")
+            return { outcome: "claimed", credit: credit2, message: `领取 ${credit2} 魔粒：${which}` }
           }
           return { outcome: "inactive", message: "登录已触达，但今天没有到账记录（账号可能不在活动范围）" }
         } catch (e) {
@@ -179,13 +257,17 @@ export async function MsmoliPlugin(_input) {
         if (!token) throw new Error("没有登录信息")
         try {
           const bal = await json(token, BALANCE)
-          if (bal.res.status === 401 || bal.res.status === 403) throw fail(bal.res.status)
-          if (bal.res.status !== 200 || !okOf(bal.body)) throw new Error(`余额查询失败：${saidOf(bal.body) || `HTTP ${bal.res.status}`}`)
+          if (bal.res.status === 401) throw fail(bal.res.status)
+          if (bal.res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
+          if (bal.res.status !== 200 || !bal.parsed) throw new Error(`余额查询失败：响应不是 JSON（HTTP ${bal.res.status}）`)
+          if (!okOf(bal.body)) throw new Error(`余额查询失败：${saidOf(bal.body) || `HTTP ${bal.res.status}`}`)
           const available = Number(dataOf(bal.body).available_balance) || 0
 
           const tx = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`)
-          if (tx.res.status === 401 || tx.res.status === 403) throw fail(tx.res.status)
-          if (tx.res.status !== 200 || !okOf(tx.body)) throw new Error(`账单查询失败：${saidOf(tx.body) || `HTTP ${tx.res.status}`}`)
+          if (tx.res.status === 401) throw fail(tx.res.status)
+          if (tx.res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
+          if (tx.res.status !== 200 || !tx.parsed) throw new Error(`账单查询失败：响应不是 JSON（HTTP ${tx.res.status}）`)
+          if (!okOf(tx.body)) throw new Error(`账单查询失败：${saidOf(tx.body) || `HTTP ${tx.res.status}`}`)
 
           const day = todayCN()
           let earned = 0
@@ -209,7 +291,7 @@ export async function MsmoliPlugin(_input) {
 
           return {
             plan: "魔搭社区",
-            user: names.get(token) ?? "",
+            user: names.get(handleOf(token)) ?? "",
             balance: `${available} 魔粒可用`,
             windows: [
               {

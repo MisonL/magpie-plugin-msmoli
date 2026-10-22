@@ -106,8 +106,10 @@ sends it anywhere but `modelscope.cn`.
 
 ## Scope and limits
 
-- One account's own daily grant: one request per account per day, idempotent,
-  no concurrency, no polling.
+- One account's own daily grant, idempotent: a check-in reads the ledger, touches
+the sign-in endpoint, and reads the ledger again (three requests, once a day).
+The usage read makes two requests and never touches the sign-in endpoint, so the
+menu bar's polling cannot turn into check-ins.
 - The other 170 魔粒 a day come from liking 10 items (20), posting AIGC works
   (100) and AIGC models (50). None of those have an API, and automating them
   means driving the web UI, so this plugin does not touch them.
