@@ -11,6 +11,10 @@
 // 本插件不提供任何聊天模型：推理仍走 providers.json 里 API key 版的
 // modelscope 预设。这个 provider 只为承载签到所需的登录态而存在。
 
+import { readFileSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
+
 const SITE = "https://modelscope.cn"
 const LOGIN_INFO = "/api/v1/users/login/info"
 const BALANCE = "/openapi/v1/magicubes/balance"
@@ -37,14 +41,16 @@ const tokenOf = (auth) => {
 
 // handleOf is a short, non-reversible stand-in for the token, so the caches
 // below never hold the secret itself.
-function handleOf(token) {
+const fnv = (text) => {
   let h = 0x811c9dc5
-  for (let i = 0; i < token.length; i++) {
-    h ^= token.charCodeAt(i)
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i)
     h = Math.imul(h, 0x01000193) >>> 0
   }
-  return h.toString(16)
+  return h
 }
+
+const handleOf = (token) => fnv(token).toString(16)
 
 // json asks one of ModelScope's web endpoints as the account. The timeout is
 // its own: magpie gives a usage read 20s in total, and this plugin makes two
@@ -146,6 +152,74 @@ function cnTime(text) {
   return Number.isFinite(at) ? new Date(at).toISOString() : ""
 }
 
+// ── 签到时段 ──────────────────────────────────────────────────────────────
+// magpie 在北京日切换时问一次，之后每 30 分钟重试一次失败；插件没有自己的
+// 定时器（见 README 的「上游」一节）。所以在还没到今天这个账号的目标时刻
+// 时，只能回答 failed——那是宿主唯一会重试的结果——其余结果都会让当天就此
+// 了结。夜里这一问一答不发出任何请求，领的动作留给上班时段的那一问。
+const WINDOW_DEFAULT = ["08:30", "10:00"]
+
+const CONFIG_ENV = "MAGPIE_MSMOLI_CONFIG"
+
+function configPath() {
+  if (process.env[CONFIG_ENV]) return process.env[CONFIG_ENV]
+  const dir = process.env.XDG_CONFIG_HOME
+    ? join(process.env.XDG_CONFIG_HOME, "magpie")
+    : join(homedir(), ".config", "magpie")
+  return join(dir, "msmoli.json")
+}
+
+// configOf reads the user's overrides, hot each call so a change reaches the
+// next ask without restarting magpie. Anything unreadable or not an object
+// is nothing.
+function configOf() {
+  try {
+    const raw = JSON.parse(readFileSync(configPath(), "utf8"))
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}
+  } catch {
+    return {}
+  }
+}
+
+// minuteOf reads "HH:MM" as minutes after midnight, null for anything else.
+function minuteOf(text) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(text ?? "").trim())
+  if (!m) return null
+  const h = +m[1]
+  const mi = +m[2]
+  return h < 24 && mi < 60 ? h * 60 + mi : null
+}
+
+// windowOf is the check-in window as [start, end) minutes after Beijing
+// midnight, or null when it is off. An unworkable value (bad clock time,
+// start not before end) is not honoured: the documented default applies,
+// whatever the user meant.
+function windowOf(cfg) {
+  if (cfg.checkinWindow === false) return null
+  const raw = Array.isArray(cfg.checkinWindow) ? cfg.checkinWindow : WINDOW_DEFAULT
+  const start = minuteOf(raw[0])
+  const end = minuteOf(raw[1])
+  if (start === null || end === null || start >= end) return { start: 8 * 60 + 30, end: 10 * 60 }
+  return { start, end }
+}
+
+// minuteCN reads the clock in Beijing, the day ModelScope grants in, whatever
+// zone the host runs in.
+function minuteCN(now = Date.now()) {
+  const d = new Date(now + 8 * 3600e3)
+  return d.getUTCHours() * 60 + d.getUTCMinutes()
+}
+
+const clock = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`
+
+// plan is the account's check-in for `day`: the moment in the window it
+// claims at (fixed per day and account, so the 30-minute re-asks agree) and
+// whether that moment has passed. token only feeds the hash.
+function plan(win, token, day) {
+  const target = win.start + (fnv(day + "|" + handleOf(token)) % (win.end - win.start))
+  return { win, target, due: minuteCN() >= target }
+}
+
 // names holds the display name read at check-in, by token. login/info is also
 // the check-in trigger, so the usage poll (the menu bar asks every few
 // minutes) must never reach it. The name is empty for a while after the host
@@ -205,9 +279,27 @@ export async function MsmoliPlugin(_input) {
 
       // 签到：先看今天到账没有，再触达登录，最后回读对账。直接触达无法区分
       // 「本次领取」与「早就领过」，而账单能。
+      //
+      // 时段：被问到时若还没到今天这个账号的目标时刻，就在发任何请求之前
+      // 回答 failed——唯一会被宿主重试的结果，别的都会让当天不再被问。
+      // 代价是这段时间卡片上写着「签到失败；magpie 稍后重试」，那是今天
+      // 宿主唯一能表达「还没到点」的说法（上游见 README）。
       async checkin(getAuth) {
         const token = tokenOf(await getAuth())
         if (!token) return { outcome: "failed", message: "没有登录信息，请先登录" }
+
+        const win = windowOf(configOf())
+        if (win) {
+          const day = todayCN()
+          const p = plan(win, token, day)
+          if (!p.due) {
+            return {
+              outcome: "failed",
+              message: `未到签到时段：今日 ${clock(p.target)} 起领取（${clock(win.start)}–${clock(win.end)}，改 msmoli.json 调整）`,
+            }
+          }
+        }
+
         try {
           const before = await todayEarn(token)
           const claimed = before.some((r) => r?.rule_key === "daily_active")
@@ -289,6 +381,12 @@ export async function MsmoliPlugin(_input) {
           // 且余额为零，才算用尽。
           const used = earned > 0 ? (spent / earned) * 100 : available > 0 ? 0 : 100
 
+          // 今天还没领到时，把时段里的目标时刻写在卡片上，别让「领 0」
+          // 看起来像是出了问题。
+          const win = windowOf(configOf())
+          const ahead = win && earned === 0 ? plan(win, token, day) : null
+          const hint = ahead && !ahead.due ? ` · ${clock(ahead.target)} 领取` : ""
+
           return {
             plan: "魔搭社区",
             user: names.get(handleOf(token)) ?? "",
@@ -297,7 +395,7 @@ export async function MsmoliPlugin(_input) {
               {
                 name: "魔粒",
                 used,
-                display: `今日用 ${spent} / 领 ${earned} · 余额 ${available}`,
+                display: `今日用 ${spent} / 领 ${earned} · 余额 ${available}${hint}`,
                 amount: spent,
                 limit: earned,
                 unit: "魔粒",

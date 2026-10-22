@@ -27,12 +27,13 @@ token on disk twice (see `save()` in magpie's `host.js`).
 ## Development
 
 ```bash
-node --test test/          # the suite, no network
-node --test test/plugin.test.mjs
+node --test                # the whole suite, no network
 ```
 
 The tests stub `fetch`; nothing here talks to ModelScope. Fixtures follow the
-clock, so they don't expire on a given day.
+clock, so they don't expire on a given day. The check-in window reads a config
+file the host would keep at `~/.config/magpie/msmoli.json`; the suite points
+`MAGPIE_MSMOLI_CONFIG` at a temp file so it never reads or writes a real one.
 
 ## Against the real API
 
@@ -55,3 +56,11 @@ magpie accounts | grep msmoli
   which is what it is.
 - **ModelScope's times are parsed as Beijing time.** They carry no zone, and
   `new Date()` would read them in the host's own zone.
+- **Before the check-in window's moment, the hook answers `failed`.** magpie
+  retries `failed` and settles on every other outcome, so that is the only way
+  a plugin can say "ask me again later". Don't "fix" it to `inactive`: the day
+  would then be over without the credits ever being claimed. `test/plugin.test.mjs`
+  pins both halves (nothing sent before the moment, a claim after it).
+- **The window's target minute is derived, not stored.** It is a hash of the
+  day and the account, so the 30-minute re-asks agree without a state file, and
+  a host restart doesn't move it.

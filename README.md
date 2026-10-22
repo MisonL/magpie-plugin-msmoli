@@ -80,6 +80,46 @@ The endpoints it uses, all on `modelscope.cn` with `Cookie: m_session_id=ms-…`
 
 `type` in the ledger is one of `EARN`, `SPEND_CONFIRM`, `EXPIRE`.
 
+### When it claims: the check-in window
+
+The claim is held back until a time of day, by default somewhere in
+**08:30–10:00 Beijing time** — an account's own minute in that window,
+picked from a hash of the day and the account, so it doesn't move between
+the host's retries. It makes the traffic look like a person opening the
+site in the morning rather than at the stroke of midnight.
+
+Waiting costs nothing: daily grants **expire 24 hours after they land**
+(a grant at 15:35 expires at 15:35 the next day), so claiming at 9am leaves
+the credits good until 9am tomorrow.
+
+Set it in `~/.config/magpie/msmoli.json`:
+
+```json
+{ "checkinWindow": ["08:30", "10:00"] }
+```
+
+`false` turns the window off (claim whenever magpie asks). An unusable value
+— `08:30`–`08:00`, a date that isn't a clock time — falls back to the default
+rather than never claiming. The file is read on every ask, so a change takes
+effect without restarting magpie.
+
+How it fits magpie's schedule: magpie asks once when the Beijing day turns
+and re-asks every 30 minutes **after a failure** — `failed` is the only
+outcome it retries; everything else settles the day. So before the window's
+moment the plugin answers `failed` with the time it will run, and sends
+**no request at all**. The card reads "签到失败 · 未到签到时段" until then,
+which is what magpie's own wording for a failure looks like.
+
+### Upstream
+
+magpie gives a plugin no timer, no clock, and no say in when it is called:
+`auth.checkin(getAuth, info)` returns an outcome and the host decides when
+to ask again. Everything above is worked around within that contract, and
+the awkward parts (proving "not yet" as a failure, whole-day granularity for
+the account card) want a line in
+[this issue](https://github.com/yetone/magpie/issues/3231) proposing timers and
+`recheck` for plugins.
+
 ## Why its own provider, with no models
 
 The plugin registers `msmoli` rather than taking over the built-in `modelscope`
@@ -108,6 +148,7 @@ sends it anywhere but `modelscope.cn`.
 
 - One account's own daily grant, idempotent: a check-in reads the ledger, touches
 the sign-in endpoint, and reads the ledger again (three requests, once a day).
+Asks that arrive before the window open send nothing at all.
 The usage read makes two requests and never touches the sign-in endpoint, so the
 menu bar's polling cannot turn into check-ins.
 - The other 170 魔粒 a day come from liking 10 items (20), posting AIGC works

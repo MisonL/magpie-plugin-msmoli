@@ -4,8 +4,34 @@
 
 import assert from "node:assert/strict"
 import { test } from "node:test"
+import { writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 import { MsmoliPlugin } from "../index.mjs"
+
+// The check-in window reads its own config file, which the host would keep at
+// ~/.config/magpie/msmoli.json. Tests point it at a temp file so the suite
+// doesn't depend on (or touch) a real one, and start with the window off, the
+// way a user would have it who wants the claim as soon as magpie asks.
+const TEST_CONFIG = join(tmpdir(), `msmoli-test-${process.pid}.json`)
+process.env.MAGPIE_MSMOLI_CONFIG = TEST_CONFIG
+writeFileSync(TEST_CONFIG, JSON.stringify({ checkinWindow: false }))
+
+// withWindow sets the window for a test and puts the clock where it says, so
+// "before the window" and "after it" don't depend on when the suite runs.
+const withWindow = async (window, cn, fn) => {
+  writeFileSync(TEST_CONFIG, JSON.stringify({ checkinWindow: window }))
+  const at = Date.parse(cn.replace(" ", "T") + "+08:00")
+  const realNow = Date.now
+  Date.now = () => at
+  try {
+    return await fn()
+  } finally {
+    Date.now = realNow
+    writeFileSync(TEST_CONFIG, JSON.stringify({ checkinWindow: false }))
+  }
+}
 
 const hooks = await MsmoliPlugin({})
 const auth = hooks.auth
@@ -352,4 +378,121 @@ test("a response too large to read is refused", async () => {
       assert.match(u.error, /过大/)
     },
   )
+})
+
+// ── 签到时段 ──────────────────────────────────────────────────────────────
+// failed 是宿主唯一会重试的结果：没到点的回答必须是它，别的都会让当天不再
+// 被问。没到点的那一次不该发出任何请求。
+test("before the window the check-in asks for nothing and answers failed", async () => {
+  await withWindow(["08:30", "10:00"], `${today} 07:00:00`, async () => {
+    let asked = 0
+    const real = globalThis.fetch
+    globalThis.fetch = async () => {
+      asked += 1
+      return reply({ body: { success: true, data: { records: [] } } })
+    }
+    try {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "failed")
+      assert.match(r.message, /未到签到时段/)
+      assert.match(r.message, /09:\d\d/, "the message says when today's claim will run")
+      assert.equal(asked, 0, "nothing may be sent before the window")
+    } finally {
+      globalThis.fetch = real
+    }
+  })
+})
+
+test("after the window opens the check-in claims as usual", async () => {
+  await withWindow(["08:30", "10:00"], `${today} 09:59:00`, async () => {
+    // the claim's own target falls anywhere in the window; 09:59 is after
+    // every one of them only if the window ends at 10:00 — assert the gate
+    // passes by driving a full claim.
+    const body = { success: true, data: { records: [day(), day({ rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50 })] } }
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      },
+      async () => {
+        const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+        // today already has daily_active, so past the gate it settles as done
+        assert.equal(r.outcome, "done")
+        assert.match(r.message, /已领取/)
+      },
+    )
+  })
+})
+
+test("checkinWindow off claims at once, as if there were no window", async () => {
+  await withWindow(false, `${today} 02:00:00`, async () => {
+    const body = { success: true, data: { records: [day()] } }
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      },
+      async () => {
+        const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+        assert.equal(r.outcome, "done", "off means the claim runs whenever magpie asks")
+      },
+    )
+  })
+})
+
+test("an unusable window falls back to the default instead of never claiming", async () => {
+  // start after end: honored, the account would never be due — so the default
+  await withWindow(["10:00", "08:30"], `${today} 02:00:00`, async () => {
+    let asked = 0
+    const real = globalThis.fetch
+    globalThis.fetch = async () => {
+      asked += 1
+      return reply({ body: { success: true, data: { records: [] } } })
+    }
+    try {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "failed")
+      // 02:00 is before the default window's earliest moment (08:30)
+      assert.match(r.message, /08:30–10:00/)
+      assert.equal(asked, 0)
+    } finally {
+      globalThis.fetch = real
+    }
+  })
+})
+
+test("the usage card says when the day's claim will run", async () => {
+  await withWindow(["08:30", "10:00"], `${today} 07:30:00`, async () => {
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 0 } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+        assert.match(u.windows[0].display, /· 0[89]:\d\d 领取/)
+      },
+    )
+  })
+})
+
+test("the same account's target minute is stable within a day", async () => {
+  // the host re-asks every 30 minutes; a target that moved between asks would
+  // make the window meaningless
+  await withWindow(["08:30", "10:00"], `${today} 06:00:00`, async () => {
+    const seen = new Set()
+    const real = globalThis.fetch
+    globalThis.fetch = async () => reply({ body: { success: true, data: { records: [] } } })
+    try {
+      for (let i = 0; i < 6; i++) {
+        const r = await auth.checkin(async () => ({ type: "api", key: "ms-stable" }))
+        const m = /今日 (\d{2}:\d{2}) 起领取/.exec(r.message)
+        assert.ok(m, `message should carry the target: ${r.message}`)
+        seen.add(m[1])
+      }
+      assert.equal(seen.size, 1, `one target per day per account, saw ${[...seen]}`)
+    } finally {
+      globalThis.fetch = real
+    }
+  })
 })
