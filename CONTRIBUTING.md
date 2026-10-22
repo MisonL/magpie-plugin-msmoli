@@ -65,3 +65,14 @@ magpie accounts | grep msmoli
 - **The window's target minute is derived, not stored.** It is a hash of the
   day and the account, so the 30-minute re-asks agree without a state file, and
   a host restart doesn't move it.
+- **The window's end is capped at 23:30 (`LAST`).** magpie asks again 30
+  minutes after a failure. A target in the day's last half hour can therefore
+  have no ask left on its own day — the next one is after midnight, when both
+  the host's day and the hashed target have moved on — and the day's credits
+  are lost. `test/plugin.test.mjs` pins the cap.
+- **`failed` before the window costs something, and the docs should say so.**
+  The card shows a red dot and magpie's own "check-in failed; tries again
+  later" wording for the hours before the window (about a third of the day at
+  the default), each such ask rewrites `plugin-checkin.json`, and
+  `magpie accounts checkin` run before the window exits non-zero. That is the
+  price of the only deferral an outcome offers.

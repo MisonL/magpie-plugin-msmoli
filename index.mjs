@@ -184,6 +184,13 @@ function cnTime(value) {
 // 了结。夜里这一问一答不发出任何请求，领的动作留给上班时段的那一问。
 const WINDOW_DEFAULT = ["08:30", "10:00"]
 
+// LAST is the latest minute of the day a target may fall on. The host asks
+// again 30 minutes after a failure, and a new Beijing day starts settled
+// afresh with a new target, so a target in the last half hour can have no ask
+// left on its own day: the claim would be lost and the card would say failed
+// all day.
+const LAST = 23 * 60 + 30
+
 const CONFIG_ENV = "MAGPIE_MSMOLI_CONFIG"
 
 // configPath is where the user's overrides live: beside magpie's own files,
@@ -229,8 +236,12 @@ function windowOf(cfg) {
   const raw = cfg.checkinWindow
   const pair = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(/[-–—~至]/) : WINDOW_DEFAULT
   const start = minuteOf(pair[0])
-  const end = minuteOf(pair[1])
+  let end = minuteOf(pair[1])
   if (start === null || end === null || start >= end) return { start: 8 * 60 + 30, end: 10 * 60 }
+  if (end > LAST) {
+    end = LAST
+    if (start >= end) return { start: 8 * 60 + 30, end: 10 * 60 }
+  }
   return { start, end }
 }
 

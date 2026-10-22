@@ -580,6 +580,52 @@ test("the window written as one string is honored, not ignored", async () => {
   })
 })
 
+test("a window reaching into the last half hour is capped, so the claim keeps an ask", async () => {
+  // the host asks again 30 minutes after a failure; a target in the last half
+  // hour of the day has no ask left before the day (and the target) resets, so
+  // the claim would be lost and the card would read failed until midnight
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-late-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: ["22:00", "23:59"] }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const late = await MsmoliPlugin({ directory: dir })
+    const at = Date.parse(`${today} 22:05:00`.replace(" ", "T") + "+08:00")
+    const realNow = Date.now
+    Date.now = () => at
+    const realFetch = globalThis.fetch
+    globalThis.fetch = async () => reply({ body: { success: true, data: { records: [] } } })
+    try {
+      const r = await late.auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.match(r.message, /22:00–23:30/, "the window is reported as capped")
+      const m = /今日 (\d{2}):(\d{2}) 起领取/.exec(r.message)
+      assert.ok(m, `the target should be carried: ${r.message}`)
+      assert.ok(+m[1] * 60 + +m[2] <= 23 * 60 + 30, `target ${m[1]}:${m[2]} must leave an ask before midnight`)
+    } finally {
+      Date.now = realNow
+      globalThis.fetch = realFetch
+    }
+    // the last minute of the day: whatever the capped target is, it is past
+    const late2 = Date.parse(`${today} 23:59:00`.replace(" ", "T") + "+08:00")
+    Date.now = () => late2
+    let asked = 0
+    globalThis.fetch = async () => {
+      asked += 1
+      return reply({ body: { success: true, data: { records: [] } } })
+    }
+    try {
+      await late.auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.ok(asked > 0, "a capped window must still claim on its own day")
+    } finally {
+      Date.now = realNow
+      globalThis.fetch = realFetch
+    }
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
 test("the usage card says when the day's claim will run", async () => {
   await withWindow(["08:30", "10:00"], `${today} 07:30:00`, async () => {
     await withFetch(

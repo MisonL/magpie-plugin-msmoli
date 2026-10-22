@@ -103,15 +103,24 @@ One string works the same way: `{ "checkinWindow": "08:30-10:00" }`.
 
 `false` turns the window off (claim whenever magpie asks). An unusable value
 — `08:30`–`08:00`, a date that isn't a clock time — falls back to the default
-rather than never claiming. The file is read on every ask, so a change takes
-effect without restarting magpie.
+rather than never claiming. An end past **23:30** is capped there: magpie asks
+again half an hour after a failure, so a target in the day's last half hour
+could have no ask left before midnight reset the day and the target with it.
+The file is read on every ask, so a change takes effect without restarting
+magpie.
 
 How it fits magpie's schedule: magpie asks once when the Beijing day turns
 and re-asks every 30 minutes **after a failure** — `failed` is the only
 outcome it retries; everything else settles the day. So before the window's
 moment the plugin answers `failed` with the time it will run, and sends
-**no request at all**. The card reads "签到失败 · 未到签到时段" until then,
-which is what magpie's own wording for a failure looks like.
+**no request at all**.
+
+What that costs, since a plugin has no other way to defer: until the window
+opens the account card shows a red dot and magpie's own "check-in failed;
+magpie tries again later" wording (about a third of the day at the default
+08:30), each of those asks rewrites magpie's `plugin-checkin.json`, and
+`magpie accounts checkin` run in that period exits non-zero. Turning the
+window off removes all three.
 
 ### Upstream
 
