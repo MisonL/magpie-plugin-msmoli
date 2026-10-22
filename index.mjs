@@ -191,14 +191,16 @@ function minuteOf(text) {
 }
 
 // windowOf is the check-in window as [start, end) minutes after Beijing
-// midnight, or null when it is off. An unworkable value (bad clock time,
-// start not before end) is not honoured: the documented default applies,
-// whatever the user meant.
+// midnight, or null when it is off. Both `["08:30", "10:00"]` and
+// `"08:30-10:00"` are read; an unworkable value (bad clock time, start not
+// before end) is not honoured, the documented default applying instead of a
+// window that would never come due.
 function windowOf(cfg) {
   if (cfg.checkinWindow === false) return null
-  const raw = Array.isArray(cfg.checkinWindow) ? cfg.checkinWindow : WINDOW_DEFAULT
-  const start = minuteOf(raw[0])
-  const end = minuteOf(raw[1])
+  const raw = cfg.checkinWindow
+  const pair = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(/[-–—~至]/) : WINDOW_DEFAULT
+  const start = minuteOf(pair[0])
+  const end = minuteOf(pair[1])
   if (start === null || end === null || start >= end) return { start: 8 * 60 + 30, end: 10 * 60 }
   return { start, end }
 }
@@ -217,7 +219,7 @@ const clock = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m 
 // whether that moment has passed. token only feeds the hash.
 function plan(win, token, day) {
   const target = win.start + (fnv(day + "|" + handleOf(token)) % (win.end - win.start))
-  return { win, target, due: minuteCN() >= target }
+  return { target, due: minuteCN() >= target }
 }
 
 // names holds the display name read at check-in, by token. login/info is also

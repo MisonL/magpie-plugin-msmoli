@@ -461,6 +461,39 @@ test("an unusable window falls back to the default instead of never claiming", a
   })
 })
 
+test("the window written as one string is honored, not ignored", async () => {
+  // "13:00-14:00" is a different window from the default, so this tells the
+  // string form apart from "unreadable value": 12:00 is outside it but inside
+  // 08:30-10:00, and 13:30 is inside it.
+  const count = async (cn) => {
+    let asked = 0
+    const real = globalThis.fetch
+    globalThis.fetch = async () => {
+      asked += 1
+      return reply({ body: { success: true, data: { records: [] } } })
+    }
+    try {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      return { asked, r }
+    } finally {
+      globalThis.fetch = real
+    }
+  }
+
+  await withWindow("13:00-14:00", `${today} 12:00:00`, async () => {
+    const { asked, r } = await count()
+    assert.equal(r.outcome, "failed")
+    assert.match(r.message, /13:00–14:00/, "the card should name the window that was set")
+    assert.equal(asked, 0)
+  })
+
+  // 14:30 is past every target in 13:00-14:00, so the claim must run there.
+  await withWindow("13:00-14:00", `${today} 14:30:00`, async () => {
+    const { asked } = await count()
+    assert.ok(asked > 0, "once the window has passed the claim runs")
+  })
+})
+
 test("the usage card says when the day's claim will run", async () => {
   await withWindow(["08:30", "10:00"], `${today} 07:30:00`, async () => {
     await withFetch(
