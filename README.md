@@ -98,6 +98,8 @@ Set it in `~/.config/magpie/msmoli.json`:
 { "checkinWindow": ["08:30", "10:00"] }
 ```
 
+One string works the same way: `{ "checkinWindow": "08:30-10:00" }`.
+
 `false` turns the window off (claim whenever magpie asks). An unusable value
 — `08:30`–`08:00`, a date that isn't a clock time — falls back to the default
 rather than never claiming. The file is read on every ask, so a change takes
