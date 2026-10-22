@@ -1,0 +1,32 @@
+{
+  "name": "magpie-plugin-msmoli",
+  "version": "0.1.0",
+  "description": "ModelScope (魔搭) 魔粒 daily check-in and balance for magpie — one request a day instead of opening the site",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "opencode-plugin",
+    "modelscope",
+    "magicube",
+    "checkin"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "magpie": {
+    "icon": "https://modelscope.cn/favicon.ico"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
