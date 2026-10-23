@@ -20,8 +20,25 @@ lightweight 0.5), so the daily 250 is roughly 125 calls.
 
 ## Install
 
-Needs magpie itself (<https://usemagpie.ai>) with `magpie` on your `PATH`; check
-with `magpie --version`.
+Needs magpie itself (<https://usemagpie.ai>). On macOS, use `magpie --version` to check it's on PATH; if not, use the app's full path:
+`/Applications/Magpie.app/Contents/MacOS/magpie`.
+
+### Install via GitHub URL (no clone, auto-updates)
+
+This installs into magpie's own plugin folder (`~/.config/magpie/plugins` for a regular install, or `data/plugins` for the portable version), so it updates with `magpie plugin update`.
+
+```bash
+magpie plugin add github:MisonL/magpie-plugin-msmoli
+printf 'ms-your-token\n' | magpie plugin login msmoli
+```
+
+The token is stored in `plugin-auth.json`; one login works regardless of the form you used to install.
+
+### Install from a clone
+
+Keeps your own copy, which is what you want if you plan to change it. magpie
+references the folder where it lies rather than copying it, so it loads only
+while that folder is there, and an update means pulling and adding it again.
 
 ```bash
 git clone https://github.com/MisonL/magpie-plugin-msmoli.git
@@ -29,6 +46,10 @@ cd magpie-plugin-msmoli
 magpie plugin add "$PWD"
 printf 'ms-your-token\n' | magpie plugin login msmoli
 ```
+
+Either form ends the same way: a `msmoli` row under Settings → Usage → Plugins.
+The sign-in is kept per package name rather than per folder, so switching
+between the two forms (or moving the clone) keeps the token — no second login.
 
 Then turn the check-in on: Settings → Usage → Plugins → the `msmoli` row, or in
 `settings.json` (in magpie's own folder, `~/.config/magpie` for an installed

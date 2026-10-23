@@ -16,7 +16,23 @@ ModelScope 的 API-Inference 是免费的，用魔粒结算：
 
 ## 安装
 
-需要先装好 magpie（<https://usemagpie.ai>），并让 `magpie` 命令在 `PATH` 上；用 `magpie --version` 确认。
+需要先装好 magpie（<https://usemagpie.ai>）。macOS 上用 `magpie --version` 确认命令在 `PATH` 上；
+不在的话用 app 里的完整路径 `/Applications/Magpie.app/Contents/MacOS/magpie`。
+
+### 方式一：直接从 GitHub 装（不用 clone，能跟着更新）
+
+装进 magpie 自己的插件目录（安装版是 `~/.config/magpie/plugins`，便携版是 data 目录下的 `plugins`），
+以后 `magpie plugin update` 就能更新：
+
+```bash
+magpie plugin add github:MisonL/magpie-plugin-msmoli
+printf 'ms-你的令牌\n' | magpie plugin login msmoli
+```
+
+### 方式二：clone 到本地再装
+
+留一份自己的副本，打算改代码就用这种。magpie 是**按位置引用**这个文件夹而不是拷走，
+所以文件夹不在（比如外置盘没挂）插件就加载不了，更新也得先 pull 再 add 一次：
 
 ```bash
 git clone https://github.com/MisonL/magpie-plugin-msmoli.git
@@ -25,7 +41,11 @@ magpie plugin add "$PWD"
 printf 'ms-你的令牌\n' | magpie plugin login msmoli
 ```
 
-然后把签到打开：设置 → 用量 → 插件 → `msmoli` 那一行，或者改 `settings.json`
+两种方式结果一样：设置 → 用量 → 插件 里多出 `msmoli` 一行。登录态是按 provider 名
+（`msmoli`）存的、不绑文件夹，所以两种方式之间切换、或把 clone 挪个位置，都不用重新登录。
+
+然后
+把签到打开：设置 → 用量 → 插件 → `msmoli` 那一行，或者改 `settings.json`
 （在 magpie 自己的目录里，安装版是 `~/.config/magpie`）：
 
 ```json
