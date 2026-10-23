@@ -103,11 +103,13 @@ package's `opencode-plugin` and `magpie-plugin` keywords are what put it there.
 - **The window's target minute is derived, not stored.** It is a hash of the
   day and the account, so the 30-minute re-asks agree without a state file, and
   a host restart doesn't move it.
-- **The window's end is capped at 23:30 (`LAST`).** magpie asks again 30
-  minutes after a failure. A target in the day's last half hour can therefore
-  have no ask left on its own day — the next one is after midnight, when both
-  the host's day and the hashed target have moved on — and the day's credits
-  are lost. `test/plugin.test.mjs` pins the cap.
+- **The window's end is capped at 23:00 (`LAST`).** magpie asks again 30
+  minutes after a failure, so a target needs an ask after it that still lands
+  on the same day. A target in the last half hour gets exactly one, and if
+  that one fails the next ask is after midnight — when the day and the hashed
+  target have both moved on — and the day's credits are lost. Capping at 23:00
+  leaves two asks for the latest targets. A window entirely past 23:00 falls
+  back to the default. `test/plugin.test.mjs` pins the cap.
 - **`failed` before the window costs something, and the docs should say so.**
   The card shows a red dot and magpie's own "check-in failed; tries again
   later" wording for the hours before the window (about a third of the day at

@@ -283,8 +283,16 @@ test("a ModelScope time is parsed as Beijing time, whatever the host's zone", as
   )
 })
 
-test("usage without a sign-in says so", async () => {
-  await assert.rejects(() => auth.usage(async () => ({})))
+test("usage without a sign-in says so, as an error and not a rejection", async () => {
+  // the host reads usage for the card and has nothing to catch a throw with:
+  // the hook answers {error} even when the hand-over itself is broken
+  const u = await auth.usage(async () => ({}))
+  assert.ok(u.error, "an object with an error, not a rejection")
+  const r = await auth.usage(async () => {
+    throw new Error("gone")
+  })
+  assert.match(r.error, /gone/)
+  assert.equal(r.signIn, "", "a plain failure does not mark the sign-in expired")
 })
 
 test("a request that hangs gives up instead of holding the host", { timeout: 8000 }, async (t) => {
@@ -395,6 +403,29 @@ test("a grant's title from the ledger is sanitized before it reaches the card", 
   )
 })
 
+test("a bidi override and a forged amount from the ledger are sanitized too", async () => {
+  // a nickname that reads one way and another under an RLO, and a grant whose
+  // amount is not a number but a string carrying its own log line: both reach
+  // the card through fields the plugin renders, so both must be neutralized
+  const nasty = day({ title: "注册并登录", total_amount: "1\u001b]0;pwned\u0007\nFAKE" })
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [nasty] } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "ali\u202ecec\nFAKE" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      // the amount is not a number, so nothing sums it: it is dropped rather
+      // than echoed, and no control byte or bidi override survives anywhere
+      assert.equal(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/.test(r.message), false,
+        `invisible characters survived: ${JSON.stringify(r.message)}`)
+
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(/[\u202e]/.test(JSON.stringify(u)), false, "the nickname reached the card with its override intact")
+    },
+  )
+})
+
 test("a ledger whose records is not a list is a failure, not a crash", async () => {
   await withFetch(
     {
@@ -496,6 +527,24 @@ test("after the window opens the check-in claims as usual", async () => {
         // today already has daily_active, so past the gate it settles as done
         assert.equal(r.outcome, "done")
         assert.match(r.message, /已领取/)
+      },
+    )
+  })
+})
+
+test('checkinWindow written as "off" turns the window off too', async () => {
+  // false and "off" are the same intent; read as a string of two clock times
+  // the latter would silently fall back to the default window instead
+  await withWindow("off", `${today} 02:00:00`, async () => {
+    const body = { success: true, data: { records: [day()] } }
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      },
+      async () => {
+        const r = await auth.checkin(async () => ({ type: "api", key: "ms-off" }))
+        assert.equal(r.outcome, "done", `a string "off" must turn the window off, got ${r.message}`)
       },
     )
   })
@@ -604,7 +653,7 @@ test("the window written as one string is honored, not ignored", async () => {
   })
 })
 
-test("a window reaching into the last half hour is capped, so the claim keeps an ask", async () => {
+test("a window reaching into the late evening is capped, so a failed ask still has a retry", async () => {
   // the host asks again 30 minutes after a failure; a target in the last half
   // hour of the day has no ask left before the day (and the target) resets, so
   // the claim would be lost and the card would read failed until midnight
@@ -622,9 +671,9 @@ test("a window reaching into the last half hour is capped, so the claim keeps an
     let target
     try {
       const r = await late.auth.checkin(async () => ({ type: "api", key: "ms-test" }))
-      assert.match(r.message, /22:00–23:30/, "the window is reported as capped")
+      assert.match(r.message, /22:00–23:00/, "the window is reported as capped")
       target = await targetOf(late.auth.checkin)
-      assert.ok(target.minute <= 23 * 60 + 30, `target ${target.text} must leave an ask before midnight`)
+      assert.ok(target.minute <= 23 * 60, `target ${target.text} must leave a retry ask before midnight`)
       assert.ok(target.minute >= 22 * 60, `target ${target.text} must stay inside the configured start`)
     } finally {
       Date.now = realNow

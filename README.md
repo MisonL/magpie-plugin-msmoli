@@ -129,14 +129,16 @@ installed magpie, the data folder for a portable one):
 
 One string works the same way: `{ "checkinWindow": "08:30-10:00" }`.
 
-`false` turns the window off (claim whenever magpie asks). An unusable value
-— `08:30`–`08:00`, a date that isn't a clock time — falls back to the default
-rather than never claiming. An end past **23:30** is capped there: magpie asks
-again half an hour after a failure, so a target in the day's last half hour
-could have no ask left before midnight reset the day and the target with it.
-A window that sits entirely past 23:30 falls back to the default window too,
-since there would be nowhere left to put the target. The file is read on every
-ask, so a change takes effect without restarting magpie.
+`false` turns the window off (claim whenever magpie asks); so does `"off"`.
+An unusable value — `08:30`–`08:00`, a date that isn't a clock time — falls
+back to the default rather than never claiming. An end past **23:00** is
+capped there: magpie asks again half an hour after a failure, and a target
+needs an ask *after* it on the same day. A target at 23:29 gets exactly one
+ask, at 23:30 — if that one fails, the day's credits are gone with it.
+Capping at 23:00 leaves the target's own ask and a retry. A window that sits
+entirely past 23:00 falls back to the default window too, since there would
+be nowhere left to put the target. The file is read on every ask, so a change
+takes effect without restarting magpie.
 
 How it fits magpie's schedule: magpie asks once when the Beijing day turns
 and re-asks every 30 minutes **after a failure** — `failed` is the only
@@ -165,6 +167,11 @@ the account card) want a line in
 [this issue](https://github.com/yetone/magpie/issues/3245) proposing timers and
 `recheck` for plugins.
 
+Two consequences worth knowing, both from the same missing timer: a window's
+target can only be reached by the host's own 30-minute asks, so an ask missed
+while the machine is asleep costs that day; and the plugin cannot retry on its
+own between asks — the window's cap (above) is what buys the retry.
+
 ### More than one account
 
 The plugin is written per account, not per token. magpie keeps each signed-in
@@ -173,7 +180,8 @@ token under its own key — the first as `msmoli`, later ones as `msmoli#xxxxxx`
 `getAuth`. So with two tokens:
 
 - each account gets **its own target minute** that day (the hash is over the
-  day and that account's token), so two accounts never claim at the same time;
+  day and that account's token), so the two normally claim at different
+  minutes — a collision is possible, but only costs both a shared minute;
 - each account's check-in is recorded, retried and shown separately in
   `plugin-checkin.json` and on the card;
 - the name read at check-in is cached per token, so one account's nickname
@@ -225,6 +233,28 @@ two reasons:
 
 So chat keeps using the `modelscope` preset with your API key in
 `providers.json`, and this plugin only carries the sign-in its check-in runs as.
+
+### Two ModelScope rows, and why that is fine
+
+The providers page then shows two: `ModelScope` (the preset, with your models)
+and `ModelScope 魔粒` (this plugin, with none). They are separate providers that
+happen to share one token, and they do not fight:
+
+| | `modelscope` preset | `msmoli` (this plugin) |
+|---|---|---|
+| Serves chat models | yes | no — `magpie models` never lists it |
+| Its usage card | none (the preset has no balance endpoint) | 魔粒 balance and today's spend |
+| Check-in | not built in for ModelScope | this plugin, once a day |
+| Reachable by the gateway | yes | no, so a card reading 100% cannot route around it |
+
+The token being in both places is how magpie is built: a preset keeps its key
+in `providers.json`, a plugin keeps its sign-in in `plugin-auth.json`. Entering
+the same `ms-` token in both is expected. Nothing reads the plugin's usage card
+to decide where chat goes — that is the point of the separate id.
+
+The one real overlap to know about: **both rows cost nothing extra**, but if you
+remove the plugin's sign-in, chat is unaffected, and if you remove the preset,
+the check-in keeps working. They fail independently.
 
 ## Privacy
 

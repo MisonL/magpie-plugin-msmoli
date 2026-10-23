@@ -39,8 +39,10 @@ const tokenOf = (auth) => {
   return token && /^[\x21-\x7e]+$/.test(token) ? token : ""
 }
 
-// handleOf is a short, non-reversible stand-in for the token, so the caches
-// below never hold the secret itself.
+// handleOf is a short, non-reversible stand-in for the token: the check-in
+// target is derived from it so the per-day moment can be recomputed without
+// anything on disk. It is only a seed — the caches below are keyed by the
+// token itself, since two tokens sharing a 32-bit hash would share a name.
 const fnv = (text) => {
   let h = 0x811c9dc5
   for (let i = 0; i < text.length; i++) {
@@ -139,11 +141,11 @@ const okOf = (body) => {
 // server says (an error's message, a grant's title) ends up in the account
 // card, in magpie's log and on the terminal, and a remote answer is not
 // trusted with control characters: a newline forges a log line, an escape
-// sequence drives the terminal. Visible characters are kept, up to a length
-// that fits a card.
+// sequence drives the terminal, and a bidi override can turn a name inside
+// out. Visible characters are kept, up to a length that fits a card.
 const text = (value, max = 120) =>
   String(value ?? "")
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, " ")
     .trim()
     .slice(0, max)
 
@@ -184,12 +186,15 @@ function cnTime(value) {
 // 了结。夜里这一问一答不发出任何请求，领的动作留给上班时段的那一问。
 const WINDOW_DEFAULT = ["08:30", "10:00"]
 
-// LAST is the latest minute of the day a target may fall on. The host asks
-// again 30 minutes after a failure, and a new Beijing day starts settled
-// afresh with a new target, so a target in the last half hour can have no ask
-// left on its own day: the claim would be lost and the card would say failed
-// all day.
-const LAST = 23 * 60 + 30
+// LAST is the latest minute the window's end is capped at. The host asks
+// again 30 minutes after a failure, and a new Beijing day starts afresh with
+// a new target, so what a target needs is an ask *after* it landing on the
+// same day. A target at 23:29 gets one ask, at 23:30 — and if that ask fails
+// the day is lost with it. Capping the end at 23:00 leaves two: one at the
+// target's own minute, one at 23:30 as a retry.
+const LAST = 23 * 60
+const DEFAULT_START = 8 * 60 + 30
+const DEFAULT_END = 10 * 60
 
 const CONFIG_ENV = "MAGPIE_MSMOLI_CONFIG"
 
@@ -232,15 +237,18 @@ function minuteOf(text) {
 // before end) is not honoured, the documented default applying instead of a
 // window that would never come due.
 function windowOf(cfg) {
-  if (cfg.checkinWindow === false) return null
   const raw = cfg.checkinWindow
+  if (raw === false) return null
+  // "off" written as a string is the same intent as false; read as anything
+  // else it would silently fall back to the default window instead
+  if (typeof raw === "string" && /^(off|false|no)$/i.test(raw.trim())) return null
   const pair = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(/[-–—~至]/) : WINDOW_DEFAULT
   const start = minuteOf(pair[0])
   let end = minuteOf(pair[1])
-  if (start === null || end === null || start >= end) return { start: 8 * 60 + 30, end: 10 * 60 }
+  if (start === null || end === null || start >= end) return { start: DEFAULT_START, end: DEFAULT_END }
   if (end > LAST) {
     end = LAST
-    if (start >= end) return { start: 8 * 60 + 30, end: 10 * 60 }
+    if (start >= end) return { start: DEFAULT_START, end: DEFAULT_END }
   }
   return { start, end }
 }
@@ -266,15 +274,16 @@ function plan(win, token, day) {
 // the check-in trigger, so the usage poll (the menu bar asks every few
 // minutes) must never reach it. The name is empty for a while after the host
 // restarts and comes back with the next check-in; it is not worth keeping the
-// token on disk for.
+// token on disk for. The map is keyed by the token itself, not by its hash:
+// two tokens colliding in 32 bits would otherwise share a name and the card
+// would show one account under the other's name.
 const names = new Map()
 const NAMES_MAX = 8
 
 function rememberName(token, name) {
   if (!name) return
-  const h = handleOf(token)
-  names.delete(h)
-  names.set(h, name)
+  names.delete(token)
+  names.set(token, name)
   while (names.size > NAMES_MAX) names.delete(names.keys().next().value)
 }
 
@@ -322,21 +331,23 @@ function aliasOf(dir, label) {
 // an account that has one already is left alone.
 async function rememberAccountName(client, token, name, auth, dir) {
   if (!name || !client?.auth?.set) return
-  const h = handleOf(token)
-  if (named.has(h) || auth?.accountId === name) return
+  if (named.has(token) || auth?.accountId === name) return
   // an account the user has named keeps that name: writing the nickname over
   // it would re-key their alias to a label the account no longer has
   if (aliasOf(dir, labelOf(auth, token))) return
-  named.add(h)
+  named.add(token)
   try {
     // auth.set replaces the whole sign-in, so what the host handed us is the
     // base: a field we do not know about is kept, not dropped
     const body = { ...(auth && typeof auth === "object" ? auth : {}), type: "api", key: token, accountId: name }
     await client.auth.set({ path: { id: ID }, body })
   } catch (e) {
-    // the card keeps the key's tail; nothing else depends on this
-    named.delete(h)
-    client?.app?.log?.({ body: { level: "warn", service: "msmoli", message: `account name not written back: ${e?.message ?? e}` } }).catch?.(() => {})
+    // the card keeps the key's tail; nothing else depends on this. Put the
+    // token back so the next ask tries the write again, and let the log call
+    // be truly best-effort: a host whose log is synchronous returns undefined
+    // where a promise is expected, and that must not throw out of here.
+    named.delete(token)
+    client?.app?.log?.({ body: { level: "warn", service: "msmoli", message: `account name not written back: ${e?.message ?? e}` } })?.catch?.(() => {})
   }
 }
 
@@ -360,6 +371,11 @@ async function todayEarn(token) {
 }
 
 const sumOf = (records) => records.reduce((n, r) => n + (Number(r?.total_amount) || 0), 0)
+
+// amountOf is what a grant gave, as it goes into a message: the raw JSON is
+// whatever the server said, so it is coerced and sanitized like every other
+// remote string rather than interpolated as it came.
+const amountOf = (record) => text(Number(record?.total_amount) || 0, 20)
 
 export async function MsmoliPlugin(input) {
   // input.directory is magpie's own folder (host.go passes settings.Dir()),
@@ -397,8 +413,13 @@ export async function MsmoliPlugin(input) {
       // 代价是这段时间卡片上写着「签到失败；magpie 稍后重试」，那是今天
       // 宿主唯一能表达「还没到点」的说法（上游见 README）。
       async checkin(getAuth) {
-        const auth = await getAuth()
-        const token = tokenOf(auth)
+        let auth, token
+        try {
+          auth = await getAuth()
+          token = tokenOf(auth)
+        } catch (e) {
+          return { outcome: "failed", message: e?.message ?? String(e), ...(signedOut(e) ? { signIn: "expired" } : {}) }
+        }
         if (!token) return { outcome: "failed", message: "没有登录信息，请先登录" }
 
         const win = windowOf(configOf(configDir))
@@ -439,7 +460,7 @@ export async function MsmoliPlugin(input) {
             return { outcome: "done", credit, message: `今日已领取 ${credit} 魔粒` + (which ? `（${which}）` : "") }
           }
           if (daily.length) {
-            const which = daily.map((r) => `${text(r.title, 40)} +${r.total_amount}`).join("，")
+            const which = daily.map((r) => `${text(r.title, 40)} +${amountOf(r)}`).join("，")
             return { outcome: "claimed", credit, message: `领取 ${credit} 魔粒：${which}` }
           }
           // 触达了却没有到账记录：可能是账本还没写出来（发放是异步的），
@@ -448,7 +469,7 @@ export async function MsmoliPlugin(input) {
           const later = (await todayEarn(token)).filter((r) => DAILY_RULES.includes(r?.rule_key))
           if (later.length) {
             const credit2 = sumOf(later)
-            const which = later.map((r) => `${text(r.title, 40)} +${r.total_amount}`).join("，")
+            const which = later.map((r) => `${text(r.title, 40)} +${amountOf(r)}`).join("，")
             return { outcome: "claimed", credit: credit2, message: `领取 ${credit2} 魔粒：${which}` }
           }
           return { outcome: "inactive", message: "登录已触达，但今天没有到账记录（账号可能不在活动范围）" }
@@ -459,12 +480,20 @@ export async function MsmoliPlugin(input) {
 
       // 魔粒余额与今日消耗，给账号卡片看。
       async usage(getAuth) {
-        const auth = await getAuth()
-        const token = tokenOf(auth)
-        if (!token) throw new Error("没有登录信息")
+        // everything the host could get wrong about the hand-over is the
+        // card's problem alone: it must come back as {error}, never as a
+        // rejection out of the hook
+        let auth, token
+        try {
+          auth = await getAuth()
+          token = tokenOf(auth)
+        } catch (e) {
+          return { error: e?.message ?? String(e), signIn: signedOut(e) ? "expired" : "" }
+        }
+        if (!token) return { error: "没有登录信息", signIn: "" }
         // the name is only known from login/info, which usage must never
         // reach; a check-in in this process leaves it here for the card
-        await rememberAccountName(client, token, names.get(handleOf(token)) ?? "", auth, configDir)
+        await rememberAccountName(client, token, names.get(token) ?? "", auth, configDir)
         try {
           const bal = await json(token, BALANCE)
           if (bal.res.status === 401) throw fail(bal.res.status)
@@ -507,7 +536,7 @@ export async function MsmoliPlugin(input) {
 
           return {
             plan: "魔搭社区",
-            user: names.get(handleOf(token)) ?? "",
+            user: names.get(token) ?? "",
             balance: `${available} 魔粒可用`,
             windows: [
               {
