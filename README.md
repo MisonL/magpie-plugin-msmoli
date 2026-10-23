@@ -124,12 +124,16 @@ outcome it retries; everything else settles the day. So before the window's
 moment the plugin answers `failed` with the time it will run, and sends
 **no request at all**.
 
-What that costs, since a plugin has no other way to defer: until the window
-opens the account card shows a red dot and magpie's own "check-in failed;
-magpie tries again later" wording (about a third of the day at the default
-08:30), each of those asks rewrites magpie's `plugin-checkin.json`, and
-`magpie accounts checkin` run in that period exits non-zero. Turning the
-window off removes all three.
+What that costs, since a plugin has no other way to defer: until the claim
+actually runs the account card shows a red dot and magpie's own "check-in
+failed; magpie tries again later" wording, each of those asks rewrites
+magpie's `plugin-checkin.json`, and `magpie accounts checkin` run in that
+period exits non-zero. Turning the window off removes all three.
+
+How long that is depends on when magpie next asks, not on the target alone.
+Measured on a real day: the target was 09:01, magpie asked at 09:00:57 (three
+seconds early, so `failed`), and the claim landed on the next ask at 09:31 —
+about 9.5 hours of red dot, not the 8.5 the window alone suggests.
 
 ### Upstream
 
@@ -140,6 +144,39 @@ the awkward parts (proving "not yet" as a failure, whole-day granularity for
 the account card) want a line in
 [this issue](https://github.com/yetone/magpie/issues/3245) proposing timers and
 `recheck` for plugins.
+
+### More than one account
+
+The plugin is written per account, not per token. magpie keeps each signed-in
+token under its own key — the first as `msmoli`, later ones as `msmoli#xxxxxx`
+— and asks the check-in once per account, handing each its own token through
+`getAuth`. So with two tokens:
+
+- each account gets **its own target minute** that day (the hash is over the
+  day and that account's token), so two accounts never claim at the same time;
+- each account's check-in is recorded, retried and shown separately in
+  `plugin-checkin.json` and on the card;
+- the name read at check-in is cached per token, so one account's nickname
+  never appears on another's row.
+
+Add a second one the same way, then pick which to use:
+
+```bash
+printf 'ms-the-second-token\n' | magpie plugin login msmoli
+magpie accounts            # both rows, each with its own 魔粒 window
+```
+
+Two caveats worth knowing. The card names an account by the last four
+characters of its key (`API key …a1b2`) unless you give it a name yourself —
+the nickname is only in memory, since writing it to `plugin-auth.json` would
+store the token a second time. Name an account if you run more than one:
+
+```bash
+magpie accounts alias msmoli "API key …a1b2" my-main
+```
+
+And the daily grant is per ModelScope account, not per key: two tokens for the
+same ModelScope user claim one grant between them, not two.
 
 ## Why its own provider, with no models
 

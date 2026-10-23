@@ -651,6 +651,62 @@ test("a window reaching into the last half hour is capped, so the claim keeps an
   }
 })
 
+test("two tokens are two accounts: own target, own name, no bleed", async () => {
+  // magpie keeps the first sign-in as `msmoli` and later ones as
+  // `msmoli#xxxxxx`, and asks the check-in once per account, handing each
+  // its own token. The hash is over the day and the token, so two accounts
+  // must not land on the same minute, and one's name must not show on the
+  // other's row.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-two-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: ["08:30", "10:00"] }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const two = await MsmoliPlugin({ directory: dir })
+    const A = "ms-aaaa1111-0000-0000-0000-000000000001"
+    const B = "ms-bbbb2222-0000-0000-0000-000000000002"
+    const at = Date.parse(`${today} 07:00:00`.replace(" ", "T") + "+08:00")
+    const realNow = Date.now
+    Date.now = () => at
+    const realFetch = globalThis.fetch
+    globalThis.fetch = async () => reply({ body: { success: true, data: { records: [] } } })
+    try {
+      const ask = async (tok) => {
+        const r = await two.auth.checkin(async () => ({ type: "api", key: tok }))
+        const m = /今日 (\d{2}):(\d{2}) 起领取/.exec(r.message)
+        return m ? `${m[1]}:${m[2]}` : null
+      }
+      const ta = await ask(A)
+      const tb = await ask(B)
+      assert.ok(ta && tb, `both accounts should report a target: ${ta} / ${tb}`)
+      assert.notEqual(ta, tb, `two accounts must not share a target (both ${ta})`)
+    } finally {
+      Date.now = realNow
+      globalThis.fetch = realFetch
+    }
+
+    // the name read at check-in is keyed by token, so B never sees A's
+    globalThis.fetch = async (url) => {
+      const u = String(url)
+      if (u.includes("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+      if (u.includes("balance")) return reply({ body: { success: true, data: { available_balance: 5 } } })
+      return reply({ body: { success: true, data: { records: [] } } })
+    }
+    try {
+      await two.auth.checkin(async () => ({ type: "api", key: A }))
+      const ua = await two.auth.usage(async () => ({ type: "api", key: A }))
+      const ub = await two.auth.usage(async () => ({ type: "api", key: B }))
+      assert.equal(ua.user, "alice", "the account that checked in has its name")
+      assert.equal(ub.user, "", "the other account must not borrow it")
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
 test("the usage card says when the day's claim will run", async () => {
   await withWindow(["08:30", "10:00"], `${today} 07:30:00`, async () => {
     await withFetch(
