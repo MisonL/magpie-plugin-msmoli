@@ -51,7 +51,7 @@ Either form ends the same way: a `msmoli` row under Settings → Usage → Plugi
 The sign-in is kept per package name rather than per folder, so switching
 between the two forms (or moving the clone) keeps the token — no second login.
 
-Then turn the check-in on: Settings → Usage → Plugins → the `msmoli` row, or in
+Turn the check-in on: Settings → Usage → Plugins → the `msmoli` row, or in
 `settings.json` (in magpie's own folder, `~/.config/magpie` for an installed
 magpie):
 

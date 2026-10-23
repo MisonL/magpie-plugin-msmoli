@@ -44,7 +44,6 @@ printf 'ms-你的令牌\n' | magpie plugin login msmoli
 两种方式结果一样：设置 → 用量 → 插件 里多出 `msmoli` 一行。登录态是按 provider 名
 （`msmoli`）存的、不绑文件夹，所以两种方式之间切换、或把 clone 挪个位置，都不用重新登录。
 
-然后
 把签到打开：设置 → 用量 → 插件 → `msmoli` 那一行，或者改 `settings.json`
 （在 magpie 自己的目录里，安装版是 `~/.config/magpie`）：
 
