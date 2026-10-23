@@ -13,10 +13,22 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: ["18", "20", "22"]
+        # 18 is the engine floor in package.json; 24 is current. magpie runs
+        # plugins on Bun, so that is tested too — it is the runtime the tests
+        # are least able to stand in for.
+        node: ["18", "20", "22", "24"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
       - run: node --test
+
+  bun:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun test

@@ -283,7 +283,11 @@ Asks that arrive before the window open send nothing at all.
 The usage read makes two requests and never touches the sign-in endpoint, so the
 menu bar's polling cannot turn into check-ins.
 - Every request gives up after 8 seconds, and a response body is read to at most
-256 KiB; neither can hold the host or grow without bound.
+256 KiB; neither can hold the host or grow without bound. A whole check-in
+gives up after 25 seconds and a whole usage read after 18, because magpie runs
+every provider's check-ins under one two-minute budget and asks accounts one
+at a time — a hook cut short answers `failed`, which the host retries in half
+an hour, and that retry reads the ledger before claiming, so nothing is lost.
 - `MAGPIE_MSMOLI_CONFIG` overrides the config file's path. It exists so the test
   suite never touches a real file; it works in production too.
 - The other 170 魔粒 a day come from liking 10 items (20), posting AIGC works

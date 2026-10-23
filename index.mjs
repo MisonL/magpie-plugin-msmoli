@@ -31,6 +31,16 @@ const ID = "msmoli"
 const TIMEOUT_MS = 8000
 const PAGE_SIZE = 50
 
+// A hook's whole budget, not one request's. magpie runs a check-in round for
+// every provider's accounts under one 2-minute context and asks them one
+// account at a time, so a slow account that spent its own 4×8s would take the
+// budget from the accounts after it. Capping the hook keeps one account from
+// doing that; a hook cut short answers failed, which the host retries in half
+// an hour, and that retry reads the ledger first — so nothing is lost.
+const CHECKIN_BUDGET_MS = 25 * 1000
+// A usage read is one balance and one ledger read under a 20s budget.
+const USAGE_BUDGET_MS = 18 * 1000
+
 const tokenOf = (auth) => {
   const token = auth?.type === "api" ? String(auth.key ?? "").trim() : ""
   // A token with anything but visible ASCII in it would put the whole value
@@ -54,12 +64,14 @@ const fnv = (text) => {
 
 const handleOf = (token) => fnv(token).toString(16)
 
-// json asks one of ModelScope's web endpoints as the account. The timeout is
-// its own: magpie gives a usage read 20s in total, and this plugin makes two
-// or three requests within it.
-async function json(token, path) {
+// json asks one of ModelScope's web endpoints as the account. Each request is
+// capped at 8s, and at what is left of the hook's own budget when that is
+// less: magpie runs every provider's check-ins under one 2-minute context and
+// asks accounts one at a time, so a hook must not overrun its share.
+async function json(token, path, deadline = Infinity) {
+  const left = Math.max(1, Math.min(TIMEOUT_MS, deadline - Date.now()))
   const ctl = new AbortController()
-  const timer = setTimeout(() => ctl.abort(new Error("timeout")), TIMEOUT_MS)
+  const timer = setTimeout(() => ctl.abort(new Error("timeout")), left)
   try {
     const res = await fetch(SITE + path, {
       // a redirect that leaves modelscope.cn must not carry the session
@@ -358,8 +370,8 @@ function fail(status) {
 }
 
 // todayEarn are today's credit grants, by the day ModelScope records them.
-async function todayEarn(token) {
-  const { res, body, parsed } = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`)
+async function todayEarn(token, deadline) {
+  const { res, body, parsed } = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
   if (res.status === 401) throw Object.assign(new Error("令牌失效或不属于国内站"), { signIn: "expired" })
   // 403 is ModelScope's risk control, not a bad token: the account may be
   // perfectly fine and only the request was refused.
@@ -421,6 +433,9 @@ export async function MsmoliPlugin(input) {
           return { outcome: "failed", message: e?.message ?? String(e), ...(signedOut(e) ? { signIn: "expired" } : {}) }
         }
         if (!token) return { outcome: "failed", message: "没有登录信息，请先登录" }
+        // the clock the requests run against: a hook that does not finish in
+        // time has failed, as far as the host is concerned, and it asks again
+        const deadline = Date.now() + CHECKIN_BUDGET_MS
 
         const win = windowOf(configOf(configDir))
         if (win) {
@@ -435,10 +450,10 @@ export async function MsmoliPlugin(input) {
         }
 
         try {
-          const before = await todayEarn(token)
+          const before = await todayEarn(token, deadline)
           const claimed = before.some((r) => r?.rule_key === "daily_active")
 
-          const { res, body, parsed } = await json(token, LOGIN_INFO)
+          const { res, body, parsed } = await json(token, LOGIN_INFO, deadline)
           if (res.status === 401)
             return { outcome: "failed", message: "令牌失效或不属于国内站（HTTP 401）", signIn: "expired" }
           // 403 是风控，不是令牌坏了：账号可能是好的，只是这次请求被拒
@@ -452,7 +467,7 @@ export async function MsmoliPlugin(input) {
           rememberName(token, name)
           await rememberAccountName(client, token, name, auth, configDir)
 
-          const daily = (await todayEarn(token)).filter((r) => DAILY_RULES.includes(r?.rule_key))
+          const daily = (await todayEarn(token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key))
           const credit = sumOf(daily)
 
           if (claimed) {
@@ -466,7 +481,7 @@ export async function MsmoliPlugin(input) {
           // 触达了却没有到账记录：可能是账本还没写出来（发放是异步的），
           // 也可能这个账号本来就不在活动范围。magpie 把 inactive 当作当天
           // 已了结、不再重试，所以再读一次账本确认，别把晚到的发放丢掉。
-          const later = (await todayEarn(token)).filter((r) => DAILY_RULES.includes(r?.rule_key))
+          const later = (await todayEarn(token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key))
           if (later.length) {
             const credit2 = sumOf(later)
             const which = later.map((r) => `${text(r.title, 40)} +${amountOf(r)}`).join("，")
@@ -491,18 +506,19 @@ export async function MsmoliPlugin(input) {
           return { error: e?.message ?? String(e), signIn: signedOut(e) ? "expired" : "" }
         }
         if (!token) return { error: "没有登录信息", signIn: "" }
+        const deadline = Date.now() + USAGE_BUDGET_MS
         // the name is only known from login/info, which usage must never
         // reach; a check-in in this process leaves it here for the card
         await rememberAccountName(client, token, names.get(token) ?? "", auth, configDir)
         try {
-          const bal = await json(token, BALANCE)
+          const bal = await json(token, BALANCE, deadline)
           if (bal.res.status === 401) throw fail(bal.res.status)
           if (bal.res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
           if (bal.res.status !== 200 || !bal.parsed) throw new Error(`余额查询失败：响应不是 JSON（HTTP ${bal.res.status}）`)
           if (!okOf(bal.body)) throw new Error(`余额查询失败：${saidOf(bal.body) || `HTTP ${bal.res.status}`}`)
           const available = Number(dataOf(bal.body).available_balance) || 0
 
-          const tx = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`)
+          const tx = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
           if (tx.res.status === 401) throw fail(tx.res.status)
           if (tx.res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
           if (tx.res.status !== 200 || !tx.parsed) throw new Error(`账单查询失败：响应不是 JSON（HTTP ${tx.res.status}）`)

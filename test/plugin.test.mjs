@@ -295,6 +295,48 @@ test("usage without a sign-in says so, as an error and not a rejection", async (
   assert.equal(r.signIn, "", "a plain failure does not mark the sign-in expired")
 })
 
+test("a whole check-in gives up at its own budget, not per request", { timeout: 8000 }, async (t) => {
+  // magpie runs every provider's check-ins under one two-minute context, one
+  // account at a time: four 8-second requests inside one hook would take 32s
+  // and starve the accounts after it. The hook's own 25s budget is what keeps
+  // one slow account from doing that.
+  const real = globalThis.fetch
+  try {
+    t.mock.timers.enable({ apis: ["setTimeout"] })
+  } catch {
+    t.mock.timers.enable(["setTimeout"])
+  }
+  // each request answers after 7s — under the per-request cap, over the budget
+  // (the budget reads Date.now(), which the mock timer does not move: advance
+  // both together, as a slower clock would)
+  const realNow = Date.now
+  let at = realNow()
+  Date.now = () => at
+  globalThis.fetch = (url, init) =>
+    new Promise((resolve, reject) => {
+      const t = setTimeout(() => resolve(reply({ body: { success: true, data: { records: [] } } })), 7000)
+      init.signal.addEventListener("abort", () => {
+        clearTimeout(t)
+        reject(init.signal.reason ?? new Error("aborted"))
+      }, { once: true })
+    })
+  try {
+    const pending = auth.checkin(async () => ({ type: "api", key: "ms-budget" }))
+    await new Promise((resolve) => setImmediate(resolve))
+    // step past the 25s budget; whatever requests were left are cut
+    for (let i = 0; i < 4; i++) {
+      at += 7000
+      t.mock.timers.tick(7000)
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+    const r = await pending
+    assert.equal(r.outcome, "failed", "a hook over its budget answers failed")
+  } finally {
+    Date.now = realNow
+    globalThis.fetch = real
+  }
+})
+
 test("a request that hangs gives up instead of holding the host", { timeout: 8000 }, async (t) => {
   const real = globalThis.fetch
   // Node 20.4 took the object form ({ apis: […] }); 18 only knows the array
