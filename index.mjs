@@ -282,14 +282,51 @@ function rememberName(token, name) {
 // saved once and not on every ask.
 const named = new Set()
 
+// labelOf is what magpie shows this account as now, which is the string an
+// alias is kept under: the accountId already on the sign-in, else the key's
+// last four.
+function labelOf(auth, token) {
+  if (typeof auth?.accountId === "string" && auth.accountId) return auth.accountId
+  return token.length >= 12 ? "API key …" + token.slice(-4) : "API key"
+}
+
+// aliasOf is the name the user gave this account in magpie's own
+// providers.json, "" when none. magpie keeps those names under the account's
+// label of the moment, so a write-back that renames the account would leave
+// the user's name keyed to a label nothing carries any more — it would stop
+// showing, with no sign of why.
+function aliasOf(dir, label) {
+  if (!dir || !label) return ""
+  try {
+    const raw = JSON.parse(readFileSync(join(dir, "providers.json"), "utf8"))
+    const key = label.trim().toLowerCase()
+    const lists = [raw?.providers]
+    if (Array.isArray(raw?.pluginLeft)) lists.push(...raw.pluginLeft.map((l) => l?.provider))
+    for (const list of lists) {
+      if (!Array.isArray(list)) continue
+      for (const p of list) {
+        if (p?.id !== ID) continue
+        const names = p.accountNames
+        if (!names || typeof names !== "object") continue
+        const mine = names[key]
+        if (typeof mine === "string" && mine) return mine
+      }
+    }
+  } catch {}
+  return ""
+}
+
 // rememberAccountName tells magpie the account's own name, so its card reads
 // "Mison" instead of "API key …a1b2". The sign-in is written as it already
 // is — the same key, no second copy of the token — with the name beside it;
 // an account that has one already is left alone.
-async function rememberAccountName(client, token, name, auth) {
+async function rememberAccountName(client, token, name, auth, dir) {
   if (!name || !client?.auth?.set) return
   const h = handleOf(token)
   if (named.has(h) || auth?.accountId === name) return
+  // an account the user has named keeps that name: writing the nickname over
+  // it would re-key their alias to a label the account no longer has
+  if (aliasOf(dir, labelOf(auth, token))) return
   named.add(h)
   try {
     // auth.set replaces the whole sign-in, so what the host handed us is the
@@ -392,7 +429,7 @@ export async function MsmoliPlugin(input) {
           const me = dataOf(body)
           const name = text(me.NickName || me.Name || "", 40)
           rememberName(token, name)
-          await rememberAccountName(client, token, name, auth)
+          await rememberAccountName(client, token, name, auth, configDir)
 
           const daily = (await todayEarn(token)).filter((r) => DAILY_RULES.includes(r?.rule_key))
           const credit = sumOf(daily)
@@ -427,7 +464,7 @@ export async function MsmoliPlugin(input) {
         if (!token) throw new Error("没有登录信息")
         // the name is only known from login/info, which usage must never
         // reach; a check-in in this process leaves it here for the card
-        await rememberAccountName(client, token, names.get(handleOf(token)) ?? "", auth)
+        await rememberAccountName(client, token, names.get(handleOf(token)) ?? "", auth, configDir)
         try {
           const bal = await json(token, BALANCE)
           if (bal.res.status === 401) throw fail(bal.res.status)

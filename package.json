@@ -1,7 +1,7 @@
 {
   "name": "magpie-plugin-msmoli",
   "version": "0.1.0",
-  "description": "ModelScope (魔搭) 魔粒 daily check-in and balance for magpie — one request a day instead of opening the site",
+  "description": "ModelScope (魔搭) 魔粒 daily check-in and balance for magpie — one check-in a day instead of opening the site",
   "author": "MisonL",
   "type": "module",
   "repository": {

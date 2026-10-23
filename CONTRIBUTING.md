@@ -31,6 +31,14 @@ write starts from the auth the host handed over and adds only the name — the
 token stays in `key` alone. `test/plugin.test.mjs` pins all three: the write
 happens once, the token appears once, and fields the host already had survive.
 
+It reads one file to know when not to write: magpie keeps a user's own account
+names in `providers.json`, keyed by the label the account had when it was
+named, and the write-back changes that label. An account the user has named is
+therefore left as it is — otherwise the alias would be left pointing at a label
+nothing carries, and the user's name would vanish from the card. `aliasOf` in
+`index.mjs` does the read; a test pins both halves (named → no write, unnamed →
+the nickname).
+
 ## Development
 
 ```bash

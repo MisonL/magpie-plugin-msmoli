@@ -71,8 +71,7 @@ From then on magpie claims it once a Beijing day per signed-in account, retries
 later that day if it fails, and reports the outcome on the account's usage card:
 
 ```
-● plugin:msmoli  API key …a1b2 · 魔搭社区  魔粒 1% (今日用 2 / 领 250 · 余额 249.5)
-  ↻14h24m tomorrow 00:00  249.5 魔粒可用 left
+● msmoli  API key …a1b2 · 魔搭社区  魔粒 1% (今日用 2 / 领 250 · 余额 249.5) ↻14h24m tomorrow 09:31  249.5 魔粒可用 left
 ```
 
 ## How the check-in works
@@ -202,6 +201,11 @@ If you would rather choose the name yourself, magpie's own alias wins over it:
 magpie accounts alias msmoli "API key …a1b2" my-main
 ```
 
+The second word is the account as the card shows it *now*: before the first
+check-in that is the key's tail, afterwards the ModelScope nickname. An account
+you have named is left alone — the check-in won't write its nickname over your
+alias — so either label works, and the alias outranks the nickname from then on.
+
 And the daily grant belongs to the ModelScope account, not to the key: the
 claim is idempotent server-side per account per day, so a second token for the
 same ModelScope user gets `done` rather than another 250.
@@ -235,6 +239,10 @@ already has, so magpie's card can name the account. It goes through the host's
 own `client.auth.set`, which replaces the sign-in entry — so the plugin hands
 back what the host gave it, with the name added, and the token is still
 stored once.
+
+It also reads `providers.json`, magpie's own list of providers, for one thing:
+whether you already named this account yourself. If you have, it writes
+nothing — your name stays, and the nickname is not put over it.
 
 ## Scope and limits
 

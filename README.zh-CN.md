@@ -60,8 +60,7 @@ printf 'ms-你的令牌\n' | magpie plugin login msmoli
 之后 magpie 每天（北京日）每账号领取一次，失败当天稍后重试，结果直接显示在账号卡片上：
 
 ```
-● plugin:msmoli  API key …a1b2 · 魔搭社区  魔粒 1% (今日用 2 / 领 250 · 余额 249.5)
-  ↻14h24m tomorrow 00:00  249.5 魔粒可用 left
+● msmoli  API key …a1b2 · 魔搭社区  魔粒 1% (今日用 2 / 领 250 · 余额 249.5) ↻14h24m tomorrow 09:31  249.5 魔粒可用 left
 ```
 
 ## 签到是怎么做的
@@ -171,6 +170,10 @@ magpie accounts            # 两行，各自带自己的魔粒窗口
 magpie accounts alias msmoli "API key …a1b2" 主号
 ```
 
+第二个参数是账号**现在**显示的名字：第一次签到之前是令牌末四位，之后是签到
+写回的魔搭昵称。你起过名的账号不会被改掉——签到不会把昵称盖到你的 alias 上
+——所以两个名字都能用，alias 优先于昵称。
+
 另外，每日额度属于**魔搭账号**，不属于 key：领取在服务端按「账号 + 当天」幂等，
 所以同一个魔搭用户的第二把令牌拿到的是 `done`，不会再多 250。
 
@@ -188,6 +191,8 @@ magpie accounts alias msmoli "API key …a1b2" 主号
 `login/info` 的响应里有 `Email`、`GitlabAccessToken` 等字段。本插件只读 `NickName` / `Name`，其余在解析后即丢弃。令牌只存在 magpie 自己的 `plugin-auth.json` 里——插件不输出、不发给 `modelscope.cn` 以外的任何地方。
 
 唯一写回的是那个昵称，写成已有登录记录上的 `accountId`，好让 magpie 的卡片能称呼账号。它走宿主自己的 `client.auth.set`（这个接口是整条替换），所以插件把宿主交给它的内容原样交回、只多加一个名字，令牌仍然只存一份。
+
+它还会读 `providers.json`（magpie 自己的 provider 列表），只为一件事：这个账号你是不是已经自己起过名了。起过就什么都不写，你的名字保持原样，昵称不会盖上去。
 
 ## 范围与边界
 
