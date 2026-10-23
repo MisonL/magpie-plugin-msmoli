@@ -707,6 +707,44 @@ test("two tokens are two accounts: own target, own name, no bleed", async () => 
   }
 })
 
+test("the name read at check-in is written back so the card can show it", async () => {
+  // magpie labels an account by its accountId; an api-type sign-in has none,
+  // so the card would read "API key …a1b2". The check-in is the one place the
+  // name is known, so it writes it back — the same sign-in, the token once.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nm-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    const token = "ms-nametest-0000-0000-0000-000000000009"
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        // an auth the host might hand over with fields of its own
+        await withClient.auth.checkin(async () => ({ type: "api", key: token, metadata: { kept: "yes" } }))
+        assert.equal(writes.length, 1, "the name is written back once")
+        const body = writes[0].body
+        assert.equal(body.accountId, "Mison")
+        assert.equal(body.key, token)
+        assert.equal(JSON.stringify(body).split(token).length - 1, 1, "the token appears once, not twice")
+        assert.equal(body.metadata?.kept, "yes", "fields the host already had are kept")
+
+        // a second ask does not write again, and one already named is left alone
+        await withClient.auth.checkin(async () => ({ type: "api", key: token, accountId: "Mison" }))
+        assert.equal(writes.length, 1, "nothing new to write")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
 test("the usage card says when the day's claim will run", async () => {
   await withWindow(["08:30", "10:00"], `${today} 07:30:00`, async () => {
     await withFetch(

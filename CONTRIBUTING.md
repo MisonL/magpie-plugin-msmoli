@@ -24,6 +24,13 @@ nowhere else. The sign-in method declares neither `prompts` nor `authorize` on
 purpose: a prompt's answer lands in `metadata` as well, which puts the same
 token on disk twice (see `save()` in magpie's `host.js`).
 
+The one write the plugin makes is the account's nickname, as `accountId` on the
+sign-in it already has, so magpie's card can name the account instead of
+showing the end of the key. `client.auth.set` replaces the whole entry, so the
+write starts from the auth the host handed over and adds only the name — the
+token stays in `key` alone. `test/plugin.test.mjs` pins all three: the write
+happens once, the token appears once, and fields the host already had survive.
+
 ## Development
 
 ```bash

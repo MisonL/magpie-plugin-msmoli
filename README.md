@@ -166,10 +166,13 @@ printf 'ms-the-second-token\n' | magpie plugin login msmoli
 magpie accounts            # both rows, each with its own 魔粒 window
 ```
 
-Two caveats worth knowing. The card names an account by the last four
-characters of its key (`API key …a1b2`) unless you give it a name yourself —
-the nickname is only in memory, since writing it to `plugin-auth.json` would
-store the token a second time. Name an account if you run more than one:
+The card names an account by the name ModelScope gives it. An api-type
+sign-in has no such name, so the check-in writes the nickname back the first
+time it runs: the same sign-in entry, the token still stored once, now with
+`accountId` beside it. Until that first check-in the card shows the end of the
+key (`API key …a1b2`), and so it does for a host that has not checked in yet.
+
+If you would rather choose the name yourself, magpie's own alias wins over it:
 
 ```bash
 magpie accounts alias msmoli "API key …a1b2" my-main
@@ -202,6 +205,12 @@ This plugin reads `NickName` / `Name` and nothing else; the rest is dropped as
 soon as the response is parsed. The token lives only in magpie's own
 `plugin-auth.json` — the plugin never writes it anywhere, never logs it, never
 sends it anywhere but `modelscope.cn`.
+
+The one thing it writes is that nickname, as `accountId` on the sign-in it
+already has, so magpie's card can name the account. It goes through the host's
+own `client.auth.set`, which replaces the sign-in entry — so the plugin hands
+back what the host gave it, with the name added, and the token is still
+stored once.
 
 ## Scope and limits
 

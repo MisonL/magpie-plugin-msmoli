@@ -278,6 +278,30 @@ function rememberName(token, name) {
   while (names.size > NAMES_MAX) names.delete(names.keys().next().value)
 }
 
+// named holds what this process has already written back, so a name is
+// saved once and not on every ask.
+const named = new Set()
+
+// rememberAccountName tells magpie the account's own name, so its card reads
+// "Mison" instead of "API key …a1b2". The sign-in is written as it already
+// is — the same key, no second copy of the token — with the name beside it;
+// an account that has one already is left alone.
+async function rememberAccountName(client, token, name, auth) {
+  if (!name || !client?.auth?.set) return
+  const h = handleOf(token)
+  if (named.has(h) || auth?.accountId === name) return
+  named.add(h)
+  try {
+    // auth.set replaces the whole sign-in, so what the host handed us is the
+    // base: a field we do not know about is kept, not dropped
+    const body = { ...(auth && typeof auth === "object" ? auth : {}), type: "api", key: token, accountId: name }
+    await client.auth.set({ path: { id: ID }, body })
+  } catch {
+    // the card keeps the key's tail; nothing else depends on this
+    named.delete(h)
+  }
+}
+
 const signedOut = (e) => Boolean(e?.signIn === "expired" || e?.expired)
 
 function fail(status) {
@@ -303,6 +327,10 @@ export async function MsmoliPlugin(input) {
   // input.directory is magpie's own folder (host.go passes settings.Dir()),
   // which is where a portable magpie keeps everything too.
   const configDir = typeof input?.directory === "string" ? input.directory : ""
+  // client.auth.set is how the account's display name gets back to magpie:
+  // the host labels an account by its accountId, and an api-type sign-in has
+  // none. Written once, at the first check-in, when the name is known.
+  const client = input?.client
 
   return {
     auth: {
@@ -331,7 +359,8 @@ export async function MsmoliPlugin(input) {
       // 代价是这段时间卡片上写着「签到失败；magpie 稍后重试」，那是今天
       // 宿主唯一能表达「还没到点」的说法（上游见 README）。
       async checkin(getAuth) {
-        const token = tokenOf(await getAuth())
+        const auth = await getAuth()
+        const token = tokenOf(auth)
         if (!token) return { outcome: "failed", message: "没有登录信息，请先登录" }
 
         const win = windowOf(configOf(configDir))
@@ -362,6 +391,7 @@ export async function MsmoliPlugin(input) {
           const me = dataOf(body)
           const name = text(me.NickName || me.Name || "", 40)
           rememberName(token, name)
+          await rememberAccountName(client, token, name, auth)
 
           const daily = (await todayEarn(token)).filter((r) => DAILY_RULES.includes(r?.rule_key))
           const credit = sumOf(daily)

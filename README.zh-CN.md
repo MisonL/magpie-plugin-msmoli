@@ -139,9 +139,11 @@ printf 'ms-第二个令牌\n' | magpie plugin login msmoli
 magpie accounts            # 两行，各自带自己的魔粒窗口
 ```
 
-两个要知道的地方。卡片默认用令牌末四位称呼账号（`API key …a1b2`），除非你自己
-起名——昵称只在内存里，因为写进 `plugin-auth.json` 等于把令牌存第二遍。跑多个
-账号时建议起名：
+卡片用魔搭给的名字称呼账号。api 型登录本身没有名字，所以第一次签到会把昵称
+写回去——还是同一条登录记录，令牌仍然只存一份，只是旁边多了 `accountId`。
+在第一次签到之前，卡片显示的是令牌末四位（`API key …a1b2`）。
+
+如果你想自己起名，magpie 自己的 alias 优先：
 
 ```bash
 magpie accounts alias msmoli "API key …a1b2" 主号
@@ -161,7 +163,9 @@ magpie accounts alias msmoli "API key …a1b2" 主号
 
 ## 隐私
 
-`login/info` 的响应里有 `Email`、`GitlabAccessToken` 等字段。本插件只读 `NickName` / `Name`，其余在解析后即丢弃。令牌只存在 magpie 自己的 `plugin-auth.json` 里——插件不落盘、不输出、不发给 `modelscope.cn` 以外的任何地方。
+`login/info` 的响应里有 `Email`、`GitlabAccessToken` 等字段。本插件只读 `NickName` / `Name`，其余在解析后即丢弃。令牌只存在 magpie 自己的 `plugin-auth.json` 里——插件不输出、不发给 `modelscope.cn` 以外的任何地方。
+
+唯一写回的是那个昵称，写成已有登录记录上的 `accountId`，好让 magpie 的卡片能称呼账号。它走宿主自己的 `client.auth.set`（这个接口是整条替换），所以插件把宿主交给它的内容原样交回、只多加一个名字，令牌仍然只存一份。
 
 ## 范围与边界
 
