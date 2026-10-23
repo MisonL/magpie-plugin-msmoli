@@ -242,6 +242,7 @@ magpie accounts alias msmoli "API key …a1b2" 主号
 | 窗口前卡片写着「签到失败 · 未到签到时段」 | 正常现象，见上面的「什么时候领」 |
 | 一直是 `inactive` | 登录通了但没到账：账号不在活动范围，或今天已被别的客户端领走 |
 | 改了插件代码没生效 | 路径式插件按位置引用，改完要重启 magpie |
+| 两种方式都装了一遍，`magpie plugin list` 说 msmoli "served by" 其中一个 | 这是 magpie 在提醒同一个 provider id 有两份。删掉一份：`magpie plugin rm github:MisonL/magpie-plugin-msmoli` 或 `magpie plugin rm <路径>`。magpie 把 alias 挂在当初设它的那个包名下，所以删掉一份可能连带把显示名也收走——重新 add 那个包，或者再设一次 alias 就回来 |
 
 ## License
 

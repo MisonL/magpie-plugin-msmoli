@@ -305,6 +305,7 @@ an hour, and that retry reads the ledger before claiming, so nothing is lost.
 | Card says `签到失败 · 未到签到时段` before the window | expected — see "When it claims" above |
 | Always `inactive` | the sign-in works but nothing is granted: the account isn't eligible, or another client already claimed it today |
 | Edits to this plugin do nothing | path plugins are referenced in place; restart magpie |
+| Installed both ways by accident, and `magpie plugin list` says `msmoli` is "served by" one of them | that is magpie keeping two copies of one provider id. Remove one: `magpie plugin rm github:MisonL/magpie-plugin-msmoli` or `magpie plugin rm <path>`. magpie files your alias with the package it was set against, so removing a copy can take the display name with it — it comes back if you add that package again, or you set the alias once more |
 
 ## License
 
