@@ -54,6 +54,29 @@ magpie accounts checkin
 magpie accounts | grep msmoli
 ```
 
+## Publishing
+
+The package is not on npm yet. When it is, this is the whole of it:
+
+```bash
+node --test          # the suite, no network
+npm publish          # prepublishOnly runs the suite again
+```
+
+Check what goes in first if anything under `files` changed: `npm pack --dry-run`
+lists it — the module, both READMEs, the licence and `package.json`, nothing
+else.
+
+Once it is there, `magpie plugin add magpie-plugin-msmoli` installs it the way
+every other plugin is installed, and `magpie plugin update` follows the
+versions.
+
+The Plugins tab's Discover list is the community's own (`registry.json` in
+magpie-community/plugins) and shows only packages under that organisation.
+A plugin outside it is found through the tab's search instead, which asks npm
+for packages whose name or keywords say they are an OpenCode plugin — this
+package's `opencode-plugin` and `magpie-plugin` keywords are what put it there.
+
 ## Things that are deliberate
 
 - **A separate `msmoli` provider, with no models.** Chat keeps using the

@@ -36,6 +36,7 @@
     "icon": "https://modelscope.cn/favicon.ico"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "prepublishOnly": "node --test"
   }
 }
