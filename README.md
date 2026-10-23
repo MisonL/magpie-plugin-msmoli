@@ -175,8 +175,9 @@ store the token a second time. Name an account if you run more than one:
 magpie accounts alias msmoli "API key …a1b2" my-main
 ```
 
-And the daily grant is per ModelScope account, not per key: two tokens for the
-same ModelScope user claim one grant between them, not two.
+And the daily grant belongs to the ModelScope account, not to the key: the
+claim is idempotent server-side per account per day, so a second token for the
+same ModelScope user gets `done` rather than another 250.
 
 ## Why its own provider, with no models
 
