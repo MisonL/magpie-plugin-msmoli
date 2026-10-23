@@ -167,10 +167,13 @@ magpie accounts            # both rows, each with its own 魔粒 window
 ```
 
 The card names an account by the name ModelScope gives it. An api-type
-sign-in has no such name, so the check-in writes the nickname back the first
-time it runs: the same sign-in entry, the token still stored once, now with
-`accountId` beside it. Until that first check-in the card shows the end of the
-key (`API key …a1b2`), and so it does for a host that has not checked in yet.
+sign-in has no such name, so the check-in writes the nickname back: the same
+sign-in entry, the token still stored once, now with `accountId` beside it.
+
+It happens on the first check-in that actually runs in the host process, so a
+fresh install shows `API key …a1b2` until then. An account whose check-in is
+already settled for the day is not asked again — magpie reuses the record — so
+the name appears with the next day's check-in rather than on upgrade.
 
 If you would rather choose the name yourself, magpie's own alias wins over it:
 

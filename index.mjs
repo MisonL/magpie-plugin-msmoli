@@ -296,9 +296,10 @@ async function rememberAccountName(client, token, name, auth) {
     // base: a field we do not know about is kept, not dropped
     const body = { ...(auth && typeof auth === "object" ? auth : {}), type: "api", key: token, accountId: name }
     await client.auth.set({ path: { id: ID }, body })
-  } catch {
+  } catch (e) {
     // the card keeps the key's tail; nothing else depends on this
     named.delete(h)
+    client?.app?.log?.({ body: { level: "warn", service: "msmoli", message: `account name not written back: ${e?.message ?? e}` } }).catch?.(() => {})
   }
 }
 
@@ -421,8 +422,12 @@ export async function MsmoliPlugin(input) {
 
       // 魔粒余额与今日消耗，给账号卡片看。
       async usage(getAuth) {
-        const token = tokenOf(await getAuth())
+        const auth = await getAuth()
+        const token = tokenOf(auth)
         if (!token) throw new Error("没有登录信息")
+        // the name is only known from login/info, which usage must never
+        // reach; a check-in in this process leaves it here for the card
+        await rememberAccountName(client, token, names.get(handleOf(token)) ?? "", auth)
         try {
           const bal = await json(token, BALANCE)
           if (bal.res.status === 401) throw fail(bal.res.status)
