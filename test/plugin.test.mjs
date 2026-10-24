@@ -641,6 +641,31 @@ test("the window is read from the folder magpie reports, not a guessed one", asy
   }
 })
 
+test("a config file that is not JSON, or not an object, is the default window", async () => {
+  // the file is hand-edited by users; a stray comma or a JSON array must not
+  // make the plugin stop claiming — it reads as "no overrides at all"
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-bad-"))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const realNow = Date.now
+  try {
+    for (const junk of ['{"checkinWindow": ["13:00",', "[1,2,3]", "null", "", "false", '"08:30-10:00"']) {
+      writeFileSync(join(dir, "msmoli.json"), junk)
+      const p = await MsmoliPlugin({ directory: dir })
+      Date.now = () => Date.parse(`${today} 02:00:00`.replace(" ", "T") + "+08:00")
+      const r = await p.auth.checkin(async () => ({ type: "api", key: "ms-bad" }))
+      // 02:00 is before any default window; all of these must still answer
+      // with the default window rather than claiming or throwing
+      assert.equal(r.outcome, "failed", `junk config ${JSON.stringify(junk)} must not crash or claim`)
+      assert.match(r.message, /08:30–10:00/, `junk config ${JSON.stringify(junk)} must read as the default`)
+    }
+  } finally {
+    Date.now = realNow
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
 test("an unusable window falls back to the default instead of never claiming", async () => {
   // start after end: honored, the account would never be due — so the default
   await withWindow(["10:00", "08:30"], `${today} 02:00:00`, async () => {
@@ -777,6 +802,12 @@ test("two tokens are two accounts: own target, own name, no bleed", async () => 
     }
 
     // the name read at check-in is keyed by token, so B never sees A's
+    // A clock past the window is required here: before its target the
+    // check-in answers failed without ever reaching login/info, so the name
+    // would never be read — a test run in the morning would fail on that
+    // alone (the suite did, at 08:24 Beijing).
+    const past = Date.parse(`${today} 10:30:00`.replace(" ", "T") + "+08:00")
+    Date.now = () => past
     globalThis.fetch = async (url) => {
       const u = String(url)
       if (u.includes("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
@@ -790,6 +821,7 @@ test("two tokens are two accounts: own target, own name, no bleed", async () => 
       assert.equal(ua.user, "alice", "the account that checked in has its name")
       assert.equal(ub.user, "", "the other account must not borrow it")
     } finally {
+      Date.now = realNow
       globalThis.fetch = realFetch
     }
   } finally {
