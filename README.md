@@ -21,7 +21,7 @@ lightweight 0.5), so the daily 250 is roughly 125 calls.
 ## Install
 
 Needs magpie itself (<https://usemagpie.ai>). On macOS, use `magpie --version` to check it's on PATH; if not, use the app's full path:
-`/Applications/Magpie.app/Contents/MacOS/magpie`.
+`/Applications/magpie.app/Contents/MacOS/magpie`.
 
 ### Install via GitHub URL (no clone, auto-updates)
 
@@ -48,31 +48,39 @@ printf 'ms-your-token\n' | magpie plugin login msmoli
 ```
 
 Either form ends the same way: a `msmoli` row under Settings → Usage → Plugins.
-The sign-in is kept per package name rather than per folder, so switching
-between the two forms (or moving the clone) keeps the token — no second login.
+The sign-in is kept per provider id (`msmoli`) rather than per folder, so
+switching between the two forms (or moving the clone) keeps the token — no
+second login.
 
 ### Already have ModelScope set up in magpie? Sync that key to the plugin
 
 If you added ModelScope earlier just for chat, its key is already in
 `providers.json`. This package ships a small CLI that logs the same token into
-the plugin, so you don't have to find it again. Every magpie install already
-has it — magpie's plugin folder holds the package:
+the plugin, so you don't have to find it again.
+
+Installed from GitHub, magpie keeps its own copy in its plugin folder:
 
 ```bash
 node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --status      # see both sides
 node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --to-plugin   # sync
 ```
 
-(Portable installs keep the same file under their `data` folder. `npx
-magpie-plugin-msmoli` will work once the package is on npm — npm 12 blocks
-`npx github:…` by default, so don't start from that.)
+Installed from a clone, run the file in the clone — magpie references that
+folder and copies nothing (`./bin/sync.mjs` below). Portable installs keep the
+same layout under their `data` folder; if detection misses, `--dir <magpie's
+folder>` and `--magpie <path to the magpie binary>` say where things are.
+`npx magpie-plugin-msmoli` will work once the package is on npm — npm 12
+blocks `npx github:…` by default, so don't start from that.
 
 It reads magpie's config but never writes it: the writes are magpie's own
-(`magpie plugin login`), and the token is masked in everything it prints. When
-the plugin already uses the same key it changes nothing; when the two keys
-differ it refuses, because a second `login` would add a second account — pass
-`--force` to replace a single existing account. `--to-preset` goes the other
-way (needs `--force`: that key is what chat uses).
+(`magpie plugin login`, `magpie plugin logout`, `magpie provider key`), and the
+token is masked in everything it prints, failures included. When the plugin
+already uses the same key it changes nothing; when the two keys differ it
+refuses, because a second `login` would add a second account — pass `--force`
+to replace a single existing account. `--to-preset` goes the other way (needs
+`--force`: that key is what chat uses). If more than one provider could be the
+built-in side (say, a relay of the same host), the tool refuses to guess and
+`--from <id>` picks one; `--dry-run` prints the commands without running them.
 
 Turn the check-in on: Settings → Usage → Plugins → the `msmoli` row, or in
 `settings.json` (in magpie's own folder, `~/.config/magpie` for an installed
@@ -111,7 +119,7 @@ this one reads the day's ledger around it:
 2. touch `login/info`
 3. read the ledger again
 
-Three outcomes follow:
+Four outcomes follow:
 
 | Outcome | Meaning |
 |---|---|
@@ -129,7 +137,8 @@ The endpoints it uses, all on `modelscope.cn` with `Cookie: m_session_id=ms-…`
 | Balance | `GET /openapi/v1/magicubes/balance` |
 | Ledger | `GET /openapi/v1/magicubes/transactions?page=1&page_size=50` |
 
-`type` in the ledger is one of `EARN`, `SPEND_CONFIRM`, `EXPIRE`.
+`type` in the ledger has been seen as `EARN` and `SPEND_CONFIRM`; there is
+also an `EXPIRE`, which this plugin ignores.
 
 ### When it claims: the check-in window
 
@@ -155,19 +164,21 @@ One string works the same way: `{ "checkinWindow": "08:30-10:00" }`.
 `false` turns the window off (claim whenever magpie asks); so does `"off"`.
 An unusable value — `08:30`–`08:00`, a date that isn't a clock time — falls
 back to the default rather than never claiming. An end past **23:00** is
-capped there: magpie asks again half an hour after a failure, and a target
-needs an ask *after* it on the same day. A target at 23:29 gets exactly one
-ask, at 23:30 — if that one fails, the day's credits are gone with it.
-Capping at 23:00 leaves the target's own ask and a retry. A window that sits
-entirely past 23:00 falls back to the default window too, since there would
-be nowhere left to put the target. The file is read on every ask, so a change
-takes effect without restarting magpie.
+capped there: the host asks every 30 minutes, so a target needs asks after it
+that still land on the same day. A target in the last half hour would get
+fewer, and if those fail the day's credits go with them; capping at 23:00
+keeps at least two. A window that sits entirely past 23:00 falls back to the
+default window too, since there would be nowhere left to put the target. The
+file is read on every ask, so a change takes effect without restarting
+magpie.
 
-How it fits magpie's schedule: magpie asks once when the Beijing day turns
-and re-asks every 30 minutes **after a failure** — `failed` is the only
-outcome it retries; everything else settles the day. So before the window's
-moment the plugin answers `failed` with the time it will run, and sends
-**no request at all**.
+How it fits magpie's schedule: magpie asks once when the Beijing day turns,
+then every 30 minutes — always after a `failed`, and also after a
+`done`/`inactive`/`ineligible` it hasn't seen a claim for yet, up to noon
+Beijing (a provisional answer: the vendor's day may not have turned). So
+before the window's moment the plugin answers `failed` with the time it will
+run, and sends **no request at all**. `failed` is still the one outcome that
+guarantees a re-ask; the others only get one while the day is unproven.
 
 What that costs, since a plugin has no other way to defer: until the claim
 actually runs the account card shows a red dot and magpie's own "check-in
@@ -178,7 +189,8 @@ period exits non-zero. Turning the window off removes all three.
 How long that is depends on when magpie next asks, not on the target alone.
 Measured on a real day: the target was 09:01, magpie asked at 09:00:57 (three
 seconds early, so `failed`), and the claim landed on the next ask at 09:31 —
-about 9.5 hours of red dot, not the 8.5 the window alone suggests.
+about 9.5 hours from midnight, rather than the 8.5 the window's 08:30 start
+alone suggests.
 
 ### Upstream
 
@@ -191,9 +203,10 @@ the account card) want a line in
 `recheck` for plugins.
 
 Two consequences worth knowing, both from the same missing timer: a window's
-target can only be reached by the host's own 30-minute asks, so an ask missed
-while the machine is asleep costs that day; and the plugin cannot retry on its
-own between asks — the window's cap (above) is what buys the retry.
+target is only reached by the host's own asks, so one that falls while the
+machine is asleep is claimed on the next ask after it wakes (the day is lost
+only if that happens past midnight); and the plugin cannot retry on its own
+between asks — the window's cap (above) is what buys the retry.
 
 ### More than one account
 
@@ -326,7 +339,7 @@ an hour, and that retry reads the ledger before claiming, so nothing is lost.
 | `failed` with HTTP 401 | the token was revoked — make a new one and sign in again |
 | `failed` with HTTP 403 | ModelScope's risk control refused the request; the token is fine. It retries in 30 minutes |
 | Before the window the card reads failed, with a line naming the claim time: `09:56 后自动领取（约 1 小时 33 分钟后，无需操作）` | expected — the card leads with when it will claim; see "When it claims" above |
-| Always `inactive` | the sign-in works but nothing is granted: the account isn't eligible, or another client already claimed it today |
+| Always `inactive` | the sign-in works but nothing shows in today's ledger: the account may not be eligible, or the grant hasn't been written yet (a claim made elsewhere shows as `done`) |
 | Edits to this plugin do nothing | path plugins are referenced in place; restart magpie |
 | Installed both ways by accident, and `magpie plugin list` says `msmoli` is "served by" one of them | that is magpie keeping two copies of one provider id. Remove one: `magpie plugin rm github:MisonL/magpie-plugin-msmoli` or `magpie plugin rm <path>`. magpie files your alias with the package it was set against, so removing a copy can take the display name with it — it comes back if you add that package again, or you set the alias once more |
 

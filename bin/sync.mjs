@@ -27,13 +27,14 @@ const HOST = "api-inference.modelscope.cn"
 
 const USAGE = `magpie-plugin-msmoli — 把 magpie 里已有的 ModelScope 令牌同步给签到插件
 
-用法：npx magpie-plugin-msmoli [选项]
+用法：node bin/sync.mjs [选项]（发布到 npm 后也可 npx magpie-plugin-msmoli）
 
 不带参数：显示两边状态，并把将要执行的动作写清楚；不改动任何东西。
   --to-plugin   把内置 ModelScope 预设的 key 登录给签到插件
   --to-preset   反向：把签到插件主账号的 key 写进内置预设
   --force       两边令牌不同时也执行（会替换 / 先登出现有登录）
-  --from <id>   内置侧只认 id 恰好为它的 provider（默认的识别见上）
+  --from <id>   内置侧只认 id 恰好为它的 provider（不给时先找 id/preset 为 modelscope 的，
+                再找 chat 指向 api-inference.modelscope.cn 的自建 vendor）
   --dir <路径>  magpie 配置目录（便携版探测不到时用这个）
   --magpie <路径>  magpie 可执行文件（默认找各平台的常见安装位置，不经 PATH）
   --status      只报告，不执行

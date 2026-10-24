@@ -55,15 +55,20 @@ Three invariants to keep when touching it:
   which owns the locking, the `.bak` generations and the change events. A tool
   that edits `plugin-auth.json` behind a running magpie races it and misses
   those.
-- **The token never appears in output.** Everything user-facing shows the same
-  mask magpie uses (first four, `…`, last four). `test/sync.test.mjs` asserts
-  no plan line contains a whole token.
+- **The token never appears in output — success or failure.** Long tokens show
+  magpie's own mask (first four, `…`, last four); anything under 12 characters
+  shows its length instead, since there would be no middle left to hide. The
+  failure path scrubs a child command's output too: that is the path most
+  likely to echo the key back. `test/sync.test.mjs` asserts no plan line
+  contains a whole token, and that a failing command's stderr doesn't either.
 - **It never signs the user into a second account by accident.** The host keys
-  accounts by token: the same token again is idempotent, a different one adds
-  `msmoli#xxxxxx`, and `logout` signs out *all* accounts of the provider. So a
-  differing token is refused unless `--force`, and `--force` is refused when
-  more than one account exists. These are pinned by tests — don't loosen them
-  without a reason a user would accept.
+  accounts by `accountId`, falling back to the token only when neither side has
+  one: a plain api sign-in with the same token again is idempotent, but once a
+  nickname has been written back the entry carries an `accountId`, and a
+  second `login` with the same token can add `msmoli#xxxxxx`. `logout` signs
+  out *all* accounts of the provider. So a differing token is refused unless
+  `--force`, and `--force` is refused when more than one account exists. These
+  are pinned by tests — don't loosen them without a reason a user would accept.
 
 ## Development
 
@@ -122,19 +127,22 @@ package's `opencode-plugin` and `magpie-plugin` keywords are what put it there.
 - **ModelScope's times are parsed as Beijing time.** They carry no zone, and
   `new Date()` would read them in the host's own zone.
 - **Before the check-in window's moment, the hook answers `failed`.** magpie
-  retries `failed` and settles on every other outcome, so that is the only way
-  a plugin can say "ask me again later". Don't "fix" it to `inactive`: the day
-  would then be over without the credits ever being claimed. `test/plugin.test.mjs`
-  pins both halves (nothing sent before the moment, a claim after it).
+  always re-asks `failed`; `done`/`inactive`/`ineligible` only get re-asked
+  while the day is unproven (before noon Beijing, and only if no claim was
+  seen), after which they settle the day. `failed` is therefore the reliable
+  way for a plugin to say "ask me again later" — don't "fix" the pre-window
+  answer to `inactive`, or a morning ask could settle the day before the
+  window even opens. `test/plugin.test.mjs` pins both halves (nothing sent
+  before the moment, a claim after it).
 - **The window's target minute is derived, not stored.** It is a hash of the
   day and the account, so the 30-minute re-asks agree without a state file, and
   a host restart doesn't move it.
-- **The window's end is capped at 23:00 (`LAST`).** magpie asks again 30
-  minutes after a failure, so a target needs an ask after it that still lands
-  on the same day. A target in the last half hour gets exactly one, and if
-  that one fails the next ask is after midnight — when the day and the hashed
-  target have both moved on — and the day's credits are lost. Capping at 23:00
-  leaves two asks for the latest targets. A window entirely past 23:00 falls
+- **The window's end is capped at 23:00 (`LAST`).** magpie asks every 30
+  minutes, so a target needs asks after it that still land on the same day. A
+  target in the last half hour can wait on fewer of them, and if those fail
+  the next ask is after midnight — when the day and the hashed target have
+  both moved on — and the day's credits are lost. Capping at 23:00 leaves at
+  least two asks for the latest targets. A window entirely past 23:00 falls
   back to the default. `test/plugin.test.mjs` pins the cap.
 - **`failed` before the window costs something, and the docs should say so.**
   The card shows a red dot and magpie's own "check-in failed; tries again

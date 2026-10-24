@@ -17,7 +17,7 @@ ModelScope 的 API-Inference 是免费的，用魔粒结算：
 ## 安装
 
 需要先装好 magpie（<https://usemagpie.ai>）。macOS 上用 `magpie --version` 确认命令在 `PATH` 上；
-不在的话用 app 里的完整路径 `/Applications/Magpie.app/Contents/MacOS/magpie`。
+不在的话用 app 里的完整路径 `/Applications/magpie.app/Contents/MacOS/magpie`。
 
 ### 方式一：直接从 GitHub 装（不用 clone，能跟着更新）
 
@@ -44,26 +44,32 @@ printf 'ms-你的令牌\n' | magpie plugin login msmoli
 两种方式结果一样：设置 → 用量 → 插件 里多出 `msmoli` 一行。登录态是按 provider 名
 （`msmoli`）存的、不绑文件夹，所以两种方式之间切换、或把 clone 挪个位置，都不用重新登录。
 
-#### 已经在 magpie 里配好 ModelScope？一条命令把 key 同步给插件
+### 已经在 magpie 里配好 ModelScope？几条命令把 key 同步给插件
 
 如果你之前为了聊天已经把 ModelScope 加进「供应商」（`providers.json` 里有 key），
-本包自带一个小工具可以把同一把令牌登录给插件，不用再找一遍。装插件时 magpie 已经
-把包拷进了自己的插件目录，直接用那里那份即可：
+本包自带一个小工具可以把同一把令牌登录给插件，不用再找一遍。
+
+用 GitHub 方式装的，magpie 会在自己的插件目录里放一份：
 
 ```bash
 node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --status      # 先看两边状态
 node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --to-plugin   # 执行同步
 ```
 
-（便携版在同目录结构的 `data` 下。`npx magpie-plugin-msmoli` 要等包发布到 npm
-之后才能用——npm 12 默认禁用 `npx github:…`，别从那条路开始。）
+用 clone 方式装的，跑 clone 里那份（`./bin/sync.mjs`）——magpie 只是按位置引用那个
+文件夹，并不会拷走。便携版的目录结构相同，只是根目录是它的 `data` 文件夹；探测不到时
+用 `--dir <magpie 的目录>` 和 `--magpie <magpie 可执行文件的路径>` 指明。
+`npx magpie-plugin-msmoli` 要等包发布到 npm 之后才能用——npm 12 默认禁用
+`npx github:…`，别从那条路开始。
 
-- 它只读 magpie 的两个文件；写入交给 magpie 自己的 CLI（`plugin login`）完成，
-  输出里不会出现令牌；
-- 插件已经用同一把令牌登录时它是幂等的（什么都不改）；两边是**不同**的令牌时
-  它默认拒绝——直接 login 会新增第二个账号，换一把则需要 `--force`；
+- 它只读 magpie 的两个文件；写入交给 magpie 自己的 CLI（`plugin login`、
+  `plugin logout`、`provider key`）完成，输出里不会出现令牌，失败信息也一样；
+- 插件已经用同一把令牌登录时它什么都不改；两边是**不同**的令牌时它默认拒绝
+  ——直接 login 会新增第二个账号，换一把则需要 `--force`；
 - 反向也有：`--to-preset` 把插件主账号的令牌写回内置预设（要 `--force`，因为那把
-  key 是聊天正在用的）。
+  key 是聊天正在用的）；
+- 内置侧若有多个可能的 provider（比如自己搭的同域名中转），它不猜，用
+  `--from <id>` 指定；`--dry-run` 只打印要执行的命令，不真跑。
 
 把签到打开：设置 → 用量 → 插件 → `msmoli` 那一行，或者改 `settings.json`
 （在 magpie 自己的目录里，安装版是 `~/.config/magpie`）：
@@ -94,7 +100,7 @@ ModelScope 没有公开的签到端点。它有的是一个副作用：`GET /api
 2. 触达 `login/info`
 3. 再读一次账单
 
-于是有三种结果：
+于是有四种结果：
 
 | 结果 | 含义 |
 |---|---|
@@ -111,7 +117,7 @@ ModelScope 没有公开的签到端点。它有的是一个副作用：`GET /api
 | 余额 | `GET /openapi/v1/magicubes/balance` |
 | 账单 | `GET /openapi/v1/magicubes/transactions?page=1&page_size=50` |
 
-账单里的 `type` 见到过 `EARN` 与 `SPEND_CONFIRM`，另有一种 `EXPIRE`（本插件不依赖它）。
+账单里的 `type` 见到过 `EARN` 与 `SPEND_CONFIRM`，另有一种 `EXPIRE`（本插件忽略它）。
 
 ### 什么时候领：签到时段
 
@@ -133,15 +139,17 @@ ModelScope 没有公开的签到端点。它有的是一个副作用：`GET /api
 
 `false` 关掉时段（宿主一问就领），写成 `"off"` 也一样。值写坏了
 （`08:30`–`08:00`、不是时刻）会退回默认，而不是永远不领。结束时刻晚于
-**23:00** 会被截到那里：magpie 失败后隔 30 分钟才再问，而一个目标时刻需要
-它之后还有一次当天询问。23:29 的目标只有 23:30 这一次——那一次失败，当天的
-额度就一起丢了。截到 23:00 能留下目标本身那次和一次重试。
+**23:00** 会被截到那里：宿主每 30 分钟问一次，一个目标时刻需要它之后还有落到
+同一天的询问。落在最后半小时的目标能等到的询问更少，一旦都失败，当天的额度
+就一起丢了；截到 23:00 至少能留下两次。
 整段都落在 23:00 之后的窗口同样退回默认窗口，因为已经没有地方放目标时刻了。
 文件每次被问都重读，改完不用重启 magpie。
 
-与宿主调度的衔接：magpie 在北京日切换时问一次，之后**失败才**每 30 分钟再问
-——`failed` 是唯一会被重试的结果，其余都会让当天就此了结。所以到了窗口里的
-时刻之前，插件回答 `failed` 并说明几点领取，**一个请求都不发**。
+与宿主调度的衔接：magpie 在北京日切换时问一次，之后每 30 分钟问一次——失败
+一定再问；`done`/`inactive`/`ineligible` 这类「还没见到领取」的回答，在北京
+时间 12 点前也会被当作暂定答案再问（厂商那边的「今天」可能还没翻篇）。所以到了
+窗口里的时刻之前，插件回答 `failed` 并说明几点领取，**一个请求都不发**。
+`failed` 仍是唯一保证会被再问的结果，其余只在当天还没被证实前才会被重问。
 
 代价要说清楚，因为插件没有别的办法表达「晚点再问」：真正领到之前，卡片上是
 红点和 magpie 自己的「签到失败；magpie 稍后重试」；这段时间每次询问都会重写
@@ -150,7 +158,7 @@ ModelScope 没有公开的签到端点。它有的是一个副作用：`GET /api
 
 红点持续多久，取决于 magpie 下一次什么时候问，而不只看目标时刻。实测某天：
 目标 09:01，magpie 在 09:00:57 问（差三秒，答 `failed`），真正领取落在下一次
-询问 09:31——红点约 9.5 小时，比只看窗口的 8.5 小时更长。
+询问 09:31——从零点算约 9.5 小时，而不是只看窗口起点 08:30 会以为的 8.5 小时。
 
 ### 上游
 
@@ -161,9 +169,9 @@ magpie 没有给插件定时器、时钟，也不能决定自己什么时候被�
 [这个 issue](https://github.com/yetone/magpie/issues/3245) 里要一个插件能用的
 定时器和 `recheck`。
 
-同一个「没有定时器」还带来两个要知道的后果：目标时刻只能靠宿主每 30 分钟那一次
-询问去够，机器睡眠期间错过的询问就是当天没了；两次询问之间插件也没法自己重试
-——上面那个时段上限买到的那次重试，就是为此存在的。
+同一个「没有定时器」还带来两个要知道的后果：目标时刻只能靠宿主自己的询问去够，
+机器睡眠期间错过的那次会在醒来后的下一次询问补上（只有睡过午夜才会丢当天）；
+两次询问之间插件也没法自己重试——上面那个时段上限买到的那次重试，就是为此存在的。
 
 ### 多个账号
 
@@ -261,7 +269,7 @@ magpie accounts alias msmoli "API key …a1b2" 主号
 | `failed` + HTTP 401 | 令牌被吊销，重新生成并登录 |
 | `failed` + HTTP 403 | 魔搭风控拒了这次请求，令牌本身没问题，30 分钟后会重试 |
 | 窗口前卡片写着 failed，附一行「09:56 后自动领取（约 1 小时 33 分钟后，无需操作）」 | 正常现象——卡片以领取时刻开头，见上面的「什么时候领」 |
-| 一直是 `inactive` | 登录通了但没到账：账号不在活动范围，或今天已被别的客户端领走 |
+| 一直是 `inactive` | 登录通了但当天账单里没有记录：账号可能不在活动范围，或者发放还没写出来（别处领过的会显示成 `done`） |
 | 改了插件代码没生效 | 路径式插件按位置引用，改完要重启 magpie |
 | 两种方式都装了一遍，`magpie plugin list` 说 msmoli "served by" 其中一个 | 这是 magpie 在提醒同一个 provider id 有两份。删掉一份：`magpie plugin rm github:MisonL/magpie-plugin-msmoli` 或 `magpie plugin rm <路径>`。magpie 把 alias 挂在当初设它的那个包名下，所以删掉一份可能连带把显示名也收走——重新 add 那个包，或者再设一次 alias 就回来 |
 
