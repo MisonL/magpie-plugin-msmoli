@@ -39,6 +39,30 @@ nothing carries, and the user's name would vanish from the card. `aliasOf` in
 `index.mjs` does the read; a test pins both halves (named → no write, unnamed →
 the nickname).
 
+## The sync CLI
+
+`bin/sync.mjs` is the `npx magpie-plugin-msmoli` tool that copies an existing
+ModelScope key between the built-in preset (`providers.json`) and this plugin's
+sign-in (`plugin-auth.json`). Its tests live in `test/sync.test.mjs` and run
+with the rest of the suite.
+
+Three invariants to keep when touching it:
+
+- **It never writes a magpie file itself.** The reads are direct; every write
+  goes through magpie's own CLI (`magpie plugin login`, `magpie provider key`),
+  which owns the locking, the `.bak` generations and the change events. A tool
+  that edits `plugin-auth.json` behind a running magpie races it and misses
+  those.
+- **The token never appears in output.** Everything user-facing shows the same
+  mask magpie uses (first four, `…`, last four). `test/sync.test.mjs` asserts
+  no plan line contains a whole token.
+- **It never signs the user into a second account by accident.** The host keys
+  accounts by token: the same token again is idempotent, a different one adds
+  `msmoli#xxxxxx`, and `logout` signs out *all* accounts of the provider. So a
+  differing token is refused unless `--force`, and `--force` is refused when
+  more than one account exists. These are pinned by tests — don't loosen them
+  without a reason a user would accept.
+
 ## Development
 
 ```bash
@@ -72,8 +96,8 @@ npm publish          # prepublishOnly runs the suite again
 ```
 
 Check what goes in first if anything under `files` changed: `npm pack --dry-run`
-lists it — the module, both READMEs, the licence and `package.json`, nothing
-else.
+lists it — the module, the sync CLI, both READMEs, the licence and
+`package.json`, nothing else.
 
 Once it is there, `magpie plugin add magpie-plugin-msmoli` installs it the way
 every other plugin is installed, and `magpie plugin update` follows the

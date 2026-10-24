@@ -44,6 +44,22 @@ printf 'ms-你的令牌\n' | magpie plugin login msmoli
 两种方式结果一样：设置 → 用量 → 插件 里多出 `msmoli` 一行。登录态是按 provider 名
 （`msmoli`）存的、不绑文件夹，所以两种方式之间切换、或把 clone 挪个位置，都不用重新登录。
 
+#### 已经在 magpie 里配好 ModelScope？一条命令把 key 同步给插件
+
+如果你之前为了聊天已经把 ModelScope 加进「供应商」（`providers.json` 里有 key），
+本包自带一个小工具可以把同一把令牌登录给插件，不用再找一遍：
+
+```bash
+npx magpie-plugin-msmoli            # 显示两边状态，再按提示加 --to-plugin 执行
+```
+
+- 它只读 magpie 的两个文件；写入交给 magpie 自己的 CLI（`plugin login`）完成，
+  输出里不会出现令牌；
+- 插件已经用同一把令牌登录时它是幂等的（什么都不改）；两边是**不同**的令牌时
+  它默认拒绝——直接 login 会新增第二个账号，换一把则需要 `--force`；
+- 反向也有：`--to-preset` 把插件主账号的令牌写回内置预设（要 `--force`，因为那把
+  key 是聊天正在用的）。
+
 把签到打开：设置 → 用量 → 插件 → `msmoli` 那一行，或者改 `settings.json`
 （在 magpie 自己的目录里，安装版是 `~/.config/magpie`）：
 

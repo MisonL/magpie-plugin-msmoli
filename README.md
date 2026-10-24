@@ -51,6 +51,24 @@ Either form ends the same way: a `msmoli` row under Settings → Usage → Plugi
 The sign-in is kept per package name rather than per folder, so switching
 between the two forms (or moving the clone) keeps the token — no second login.
 
+### Already have ModelScope set up in magpie? Sync that key to the plugin
+
+If you added ModelScope earlier just for chat, its key is already in
+`providers.json`. This package ships a small CLI that logs the same token into
+the plugin, so you don't have to find it again:
+
+```bash
+npx magpie-plugin-msmoli                 # both sides, and what it would do
+npx magpie-plugin-msmoli --to-plugin     # log the preset's key into the plugin
+```
+
+It reads magpie's config but never writes it: the writes are magpie's own
+(`magpie plugin login`), and the token is masked in everything it prints. When
+the plugin already uses the same key it changes nothing; when the two keys
+differ it refuses, because a second `login` would add a second account — pass
+`--force` to replace a single existing account. `--to-preset` goes the other
+way (needs `--force`: that key is what chat uses).
+
 Turn the check-in on: Settings → Usage → Plugins → the `msmoli` row, or in
 `settings.json` (in magpie's own folder, `~/.config/magpie` for an installed
 magpie):

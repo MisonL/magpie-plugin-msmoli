@@ -14,8 +14,13 @@
   },
   "main": "./index.mjs",
   "exports": "./index.mjs",
+  "bin": {
+    "magpie-plugin-msmoli": "./bin/sync.mjs",
+    "msmoli-sync": "./bin/sync.mjs"
+  },
   "files": [
     "index.mjs",
+    "bin/sync.mjs",
     "README.md",
     "README.zh-CN.md",
     "LICENSE"
