@@ -107,10 +107,14 @@ export function findConfigDir({ env = process.env, home = homedir(), os = platfo
 
 // ---- 读：只读，剥 BOM（magpie 自己也这么做），读不动就当没有
 
+// readJson returns undefined for "not there", null for "there but unreadable".
+// The two are not the same decision: a file that exists and doesn't parse may
+// be mid-write or briefly locked, and reading it as "nobody is signed in"
+// would let a run create a second account over one it could not see.
 function readJson(file, exists = existsSync) {
-  if (!exists(file)) return null
+  if (!exists(file)) return undefined
   try {
-    return JSON.parse(readFileSync(file, "utf8").replace(/^﻿/, ""))
+    return JSON.parse(readFileSync(file, "utf8").replace(/^\uFEFF/, ""))
   } catch {
     return null
   }
@@ -199,7 +203,9 @@ export function planToPlugin({ preset, accounts, force }) {
     action: "run",
     lines,
     cmds: [
-      { argv: ["plugin", "logout", ID], stdin: "" },
+      // logout 也带 secret：被换掉的那把是真实凭据，magpie 的报错若回显
+      // 账号（"no key ms-… for provider"）不该把整串放上终端
+      { argv: ["plugin", "logout", ID], stdin: "", secret: accounts[0].token },
       { argv: ["plugin", "login", ID], stdin: `${preset.key}\n`, secret: preset.key },
     ],
   }
@@ -227,7 +233,7 @@ export function planToPreset({ preset, accounts, force }) {
   lines.push(`  内置预设：${show(preset.id)}，现有 key（${mask(preset.key)}）会被整条替换。`)
   // provider key 的第一个参数是 id：一个以 "-" 开头的 id 会被 magpie 的 CLI
   // 当成 flag（`provider key --help <token>` 只打印帮助、不写 key）。
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(preset.id)) {
+  if (typeof preset.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(preset.id)) {
     lines.push(`✗ 这个 provider id 不是 magpie 接受的形状（${show(preset.id)}），不能用 provider key 写入。`)
     return { action: "refuse", lines, cmds: [] }
   }
@@ -241,6 +247,10 @@ export function planToPreset({ preset, accounts, force }) {
 
 // ---- 执行
 
+// 多步序列（--force 的 logout→login）中途失败：logout 已经发生了，用户此刻
+// 是被登出的状态。超时（r.error）与退出码非零（r.status）都要说这句话。
+const RECOVER = `注意：前面的步骤已经执行，现有登录已被登出。重新运行同一条命令即可继续（此时插件没有账号，会直接登录，无需 --force）。`
+
 function hidden(argv, secret, log) {
   const shown = secret ? argv.map((a) => (a === secret ? mask(secret) : a)) : argv
   log(`$ magpie ${shown.join(" ")}`)
@@ -250,31 +260,37 @@ function hidden(argv, secret, log) {
 // it: the answer printed on success, and the failure printed in the error —
 // the failing path is the one most likely to carry the command back verbatim
 // ("no key ms-… for provider"), and hiding it only on success was the gap.
-function scrub(out, secret) {
-  return secret ? out.split(secret).join(mask(secret)) : out
+function scrub(out, ...secrets) {
+  for (const secret of secrets) {
+    if (secret) out = out.split(secret).join(mask(secret))
+  }
+  return out
 }
 
 function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
   for (let i = 0; i < cmds.length; i++) {
     const { argv, stdin, secret } = cmds[i]
+    const secrets = [...new Set(cmds.slice(0, i + 1).map((c) => c.secret).filter(Boolean))]
     hidden(argv, secret, log)
     if (dryRun) continue
     const r = spawn(bin, argv, { input: stdin, encoding: "utf8", timeout })
     const out = `${r.stdout ?? ""}${r.stderr ?? ""}`.trim()
-    if (r.error) throw new Error(`跑不动 ${bin}：${r.error.message}（用 --magpie 指定完整路径）`)
+    if (r.error) {
+      const e = new Error(`跑不动 ${bin}：${r.error.message}（用 --magpie 指定完整路径）`)
+      if (i > 0) e.recover = RECOVER
+      throw e
+    }
     if (r.status !== 0) {
-      const said = scrub(out, secret).split("\n").filter(Boolean).slice(-3).join("\n")
+      const said = scrub(out, secret, ...secrets).split("\n").filter(Boolean).slice(-3).join("\n")
       const e = new Error(`magpie 命令失败（退出码 ${r.status}）${said ? `：\n${said}` : ""}`)
       // 多步序列（--force 的 logout→login）中途失败：logout 已经发生了，
       // 用户此刻是被登出的状态。说清楚，并告诉他重跑即可续上——
       // 此时插件已无账号，重跑走的是全新登录那条路，不再需要 --force。
-      if (i > 0) {
-        e.recover = `注意：前面的步骤已经执行，现有登录已被登出。重新运行同一条命令即可继续（此时插件没有账号，会直接登录，无需 --force）。`
-      }
+      if (i > 0) e.recover = RECOVER
       throw e
     }
     // magpie 自己就把令牌显示成掩码；将来若变，这里兜底再滤一遍
-    for (const line of scrub(out, secret).split("\n")) if (line.trim()) log(`  ${line}`)
+    for (const line of scrub(out, secret, ...secrets).split("\n")) if (line.trim()) log(`  ${line}`)
   }
 }
 
@@ -313,7 +329,13 @@ export async function main({
   log(`magpie 配置目录：${show(dir)}`)
 
   const providers = readJson(join(dir, "providers.json"), exists)?.providers
-  const accounts = pluginAccounts(readJson(join(dir, "plugin-auth.json"), exists))
+  const authRaw = readJson(join(dir, "plugin-auth.json"), exists)
+  if (authRaw === null) {
+    log(`✗ ${show(join(dir, "plugin-auth.json"))} 存在但读不出来（可能正在被写或已损坏）。`)
+    log(`  不猜它的内容：先确认 magpie 正常，或备份后重试。`)
+    return 1
+  }
+  const accounts = pluginAccounts(authRaw)
   const cands = presetCandidates(providers, args.from)
 
   log(`  内置 ModelScope：${cands.length === 1 ? `${show(cands[0].id)}（${mask(cands[0].key)}）` : cands.length ? "多个候选" : "未配置"}`)

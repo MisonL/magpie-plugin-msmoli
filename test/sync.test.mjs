@@ -464,6 +464,7 @@ test("no magpie binary means no run, not a PATH lookup", async () => {
   const dir = mkdtempSync(join(tmpdir(), "msmoli-nobin-"))
   try {
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
     let spawned = false
     const out = []
     const code = await main({
@@ -479,6 +480,89 @@ test("no magpie binary means no run, not a PATH lookup", async () => {
     assert.equal(code, 1)
     assert.equal(spawned, false, "nothing may be spawned without a known binary")
     assert.match(out.join("\n"), /--magpie/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("an unreadable plugin-auth.json is a refusal, not 'not signed in'", async () => {
+  // a file that exists and doesn't parse may be mid-write or briefly locked;
+  // reading it as "nobody signed in" would let a run add a second account
+  // over one it couldn't see
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-brokenauth-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), "{ broken")
+    let spawned = false
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        spawned = true
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1)
+    assert.equal(spawned, false, "a write decision must not rest on an unreadable file")
+    assert.match(out.join("\n") + String(code), /读不出来/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a timeout in the second step of a replace still says how to recover", async () => {
+  // spawnSync surfaces a timeout as error + status null, not status != 0 —
+  // and that branch used to skip the "you are signed out" message
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-timeout-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: (_cmd, argv) => {
+        if (argv.includes("logout")) {
+          writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+          return { status: 0, stdout: "✓ signed out", stderr: "" }
+        }
+        return { error: Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" }), status: null, signal: "SIGTERM", stdout: "", stderr: "" }
+      },
+    })
+    const text = out.join("\n")
+    assert.equal(code, 1)
+    assert.match(text, /ETIMEDOUT/)
+    assert.match(text, /已被登出/, "the account is gone; the user must be told")
+    assert.match(text, /重新运行/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the replaced token is masked in the logout step's output too", async () => {
+  // the token being signed out is as real as the one being signed in; a
+  // magpie that echoes the account in its logout error must not put the
+  // whole old key on the terminal
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-logoutmask-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: (_cmd, argv) => {
+        if (argv.includes("logout")) {
+          return { status: 5, stdout: "", stderr: `signed out msmoli (key ${B}) failed` }
+        }
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    const text = out.join("\n")
+    assert.equal(code, 1)
+    assert.ok(!text.includes(B), `the replaced token leaked:\n${text}`)
+    assert.match(text, /ms-b…5555/, "the masked form still tells the user which account")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
