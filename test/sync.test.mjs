@@ -25,7 +25,10 @@ const presetOf = (key = A, id = "modelscope") => ({ id, preset: "modelscope", ke
 
 test("mask keeps only the ends, as magpie's own display does", () => {
   assert.equal(mask(A), "ms-a…5555")
-  assert.equal(mask("short"), "（不可用）")
+  // under 12 characters there is nothing to show without showing it all
+  assert.equal(mask("12345678"), "（8 字符）")
+  assert.equal(mask("12345678901"), "（11 字符）")
+  assert.equal(mask("123456789012"), "1234…9012", "12 is the first length with ends to show")
   assert.equal(mask(""), "（不可用）")
   assert.equal(mask(undefined), "（不可用）")
 })
@@ -173,7 +176,10 @@ test("findMagpieBin looks where each OS installs it", () => {
   }
   const got = findMagpieBin({ os: "darwin", env: {}, home: "/h", exists })
   assert.equal(got, "/Applications/magpie.app/Contents/MacOS/magpie")
-  assert.ok(seen.every((p) => p.startsWith("/Applications/")))
+  assert.ok(seen.includes("/Applications/magpie.app/Contents/MacOS/magpie"))
+  // a Homebrew install is looked for too, when no .app is there
+  const brew = findMagpieBin({ os: "darwin", env: {}, home: "/h", exists: (p) => p === "/opt/homebrew/bin/magpie" })
+  assert.equal(brew, "/opt/homebrew/bin/magpie")
 
   const win = findMagpieBin({ os: "win32", env: { LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local" }, home: "C:\\Users\\u", exists: (p) => p.endsWith("magpie.exe") })
   assert.ok(win.endsWith("magpie.exe"))
@@ -424,6 +430,107 @@ test("a broken providers.json is refused, not crashed on", async () => {
     assert.equal(code, 1)
     assert.match(out.join("\n"), /没有|provider add/)
     assert.doesNotMatch(out.join("\n"), /SyntaxError|at /)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---- the findings of the second review round
+
+test("a failing magpie command never prints the token", async () => {
+  // the failure path used to put the child's raw stderr into the error before
+  // any masking; a magpie that echoes the key it was handed would leak it
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-failmask-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 7, stdout: "", stderr: `no key ${A} for provider` }),
+    })
+    const text = out.join("\n")
+    assert.equal(code, 1)
+    assert.ok(!text.includes(A), `the token leaked into the failure output:\n${text}`)
+    assert.match(text, /no key/, "the rest of the message still gets through")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("no magpie binary means no run, not a PATH lookup", async () => {
+  // `magpie` resolved through PATH can be a file the user never installed
+  // (npx puts the project's node_modules/.bin first); the tool must refuse
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nobin-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    let spawned = false
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin"],
+      log: (s) => out.push(s),
+      // only the fixture's own files exist, so findMagpieBin finds nothing
+      exists: (p) => p === join(dir, "providers.json") || p === join(dir, "plugin-auth.json"),
+      spawn: () => {
+        spawned = true
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1)
+    assert.equal(spawned, false, "nothing may be spawned without a known binary")
+    assert.match(out.join("\n"), /--magpie/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the host fallback matches the exact hostname, not a substring", () => {
+  // "api-inference.modelscope.cn.evil.tld" contains the real host as a
+  // substring; writing the real token into it would ship it to a stranger
+  const evil = [{ id: "relay", chat: "https://api-inference.modelscope.cn.evil.tld/v1", key: B }]
+  assert.deepEqual(presetCandidates(evil), [])
+  const good = [{ id: "relay", chat: "https://api-inference.modelscope.cn/v1", key: B }]
+  assert.deepEqual(presetCandidates(good).map((p) => p.id), ["relay"])
+  const notAUrl = [{ id: "relay", chat: "api-inference.modelscope.cn", key: B }]
+  assert.deepEqual(presetCandidates(notAUrl), [], "a chat that is not a URL is not a match")
+})
+
+test("a provider id shaped like a flag is refused before provider key runs", async () => {
+  // `provider key --help <token>` would be read as the CLI's own flag
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-flagid-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "--help", preset: "modelscope", key: A }] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    let spawned = false
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-preset", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        spawned = true
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1)
+    assert.equal(spawned, false)
+    assert.match(out.join("\n"), /形状/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("an id or name with control characters is printed as text, not as terminal input", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-esc-"))
+  try {
+    const esc = "ms\u001b[2Jcope"
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: esc, preset: "modelscope", key: A }] }))
+    const out = []
+    await main({
+      argv: ["--dir", dir, "--status", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+    })
+    const text = out.join("\n")
+    assert.ok(!text.includes("\u001b"), "an escape sequence reached the terminal")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

@@ -35,7 +35,7 @@ const USAGE = `magpie-plugin-msmoli — 把 magpie 里已有的 ModelScope 令�
   --force       两边令牌不同时也执行（会替换 / 先登出现有登录）
   --from <id>   内置侧只认 id 恰好为它的 provider（默认的识别见上）
   --dir <路径>  magpie 配置目录（便携版探测不到时用这个）
-  --magpie <路径>  magpie 可执行文件（默认找 PATH 与常见安装位置）
+  --magpie <路径>  magpie 可执行文件（默认找各平台的常见安装位置，不经 PATH）
   --status      只报告，不执行
   --dry-run     打印将要执行的命令，不执行
   -h, --help    这一页
@@ -67,7 +67,13 @@ function parseArgs(argv) {
 export function findMagpieBin({ env = process.env, os = platform(), exists = existsSync, home = homedir() } = {}) {
   const cands = []
   if (os === "darwin") {
-    cands.push("/Applications/magpie.app/Contents/MacOS/magpie", "/Applications/Magpie.app/Contents/MacOS/magpie")
+    cands.push(
+      "/Applications/magpie.app/Contents/MacOS/magpie",
+      "/Applications/Magpie.app/Contents/MacOS/magpie",
+      "/opt/homebrew/bin/magpie",
+      "/usr/local/bin/magpie",
+      "/opt/local/bin/magpie",
+    )
   } else if (os === "win32") {
     if (env.LOCALAPPDATA) cands.push(join(env.LOCALAPPDATA, "Programs", "magpie", "magpie.exe"))
     if (env.ProgramFiles) cands.push(join(env.ProgramFiles, "magpie", "magpie.exe"))
@@ -111,19 +117,47 @@ function readJson(file, exists = existsSync) {
 
 // ---- 领域逻辑（纯函数，导出给测试）
 
-export const mask = (t) => (typeof t === "string" && t.length >= 8 ? `${t.slice(0, 4)}…${t.slice(-4)}` : "（不可用）")
+// mask reveals only the ends. Under 12 characters there is no middle worth
+// hiding and no tail worth showing: 8 characters would print the whole thing
+// ("1234…5678" is 8/8), so it says how long it is instead.
+export const mask = (t) => {
+  if (typeof t !== "string" || !t) return "（不可用）"
+  if (t.length < 12) return `（${t.length} 字符）`
+  return `${t.slice(0, 4)}…${t.slice(-4)}`
+}
 
 // 内置侧的候选：默认先认 id/preset=modelscope（magpie 预设的正规路径），没有
 // 再按推理域名认用户自建的 vendor。--from 是消歧手段，必须只认 id——默认搜索
 // 按 preset 匹配才产生歧义，消歧若还按 preset 就永远解不开（演练抓出的 bug）。
 // 多于一个候选时工具不猜。
+//
+// 域名按 hostname 精确比较，不是子串：includes() 对
+// "api-inference.modelscope.cn.evil.tld" 也为真，而那会把真令牌写进一个
+// chat 指向第三方的 provider（--to-preset）或把第三方的 key 当 cookie 发给
+// modelscope.cn（--to-plugin）。
 export function presetCandidates(providers, from = "") {
   const list = Array.isArray(providers) ? providers : []
   const keyed = (p) => typeof p?.key === "string" && p.key
   if (from) return list.filter((p) => keyed(p) && p.id === from)
   const byId = list.filter((p) => keyed(p) && (p.id === PRESET || p.preset === PRESET))
   if (byId.length) return byId
-  return list.filter((p) => keyed(p) && typeof p?.chat === "string" && p.chat.includes(HOST))
+  return list.filter((p) => keyed(p) && hostOf(p.chat) === HOST)
+}
+
+// show is what goes to the terminal: a provider id or a file's path comes
+// from a file on this machine, but a poisoned providers.json could put an
+// escape sequence there and clear the screen, retitle the window or forge a
+// line of output. Control characters are shown as spaces; nothing else is
+// touched.
+const show = (s) => String(s ?? "").replace(/[\p{Cc}\p{Cf}]/gu, " ")
+
+function hostOf(chat) {
+  if (typeof chat !== "string") return ""
+  try {
+    return new URL(chat).hostname.toLowerCase()
+  } catch {
+    return ""
+  }
 }
 
 // 插件侧的账号：主键 msmoli 与 msmoli#xxxxxx，按令牌区分。
@@ -143,11 +177,11 @@ export function planToPlugin({ preset, accounts, force }) {
     return { action: "noop", lines, cmds: [] }
   }
   if (accounts.length === 0) {
-    lines.push(`→ 将把内置预设置（${preset.id}）的令牌登录给插件：magpie plugin login ${ID}（令牌走 stdin）`)
+    lines.push(`→ 将把内置预设置（${show(preset.id)}）的令牌登录给插件：magpie plugin login ${ID}（令牌走 stdin）`)
     return { action: "run", lines, cmds: [{ argv: ["plugin", "login", ID], stdin: `${preset.key}\n`, secret: preset.key }] }
   }
-  lines.push(`  插件现有：${accounts.map((a) => `${a.name}（${mask(a.token)}）`).join("、")}`)
-  lines.push(`  内置预设：${preset.id}（${mask(preset.key)}）`)
+  lines.push(`  插件现有：${accounts.map((a) => `${show(a.name)}（${mask(a.token)}）`).join("、")}`)
+  lines.push(`  内置预设：${show(preset.id)}（${mask(preset.key)}）`)
   if (!force) {
     lines.push(`✗ 两边令牌不同，未做改动。`)
     lines.push(`  直接 login 会新增第二个账号（宿主按令牌分账号），logout 会登出该 provider 的全部账号，`)
@@ -159,7 +193,7 @@ export function planToPlugin({ preset, accounts, force }) {
     lines.push(`  请先在 magpie 里删掉多余账号，或手动执行。`)
     return { action: "refuse", lines, cmds: [] }
   }
-  lines.push(`→ 将先 logout（登出 ${accounts[0].name}）再 login 内置那把。当天已签到的记录会重来，昵称下次签到时写回。`)
+  lines.push(`→ 将先 logout（登出 ${show(accounts[0].name)}）再 login 内置那把。当天已签到的记录会重来，昵称下次签到时写回。`)
   return {
     action: "run",
     lines,
@@ -189,12 +223,18 @@ export function planToPreset({ preset, accounts, force }) {
     return { action: "noop", lines, cmds: [] }
   }
   lines.push(`  插件主账号：${ID}（${mask(main.token)}）`)
-  lines.push(`  内置预设：${preset.id}，现有 key（${mask(preset.key)}）会被整条替换。`)
+  lines.push(`  内置预设：${show(preset.id)}，现有 key（${mask(preset.key)}）会被整条替换。`)
+  // provider key 的第一个参数是 id：一个以 "-" 开头的 id 会被 magpie 的 CLI
+  // 当成 flag（`provider key --help <token>` 只打印帮助、不写 key）。
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(preset.id)) {
+    lines.push(`✗ 这个 provider id 不是 magpie 接受的形状（${show(preset.id)}），不能用 provider key 写入。`)
+    return { action: "refuse", lines, cmds: [] }
+  }
   if (!force) {
     lines.push(`✗ 内置这把 key 是聊天请求正在用的，替换会让那边跟着换。确认的话加 --force 重跑。`)
     return { action: "refuse", lines, cmds: [] }
   }
-  lines.push(`→ 将执行 magpie provider key ${preset.id}（令牌是该命令的参数，进程列表里短暂可见）。`)
+  lines.push(`→ 将执行 magpie provider key ${show(preset.id)}（令牌是该命令的参数，进程列表里短暂可见）。`)
   return { action: "run", lines, cmds: [{ argv: ["provider", "key", preset.id, main.token], secret: main.token }] }
 }
 
@@ -203,6 +243,14 @@ export function planToPreset({ preset, accounts, force }) {
 function hidden(argv, secret, log) {
   const shown = secret ? argv.map((a) => (a === secret ? mask(secret) : a)) : argv
   log(`$ magpie ${shown.join(" ")}`)
+}
+
+// scrub hides a token in text that came from a child process. Both paths use
+// it: the answer printed on success, and the failure printed in the error —
+// the failing path is the one most likely to carry the command back verbatim
+// ("no key ms-… for provider"), and hiding it only on success was the gap.
+function scrub(out, secret) {
+  return secret ? out.split(secret).join(mask(secret)) : out
 }
 
 function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
@@ -214,7 +262,7 @@ function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
     const out = `${r.stdout ?? ""}${r.stderr ?? ""}`.trim()
     if (r.error) throw new Error(`跑不动 ${bin}：${r.error.message}（用 --magpie 指定完整路径）`)
     if (r.status !== 0) {
-      const said = out.split("\n").filter(Boolean).slice(-3).join("\n")
+      const said = scrub(out, secret).split("\n").filter(Boolean).slice(-3).join("\n")
       const e = new Error(`magpie 命令失败（退出码 ${r.status}）${said ? `：\n${said}` : ""}`)
       // 多步序列（--force 的 logout→login）中途失败：logout 已经发生了，
       // 用户此刻是被登出的状态。说清楚，并告诉他重跑即可续上——
@@ -225,8 +273,7 @@ function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
       throw e
     }
     // magpie 自己就把令牌显示成掩码；将来若变，这里兜底再滤一遍
-    const lines = secret ? out.split("\n").map((l) => l.split(secret).join(mask(secret))) : out.split("\n")
-    for (const line of lines) if (line.trim()) log(`  ${line}`)
+    for (const line of scrub(out, secret).split("\n")) if (line.trim()) log(`  ${line}`)
   }
 }
 
@@ -247,8 +294,12 @@ export async function main({
     return 0
   }
 
-  const bin = args.magpie || findMagpieBin({ env, os, exists, home }) || "magpie"
-  const dir = args.dir || findConfigDir({ env, home, os, exists, binPath: bin === "magpie" ? "" : bin })
+  // No PATH fallback: `magpie` resolved through PATH can be a file the user
+  // never installed — npx puts the project's node_modules/.bin first, so a
+  // hostile dependency's `magpie` would receive the token on stdin. The
+  // binary must come from a known install location or --magpie.
+  const bin = args.magpie || findMagpieBin({ env, os, exists, home })
+  const dir = args.dir || findConfigDir({ env, home, os, exists, binPath: bin })
   if (!dir) {
     log(`✗ 没找到 magpie 的配置目录。`)
     log(`  试过 $XDG_CONFIG_HOME/magpie 和 ~/.config/magpie。便携版请用 --dir 指定它的 data 目录。`)
@@ -258,17 +309,17 @@ export async function main({
     log(`✗ ${dir} 里没有 magpie 的配置文件（providers.json / plugins.json / plugin-auth.json）。`)
     return 1
   }
-  log(`magpie 配置目录：${dir}`)
+  log(`magpie 配置目录：${show(dir)}`)
 
   const providers = readJson(join(dir, "providers.json"), exists)?.providers
   const accounts = pluginAccounts(readJson(join(dir, "plugin-auth.json"), exists))
   const cands = presetCandidates(providers, args.from)
 
-  log(`  内置 ModelScope：${cands.length === 1 ? `${cands[0].id}（${mask(cands[0].key)}）` : cands.length ? "多个候选" : "未配置"}`)
-  log(`  签到插件 msmoli：${accounts.length ? accounts.map((a) => `${a.name}（${mask(a.token)}）`).join("、") : "未登录"}`)
+  log(`  内置 ModelScope：${cands.length === 1 ? `${show(cands[0].id)}（${mask(cands[0].key)}）` : cands.length ? "多个候选" : "未配置"}`)
+  log(`  签到插件 msmoli：${accounts.length ? accounts.map((a) => `${show(a.name)}（${mask(a.token)}）`).join("、") : "未登录"}`)
 
   if (cands.length > 1) {
-    log(`✗ 内置侧有 ${cands.length} 个候选（${cands.map((p) => p.id).join("、")}），不确定用哪个。用 --from <id> 指定。`)
+    log(`✗ 内置侧有 ${cands.length} 个候选（${cands.map((p) => show(p.id)).join("、")}），不确定用哪个。用 --from <id> 指定。`)
     return 1
   }
   const preset = cands[0] ?? null
@@ -297,6 +348,11 @@ export async function main({
   if (args.status) {
     log(`(--status：以上是计划，未执行)`)
     return 0
+  }
+  if (!bin) {
+    log(`✗ 没找到 magpie 可执行文件（找过各平台的安装位置）。`)
+    log(`  用 --magpie <路径> 指定，例如 macOS 的 /Applications/magpie.app/Contents/MacOS/magpie。`)
+    return 1
   }
   try {
     run(plan.cmds, bin, { dryRun: args.dryRun, log, spawn })

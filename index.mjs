@@ -155,11 +155,21 @@ const okOf = (body) => {
 // trusted with control characters: a newline forges a log line, an escape
 // sequence drives the terminal, and a bidi override can turn a name inside
 // out. Visible characters are kept, up to a length that fits a card.
-const text = (value, max = 120) =>
-  String(value ?? "")
-    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, " ")
+//
+// The classes, not a hand-listed range: \p{Cc} is C0/C1, \p{Cf} covers the
+// bidi controls, the zero-width joiners, the word joiner and the tag
+// characters (U+E0000\u2013E007F) that can carry hidden data \u2014 the earlier list
+// left U+200B\u2013200D, U+2060\u20132064 and U+061C through, so two accounts could be
+// made to look like the same name. Truncation counts code points, so it can't
+// cut a surrogate pair in half.
+const text = (value, max = 120) => {
+  const cleaned = String(value ?? "")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, " ")
     .trim()
-    .slice(0, max)
+  const points = Array.from(cleaned)
+  return points.length > max ? points.slice(0, max).join("") : cleaned
+}
 
 const saidOf = (body) => text(body?.message ?? body?.Message ?? body?.msg ?? body?.code ?? "")
 
@@ -350,6 +360,18 @@ function aliasOf(dir, label) {
 // "Mison" instead of "API key …a1b2". The sign-in is written as it already
 // is — the same key, no second copy of the token — with the name beside it;
 // an account that has one already is left alone.
+// maskToken hides all but the ends of a token, for messages that must mention
+// one (the nickname write-back's failure log): the log is magpie's own, but a
+// token has no business in it whole.
+const maskToken = (token) =>
+  typeof token === "string" && token.length >= 12 ? `${token.slice(0, 4)}…${token.slice(-4)}` : "…"
+
+// unusableName is a nickname that must not be written back: empty, the token
+// itself (the server would be handed it twice), or a key that the host's
+// accountNames lookup would read as inherited rather than as a name.
+const unusableName = (name, token) =>
+  !name || name === token || ["__proto__", "constructor", "prototype"].includes(name)
+
 async function rememberAccountName(client, token, name, auth, dir) {
   if (!name || !client?.auth?.set) return
   if (named.has(token) || auth?.accountId === name) return
@@ -368,7 +390,10 @@ async function rememberAccountName(client, token, name, auth, dir) {
     // be truly best-effort: a host whose log is synchronous returns undefined
     // where a promise is expected, and that must not throw out of here.
     named.delete(token)
-    client?.app?.log?.({ body: { level: "warn", service: "msmoli", message: `account name not written back: ${e?.message ?? e}` } })?.catch?.(() => {})
+    // the message can carry whatever the host put in it; scrub the token out
+    // of it before it reaches magpie's log
+    const why = text(e?.message ?? e, 200).split(token).join(maskToken(token))
+    client?.app?.log?.({ body: { level: "warn", service: "msmoli", message: `account name not written back: ${why}` } })?.catch?.(() => {})
   }
 }
 
@@ -391,12 +416,20 @@ async function todayEarn(token, deadline) {
   return recordsOf(body).filter((r) => r?.type === "EARN" && r?.gmt_created === day)
 }
 
-const sumOf = (records) => records.reduce((n, r) => n + (Number(r?.total_amount) || 0), 0)
+// num reads a number from the server, 0 for anything that isn't a finite
+// one: Number("1e400") is Infinity, and an Infinity would reach the card as
+// "Infinity 魔粒可用" and a window's used/limit.
+const num = (v) => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : 0
+}
+
+const sumOf = (records) => records.reduce((n, r) => n + num(r?.total_amount), 0)
 
 // amountOf is what a grant gave, as it goes into a message: the raw JSON is
 // whatever the server said, so it is coerced and sanitized like every other
 // remote string rather than interpolated as it came.
-const amountOf = (record) => text(Number(record?.total_amount) || 0, 20)
+const amountOf = (record) => text(num(record?.total_amount), 20)
 
 export async function MsmoliPlugin(input) {
   // input.directory is magpie's own folder (host.go passes settings.Dir()),
@@ -480,7 +513,8 @@ export async function MsmoliPlugin(input) {
           if (!okOf(body)) return { outcome: "failed", message: `登录接口失败：${saidOf(body) || `HTTP ${res.status}`}` }
 
           const me = dataOf(body)
-          const name = text(me.NickName || me.Name || "", 40)
+          const candidate = text(me.NickName || me.Name || "", 40)
+          const name = unusableName(candidate, token) ? "" : candidate
           rememberName(token, name)
           await rememberAccountName(client, token, name, auth, configDir)
 
@@ -533,7 +567,7 @@ export async function MsmoliPlugin(input) {
           if (bal.res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
           if (bal.res.status !== 200 || !bal.parsed) throw new Error(`余额查询失败：响应不是 JSON（HTTP ${bal.res.status}）`)
           if (!okOf(bal.body)) throw new Error(`余额查询失败：${saidOf(bal.body) || `HTTP ${bal.res.status}`}`)
-          const available = Number(dataOf(bal.body).available_balance) || 0
+          const available = num(dataOf(bal.body).available_balance)
 
           const tx = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
           if (tx.res.status === 401) throw fail(tx.res.status)
@@ -547,7 +581,7 @@ export async function MsmoliPlugin(input) {
           let earliest = ""
           for (const r of recordsOf(tx.body)) {
             if (r?.gmt_created !== day) continue
-            const amount = Number(r?.total_amount) || 0
+            const amount = num(r?.total_amount)
             if (r?.type === "EARN") {
               earned += amount
               if (DAILY_RULES.includes(r?.rule_key) && r?.expire_at && (!earliest || r.expire_at < earliest)) earliest = r.expire_at

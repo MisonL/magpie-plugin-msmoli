@@ -961,3 +961,81 @@ test("the same account's target minute is stable within a day", async () => {
     }
   })
 })
+
+// ── 审查第二轮：不可见字符、令牌伪装昵称、非有限数字 ─────────────────────
+test("invisible characters in a nickname never reach the written-back name", async () => {
+  // U+200B/200D (zero-width), U+2060 (word joiner), U+061C (ALM) and the tag
+  // characters U+E0000–E007F all survived the earlier sanitizer: two accounts
+  // could be made to look identical on the card, and tags can carry hidden data
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-zw-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    const token = "ms-zwtest-0000-0000-0000-000000000011"
+    const nasty = "Mi​so⁠n؜\u{E0041}"
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nasty } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(writes.length, 1)
+        const id = writes[0].body.accountId
+        assert.equal(/\p{Cf}/u.test(id), false, `invisible characters survived: ${JSON.stringify(id)}`)
+        assert.match(id, /Mi/)
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a nickname that is the token itself is not written back", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-tokname-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    const token = "ms-tokname-0000-0000-0000-000000000012"
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: token } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(writes.length, 0, "a server that echoes the token back must not get it stored as a name")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a non-finite amount from the server never reaches the card", async () => {
+  // Number("1e400") is Infinity: it must not show as "Infinity 魔粒可用" or
+  // make a window's used/limit non-finite
+  const body = { success: true, data: { records: [day({ total_amount: "1e400" })] } }
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: "1e400" } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      const w = u.windows[0]
+      assert.ok(Number.isFinite(w.used), `used was ${w.used}`)
+      assert.ok(Number.isFinite(w.amount), `amount was ${w.amount}`)
+      assert.ok(Number.isFinite(w.limit), `limit was ${w.limit}`)
+      assert.doesNotMatch(JSON.stringify(u), /Infinity|NaN/)
+    },
+  )
+})
