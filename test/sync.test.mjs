@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "n
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
-import { fileURLToPath } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import {
   findConfigDir,
   findMagpieBin,
@@ -184,24 +184,33 @@ test("findMagpieBin looks where each OS installs it", () => {
   assert.equal(findMagpieBin({ os: "linux", env: {}, home: "/h", exists: () => false }), "")
 })
 
+// Windows 下 Node 把 "/" 开头的参数翻成 "C:\..."，所以探测层的断言全部走
+// join()/pathToFileURL 生成期望值，而不是写死 POSIX 字面量——这些测试在
+// Linux/macOS 上跑出同样的值，在 Windows 上跑出各自的值。
 test("findConfigDir reads XDG_CONFIG_HOME, then ~/.config, and nothing that isn't magpie's", () => {
-  const files = new Set(["/xdg/magpie/providers.json"])
+  const xdgBase = pathToFileURL("/xdg").pathname.replace(/\/$/, "")
+  const homeBase = pathToFileURL("/h").pathname.replace(/\/$/, "")
+  const files = new Set([join(xdgBase, "magpie", "providers.json")])
   const exists = (p) => files.has(p)
-  assert.equal(findConfigDir({ env: { XDG_CONFIG_HOME: "/xdg" }, home: "/h", os: "linux", exists }), "/xdg/magpie")
-
-  const home = new Set(["/h/.config/magpie/plugin-auth.json"])
   assert.equal(
-    findConfigDir({ env: {}, home: "/h", os: "linux", exists: (p) => home.has(p) }),
-    "/h/.config/magpie",
+    findConfigDir({ env: { XDG_CONFIG_HOME: xdgBase }, home: homeBase, os: "linux", exists }),
+    join(xdgBase, "magpie"),
   )
 
-  assert.equal(findConfigDir({ env: {}, home: "/h", os: "linux", exists: () => false }), "", "an empty folder is not magpie's")
+  const home = new Set([join(homeBase, ".config", "magpie", "plugin-auth.json")])
+  assert.equal(
+    findConfigDir({ env: {}, home: homeBase, os: "linux", exists: (p) => home.has(p) }),
+    join(homeBase, ".config", "magpie"),
+  )
+
+  assert.equal(findConfigDir({ env: {}, home: homeBase, os: "linux", exists: () => false }), "", "an empty folder is not magpie's")
 })
 
 test("findConfigDir takes a portable install's data folder beside the executable", () => {
-  const files = new Set([join("/opt/magpie/data", "providers.json")])
+  const base = pathToFileURL("/opt/magpie").pathname.replace(/\/$/, "")
+  const files = new Set([join(base, "data", "providers.json")])
   const exists = (p) => files.has(p)
-  assert.equal(findConfigDir({ env: {}, home: "/h", os: "linux", binPath: "/opt/magpie/magpie", exists }), "/opt/magpie/data")
+  assert.equal(findConfigDir({ env: {}, home: "/h", os: "linux", binPath: join(base, "magpie"), exists }), join(base, "data"))
 })
 
 test("findConfigDir reads a Mac app's portable folder beside the .app, not inside it", () => {
@@ -214,8 +223,9 @@ test("findConfigDir reads a Mac app's portable folder beside the .app, not insid
 })
 
 test("looksLikeMagpie wants one of magpie's files", () => {
-  assert.equal(looksLikeMagpie("/x", (p) => p === "/x/plugin-auth.json"), true)
-  assert.equal(looksLikeMagpie("/x", () => false), false)
+  const base = pathToFileURL("/x").pathname.replace(/\/$/, "")
+  assert.equal(looksLikeMagpie(base, (p) => p === join(base, "plugin-auth.json")), true)
+  assert.equal(looksLikeMagpie(base, () => false), false)
 })
 
 // ---- the CLI as a command (the shape npm and npx run it in)
@@ -376,6 +386,44 @@ test("a failed login after a successful logout says how to recover", async () =>
     })
     assert.equal(code2, 0)
     assert.match(out2.join("\n"), /完成/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---- files magpie itself tolerates
+
+test("a providers.json with a BOM reads as JSON, not as nothing", () => {
+  // Windows editors (and magpie's own #1821) write a BOM; Go strips it, so
+  // must the tool, or the preset would read as "未配置"
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-bom-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), "﻿" + JSON.stringify({ providers: [presetOf(A)] }))
+    const providers = JSON.parse(
+      readFileSync(join(dir, "providers.json"), "utf8").replace(/^﻿/, ""),
+    ).providers
+    assert.deepEqual(presetCandidates(providers).map((p) => p.id), ["modelscope"])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a broken providers.json is refused, not crashed on", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-broken-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), "{ not json")
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        throw new Error("must not run with an unreadable providers.json")
+      },
+    })
+    assert.equal(code, 1)
+    assert.match(out.join("\n"), /没有|provider add/)
+    assert.doesNotMatch(out.join("\n"), /SyntaxError|at /)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

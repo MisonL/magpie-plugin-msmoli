@@ -84,8 +84,9 @@ export function looksLikeMagpie(dir, exists = existsSync) {
 export function findConfigDir({ env = process.env, home = homedir(), os = platform(), exists = existsSync, binPath = "" } = {}) {
   if (binPath) {
     let base = dirname(binPath)
-    // 一个 Mac app 的「旁边」是 .app 所在的目录；可执行文件在 .app 里面
-    if (os === "darwin" && base.endsWith(join("Contents", "MacOS"))) base = dirname(dirname(dirname(base)))
+    // 一个 Mac app 的「旁边」是 .app 所在的目录；可执行文件在 .app 里面。
+    // 两种分隔符都认：这行在非 Mac 上也能被测试驱动（darwin 路径由测试传入）
+    if (os === "darwin" && /[\\/]Contents[\\/]MacOS$/.test(base)) base = dirname(dirname(dirname(base)))
     const data = join(base, "data")
     if (exists(join(base, ".portable")) || looksLikeMagpie(data, exists)) return data
   }
