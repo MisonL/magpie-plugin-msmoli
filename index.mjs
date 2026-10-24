@@ -274,6 +274,15 @@ function minuteCN(now = Date.now()) {
 
 const clock = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`
 
+// waits reads a number of minutes the way a person would say it: "35 分钟",
+// "1 小时", "9 小时 56 分钟". A card that said "596 分钟后" reads like a dump.
+const waits = (minutes) => {
+  const h = Math.floor(minutes / 60)
+  const m = minutes % 60
+  if (!h) return `${m} 分钟`
+  return m ? `${h} 小时 ${m} 分钟` : `${h} 小时`
+}
+
 // plan is the account's check-in for `day`: the moment in the window it
 // claims at (fixed per day and account, so the 30-minute re-asks agree) and
 // whether that moment has passed. token only feeds the hash.
@@ -442,9 +451,17 @@ export async function MsmoliPlugin(input) {
           const day = todayCN()
           const p = plan(win, token, day)
           if (!p.due) {
+            // The host shows one line under a failed state, and "failed" is
+            // the only outcome it retries, so this is the whole message the
+            // user gets for the hours before the window. Lead with the thing
+            // they care about — the time it will claim — rather than with
+            // the word for why it hasn't yet. The config path is left out on
+            // purpose: it repeats on every ask and ends up in screenshots,
+            // and it is in the README for whoever wants to change it.
+            const wait = p.target - minuteCN()
             return {
               outcome: "failed",
-              message: `未到签到时段：今日 ${clock(p.target)} 起领取（${clock(win.start)}–${clock(win.end)}，改 ${configPath(configDir)} 调整）`,
+              message: `${clock(p.target)} 后自动领取（约 ${waits(wait)}后，无需操作）`,
             }
           }
         }

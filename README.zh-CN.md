@@ -239,7 +239,7 @@ magpie accounts alias msmoli "API key …a1b2" 主号
 | 卡片上没有魔粒窗口，或签到没跑 | 重启 magpie（插件宿主有缓存） |
 | `failed` + HTTP 401 | 令牌被吊销，重新生成并登录 |
 | `failed` + HTTP 403 | 魔搭风控拒了这次请求，令牌本身没问题，30 分钟后会重试 |
-| 窗口前卡片写着「签到失败 · 未到签到时段」 | 正常现象，见上面的「什么时候领」 |
+| 窗口前卡片写着 failed，附一行「09:56 后自动领取（约 1 小时 33 分钟后，无需操作）」 | 正常现象——卡片以领取时刻开头，见上面的「什么时候领」 |
 | 一直是 `inactive` | 登录通了但没到账：账号不在活动范围，或今天已被别的客户端领走 |
 | 改了插件代码没生效 | 路径式插件按位置引用，改完要重启 magpie |
 | 两种方式都装了一遍，`magpie plugin list` 说 msmoli "served by" 其中一个 | 这是 magpie 在提醒同一个 provider id 有两份。删掉一份：`magpie plugin rm github:MisonL/magpie-plugin-msmoli` 或 `magpie plugin rm <路径>`。magpie 把 alias 挂在当初设它的那个包名下，所以删掉一份可能连带把显示名也收走——重新 add 那个包，或者再设一次 alias 就回来 |

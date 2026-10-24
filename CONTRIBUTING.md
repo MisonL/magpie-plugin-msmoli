@@ -116,3 +116,10 @@ package's `opencode-plugin` and `magpie-plugin` keywords are what put it there.
   the default), each such ask rewrites `plugin-checkin.json`, and
   `magpie accounts checkin` run before the window exits non-zero. That is the
   price of the only deferral an outcome offers.
+- **The pre-window message leads with the claim time.** The host renders the
+  message verbatim under the red dot, so it is the only text the user sees for
+  those hours; `${clock(target)} 后自动领取（约 …后，无需操作）` puts the
+  answer before the reason. The config path stays out — it repeated on every
+  ask and ended up in users' screenshots — and lives in the README instead.
+  `test/plugin.test.mjs` reads the target back out of that line, so changing
+  its shape means updating `targetFrom`.

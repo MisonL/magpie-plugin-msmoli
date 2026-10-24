@@ -302,7 +302,7 @@ an hour, and that retry reads the ledger before claiming, so nothing is lost.
 | No 魔粒 window on the card, or no check-in | restart magpie (the plugin host caches) |
 | `failed` with HTTP 401 | the token was revoked — make a new one and sign in again |
 | `failed` with HTTP 403 | ModelScope's risk control refused the request; the token is fine. It retries in 30 minutes |
-| Card says `签到失败 · 未到签到时段` before the window | expected — see "When it claims" above |
+| Before the window the card reads failed, with a line naming the claim time: `09:56 后自动领取（约 1 小时 33 分钟后，无需操作）` | expected — the card leads with when it will claim; see "When it claims" above |
 | Always `inactive` | the sign-in works but nothing is granted: the account isn't eligible, or another client already claimed it today |
 | Edits to this plugin do nothing | path plugins are referenced in place; restart magpie |
 | Installed both ways by accident, and `magpie plugin list` says `msmoli` is "served by" one of them | that is magpie keeping two copies of one provider id. Remove one: `magpie plugin rm github:MisonL/magpie-plugin-msmoli` or `magpie plugin rm <path>`. magpie files your alias with the package it was set against, so removing a copy can take the display name with it — it comes back if you add that package again, or you set the alias once more |

@@ -45,13 +45,16 @@ const withWindow = async (window, cn, fn) => {
 
 // targetOf asks at a clock before any window and reads back the moment the
 // plugin will claim at. The moment is a hash of the day and the account, so a
-// test that assumed a fixed clock would fail on some days of the year.
-const targetOf = async (checkin) => {
-  const r = await checkin(async () => ({ type: "api", key: "ms-test" }))
-  const m = /今日 (\d{2}):(\d{2}) 起领取/.exec(r.message)
-  assert.ok(m, `the message should carry the target: ${r.message}`)
+// test that assumed a fixed clock would fail on some days of the year. The
+// card leads with that moment instead of naming the configured window, so
+// tests that care which window was read assert the target lands inside it.
+const targetFrom = (message) => {
+  const m = /^(\d{2}):(\d{2}) 后自动领取/.exec(message)
+  assert.ok(m, `the message should lead with the target: ${message}`)
   return { minute: +m[1] * 60 + +m[2], text: `${m[1]}:${m[2]}` }
 }
+const targetOf = async (checkin) =>
+  targetFrom((await checkin(async () => ({ type: "api", key: "ms-test" }))).message)
 
 const hooks = await MsmoliPlugin({})
 const auth = hooks.auth
@@ -540,8 +543,8 @@ test("before the window the check-in asks for nothing and answers failed", async
     try {
       const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
       assert.equal(r.outcome, "failed")
-      assert.match(r.message, /未到签到时段/)
-      const m = /今日 (\d{2}):(\d{2}) 起领取/.exec(r.message)
+      assert.match(r.message, /后自动领取/)
+      const m = /^(\d{2}):(\d{2}) 后自动领取/.exec(r.message)
       assert.ok(m, `the message says when today's claim will run: ${r.message}`)
       const at = +m[1] * 60 + +m[2]
       assert.ok(at >= 8 * 60 + 30 && at < 10 * 60, `the target ${m[1]}:${m[2]} is inside 08:30-10:00`)
@@ -629,7 +632,11 @@ test("the window is read from the folder magpie reports, not a guessed one", asy
     }
     try {
       const r = await portable.auth.checkin(async () => ({ type: "api", key: "ms-test" }))
-      assert.match(r.message, /13:00–14:00/, "the window came from input.directory")
+      const t = targetFrom(r.message)
+      assert.ok(
+        t.minute >= 13 * 60 && t.minute < 14 * 60,
+        `the target ${t.text} came from input.directory, not a guessed one`,
+      )
       assert.equal(asked, 0)
     } finally {
       Date.now = realNow
@@ -657,7 +664,11 @@ test("a config file that is not JSON, or not an object, is the default window", 
       // 02:00 is before any default window; all of these must still answer
       // with the default window rather than claiming or throwing
       assert.equal(r.outcome, "failed", `junk config ${JSON.stringify(junk)} must not crash or claim`)
-      assert.match(r.message, /08:30–10:00/, `junk config ${JSON.stringify(junk)} must read as the default`)
+      const t = targetFrom(r.message)
+      assert.ok(
+        t.minute >= 8 * 60 + 30 && t.minute < 10 * 60,
+        `junk config ${JSON.stringify(junk)} must read as the default, not ${t.text}`,
+      )
     }
   } finally {
     Date.now = realNow
@@ -679,7 +690,11 @@ test("an unusable window falls back to the default instead of never claiming", a
       const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
       assert.equal(r.outcome, "failed")
       // 02:00 is before the default window's earliest moment (08:30)
-      assert.match(r.message, /08:30–10:00/)
+      const t = targetFrom(r.message)
+      assert.ok(
+        t.minute >= 8 * 60 + 30 && t.minute < 10 * 60,
+        `the target ${t.text} came from the default window, not the broken one`,
+      )
       assert.equal(asked, 0)
     } finally {
       globalThis.fetch = real
@@ -709,7 +724,11 @@ test("the window written as one string is honored, not ignored", async () => {
   await withWindow("13:00-14:00", `${today} 12:00:00`, async () => {
     const { asked, r } = await count()
     assert.equal(r.outcome, "failed")
-    assert.match(r.message, /13:00–14:00/, "the card should name the window that was set")
+    const t = targetFrom(r.message)
+    assert.ok(
+      t.minute >= 13 * 60 && t.minute < 14 * 60,
+      `the target ${t.text} came from the window written as one string`,
+    )
     assert.equal(asked, 0)
   })
 
@@ -738,7 +757,6 @@ test("a window reaching into the late evening is capped, so a failed ask still h
     let target
     try {
       const r = await late.auth.checkin(async () => ({ type: "api", key: "ms-test" }))
-      assert.match(r.message, /22:00–23:00/, "the window is reported as capped")
       target = await targetOf(late.auth.checkin)
       assert.ok(target.minute <= 23 * 60, `target ${target.text} must leave a retry ask before midnight`)
       assert.ok(target.minute >= 22 * 60, `target ${target.text} must stay inside the configured start`)
@@ -789,7 +807,7 @@ test("two tokens are two accounts: own target, own name, no bleed", async () => 
     try {
       const ask = async (tok) => {
         const r = await two.auth.checkin(async () => ({ type: "api", key: tok }))
-        const m = /今日 (\d{2}):(\d{2}) 起领取/.exec(r.message)
+        const m = /^(\d{2}):(\d{2}) 后自动领取/.exec(r.message)
         return m ? `${m[1]}:${m[2]}` : null
       }
       const ta = await ask(A)
@@ -933,7 +951,7 @@ test("the same account's target minute is stable within a day", async () => {
     try {
       for (let i = 0; i < 6; i++) {
         const r = await auth.checkin(async () => ({ type: "api", key: "ms-stable" }))
-        const m = /今日 (\d{2}:\d{2}) 起领取/.exec(r.message)
+        const m = /^(\d{2}:\d{2}) 后自动领取/.exec(r.message)
         assert.ok(m, `message should carry the target: ${r.message}`)
         seen.add(m[1])
       }
