@@ -1,0 +1,28 @@
+# Keep the repository's text as it was written: LF, everywhere.
+#
+# bin/sync.mjs is a command: npm links it into .bin and the OS executes it
+# through its shebang. A checkout that turned its lines into CRLF — which
+# is what git's core.autocrlf=true does by default on Windows — leaves
+# "#!/usr/bin/env node\r", and the kernel hunts for an interpreter literally
+# named "node\r": `env: 'node\r': No such file or directory`, exit 127. The
+# file still runs under `node file.mjs` (the JS engine tolerates CRLF), so
+# this only breaks the paths that matter: a symlinked bin, a global install
+# on WSL/Cygwin, and anyone running it directly.
+#
+# So: text is text, in LF. Marked explicitly rather than with `* text=auto`
+# so binary files stay untouched, and so this file's intent is readable.
+* text=auto eol=lf
+
+# Explicitly binary: never convert, never touch.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.zip binary
+*.gz binary
+*.tgz binary
