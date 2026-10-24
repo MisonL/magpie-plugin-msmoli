@@ -1,9 +1,14 @@
 import assert from "node:assert/strict"
-import { test } from "node:test"
+import { spawnSync } from "node:child_process"
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { test } from "node:test"
+import { fileURLToPath } from "node:url"
 import {
   findConfigDir,
   findMagpieBin,
+  main,
   looksLikeMagpie,
   mask,
   planToPlugin,
@@ -198,4 +203,103 @@ test("findConfigDir reads a Mac app's portable folder beside the .app, not insid
 test("looksLikeMagpie wants one of magpie's files", () => {
   assert.equal(looksLikeMagpie("/x", (p) => p === "/x/plugin-auth.json"), true)
   assert.equal(looksLikeMagpie("/x", () => false), false)
+})
+
+// ---- the CLI as a command (the shape npm and npx run it in)
+
+const bin = fileURLToPath(new URL("../bin/sync.mjs", import.meta.url))
+const run = (args, opts = {}) =>
+  spawnSync(process.execPath, [bin, ...args], { encoding: "utf8", timeout: 30_000, ...opts })
+
+test("runs when node is handed the file directly", () => {
+  const r = run(["--help"])
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /msmoli-sync/)
+})
+
+test("runs through a symlink, the way npm's .bin and npx invoke it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-bin-"))
+  try {
+    const link = join(dir, "magpie-plugin-msmoli")
+    symlinkSync(bin, link)
+    const r = spawnSync(link, ["--help"], { encoding: "utf8", timeout: 30_000 })
+    // the shebang is what decides this when exec'd by name; skip where the
+    // platform can't run it (no executable bit through the link)
+    if (r.error) return
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(r.stdout, /msmoli-sync/, "a symlinked invocation must still reach main()")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("--help exits 0 and every other exit is a number", () => {
+  assert.equal(run(["--help"]).status, 0)
+  const bad = run(["--nope"])
+  assert.equal(bad.status, 1)
+  assert.match(bad.stderr, /不认识的参数/)
+})
+
+test("says so, rather than guessing, when there is no magpie config", () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-empty-"))
+  try {
+    const r = spawnSync(process.execPath, [bin, "--dir", dir], {
+      encoding: "utf8",
+      env: { ...process.env, XDG_CONFIG_HOME: dir, HOME: dir },
+      timeout: 30_000,
+    })
+    assert.equal(r.status, 1)
+    assert.match(r.stdout, /没有 magpie 的配置文件/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---- a failure partway through the two-step replace
+
+test("a failed login after a successful logout says how to recover", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-half-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const wrote = []
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: (_cmd, argv) => {
+        wrote.push(argv.join(" "))
+        // the real logout clears the account; the login then fails as a
+        // dropped network would
+        if (argv.includes("logout")) {
+          writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+          return { status: 0, stdout: "✓ signed out", stderr: "" }
+        }
+        return { status: 7, stdout: "", stderr: "network down (simulated)" }
+      },
+    })
+    assert.equal(code, 1)
+    assert.deepEqual(wrote, ["plugin logout msmoli", "plugin login msmoli"])
+    const text = out.join("\n")
+    assert.match(text, /已被登出/)
+    assert.match(text, /重新运行/, "the user has to be told the account is now signed out")
+    assert.equal(readFileSync(join(dir, "plugin-auth.json"), "utf8"), "{}", "the account is gone, as the fixture says")
+
+    // the recovery really is the same command again: no account is left, so
+    // it plans the plain login and needs no --force
+    const out2 = []
+    const code2 = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out2.push(s),
+      spawn: (_cmd, argv) => {
+        assert.ok(!argv.includes("logout"), "nothing to log out of any more")
+        writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+        return { status: 0, stdout: "✓ signed in", stderr: "" }
+      },
+    })
+    assert.equal(code2, 0)
+    assert.match(out2.join("\n"), /完成/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

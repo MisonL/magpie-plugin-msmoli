@@ -58,9 +58,11 @@ If you added ModelScope earlier just for chat, its key is already in
 the plugin, so you don't have to find it again:
 
 ```bash
-npx magpie-plugin-msmoli                 # both sides, and what it would do
-npx magpie-plugin-msmoli --to-plugin     # log the preset's key into the plugin
+npx github:MisonL/magpie-plugin-msmoli                 # both sides, and what it would do
+npx github:MisonL/magpie-plugin-msmoli --to-plugin     # log the preset's key into the plugin
 ```
+
+Once the package is on npm, the shorter `npx magpie-plugin-msmoli` does the same.
 
 It reads magpie's config but never writes it: the writes are magpie's own
 (`magpie plugin login`), and the token is masked in everything it prints. When

@@ -15,8 +15,7 @@
   "main": "./index.mjs",
   "exports": "./index.mjs",
   "bin": {
-    "magpie-plugin-msmoli": "./bin/sync.mjs",
-    "msmoli-sync": "./bin/sync.mjs"
+    "magpie-plugin-msmoli": "./bin/sync.mjs"
   },
   "files": [
     "index.mjs",

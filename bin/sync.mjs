@@ -16,10 +16,10 @@
 //   拒绝改动，只有显式 --force 且插件只有一个账号时才替换。
 
 import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync } from "node:fs"
 import { homedir, platform } from "node:os"
 import { dirname, join } from "node:path"
-import { fileURLToPath } from "node:url"
+import { pathToFileURL } from "node:url"
 
 const ID = "msmoli"
 const PRESET = "modelscope"
@@ -202,7 +202,8 @@ function hidden(argv, secret, log) {
 }
 
 function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
-  for (const { argv, stdin, secret } of cmds) {
+  for (let i = 0; i < cmds.length; i++) {
+    const { argv, stdin, secret } = cmds[i]
     hidden(argv, secret, log)
     if (dryRun) continue
     const r = spawn(bin, argv, { input: stdin, encoding: "utf8", timeout })
@@ -210,7 +211,14 @@ function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
     if (r.error) throw new Error(`跑不动 ${bin}：${r.error.message}（用 --magpie 指定完整路径）`)
     if (r.status !== 0) {
       const said = out.split("\n").filter(Boolean).slice(-3).join("\n")
-      throw new Error(`magpie 命令失败（退出码 ${r.status}）${said ? `：\n${said}` : ""}`)
+      const e = new Error(`magpie 命令失败（退出码 ${r.status}）${said ? `：\n${said}` : ""}`)
+      // 多步序列（--force 的 logout→login）中途失败：logout 已经发生了，
+      // 用户此刻是被登出的状态。说清楚，并告诉他重跑即可续上——
+      // 此时插件已无账号，重跑走的是全新登录那条路，不再需要 --force。
+      if (i > 0) {
+        e.recover = `注意：前面的步骤已经执行，现有登录已被登出。重新运行同一条命令即可继续（此时插件没有账号，会直接登录，无需 --force）。`
+      }
+      throw e
     }
     // magpie 自己就把令牌显示成掩码；将来若变，这里兜底再滤一遍
     const lines = secret ? out.split("\n").map((l) => l.split(secret).join(mask(secret))) : out.split("\n")
@@ -278,6 +286,7 @@ export async function main({
     run(plan.cmds, bin, { dryRun: args.dryRun, log, spawn })
   } catch (e) {
     log(`✗ ${e.message}`)
+    if (e.recover) log(e.recover)
     return 1
   }
   if (args.dryRun) {
@@ -296,9 +305,25 @@ export async function main({
   return 0
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  main().then((code) => process.exit(code)).catch((e) => {
-    process.stderr.write(`msmoli-sync: ${e?.message ?? e}\n`)
-    process.exit(1)
-  })
+// npm 和 npx 通过符号链接调用 bin：argv[1] 是链接的路径，而 import.meta.url
+// 是解析后的真实路径，直接比较字符串会漏掉「作为命令运行」的场景（测试里用
+// node bin/sync.mjs 直跑恰好相等，掩盖了这个 bug）。先把 argv[1] 也 realpath
+// 成真实路径再比。
+function isMain() {
+  const entry = process.argv[1]
+  if (!entry) return false
+  try {
+    return pathToFileURL(realpathSync(entry)).href === import.meta.url
+  } catch {
+    return false
+  }
+}
+
+if (isMain()) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((e) => {
+      process.stderr.write(`msmoli-sync: ${e?.message ?? e}\n`)
+      process.exit(1)
+    })
 }

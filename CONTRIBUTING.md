@@ -41,7 +41,8 @@ the nickname).
 
 ## The sync CLI
 
-`bin/sync.mjs` is the `npx magpie-plugin-msmoli` tool that copies an existing
+`bin/sync.mjs` is the CLI behind `npx github:MisonL/magpie-plugin-msmoli` (and,
+once published, `npx magpie-plugin-msmoli`), which copies an existing
 ModelScope key between the built-in preset (`providers.json`) and this plugin's
 sign-in (`plugin-auth.json`). Its tests live in `test/sync.test.mjs` and run
 with the rest of the suite.

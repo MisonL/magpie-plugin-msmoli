@@ -50,8 +50,11 @@ printf 'ms-你的令牌\n' | magpie plugin login msmoli
 本包自带一个小工具可以把同一把令牌登录给插件，不用再找一遍：
 
 ```bash
-npx magpie-plugin-msmoli            # 显示两边状态，再按提示加 --to-plugin 执行
+npx github:MisonL/magpie-plugin-msmoli --status      # 先看两边状态
+npx github:MisonL/magpie-plugin-msmoli --to-plugin   # 执行同步
 ```
+
+（包发布到 npm 之后，短的 `npx magpie-plugin-msmoli` 也可以。）
 
 - 它只读 magpie 的两个文件；写入交给 magpie 自己的 CLI（`plugin login`）完成，
   输出里不会出现令牌；
