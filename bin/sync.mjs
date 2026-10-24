@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// msmoli-sync — 把 magpie 里已有的 ModelScope 令牌同步给签到插件，或反过来。
+// magpie-plugin-msmoli — 把 magpie 里已有的 ModelScope 令牌同步给签到插件，或反过来。
 //
 // 为什么有这个工具：magpie 的内置 ModelScope 预设（providers.json）和本插件
 // 的登录态（plugin-auth.json）是两处独立存储，同一把 ms- 令牌要配两次。
@@ -25,7 +25,7 @@ const ID = "msmoli"
 const PRESET = "modelscope"
 const HOST = "api-inference.modelscope.cn"
 
-const USAGE = `msmoli-sync — 把 magpie 里已有的 ModelScope 令牌同步给签到插件
+const USAGE = `magpie-plugin-msmoli — 把 magpie 里已有的 ModelScope 令牌同步给签到插件
 
 用法：npx magpie-plugin-msmoli [选项]
 
@@ -33,7 +33,7 @@ const USAGE = `msmoli-sync — 把 magpie 里已有的 ModelScope 令牌同步�
   --to-plugin   把内置 ModelScope 预设的 key 登录给签到插件
   --to-preset   反向：把签到插件主账号的 key 写进内置预设
   --force       两边令牌不同时也执行（会替换 / 先登出现有登录）
-  --from <id>   内置侧的 provider id（默认 ${PRESET}）
+  --from <id>   内置侧只认 id 恰好为它的 provider（默认的识别见上）
   --dir <路径>  magpie 配置目录（便携版探测不到时用这个）
   --magpie <路径>  magpie 可执行文件（默认找 PATH 与常见安装位置）
   --status      只报告，不执行
@@ -348,7 +348,7 @@ if (isMain()) {
   main()
     .then((code) => process.exit(code))
     .catch((e) => {
-      process.stderr.write(`msmoli-sync: ${e?.message ?? e}\n`)
+      process.stderr.write(`magpie-plugin-msmoli: ${e?.message ?? e}\n`)
       process.exit(1)
     })
 }

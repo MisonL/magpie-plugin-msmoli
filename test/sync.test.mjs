@@ -227,7 +227,7 @@ const run = (args, opts = {}) =>
 test("runs when node is handed the file directly", () => {
   const r = run(["--help"])
   assert.equal(r.status, 0, r.stderr)
-  assert.match(r.stdout, /msmoli-sync/)
+  assert.match(r.stdout, /magpie-plugin-msmoli — 把 magpie/)
 })
 
 test("runs through a symlink, the way npm's .bin and npx invoke it", () => {
@@ -240,7 +240,7 @@ test("runs through a symlink, the way npm's .bin and npx invoke it", () => {
     // platform can't run it (no executable bit through the link)
     if (r.error) return
     assert.equal(r.status, 0, r.stderr)
-    assert.match(r.stdout, /msmoli-sync/, "a symlinked invocation must still reach main()")
+    assert.match(r.stdout, /magpie-plugin-msmoli — 把 magpie/, "a symlinked invocation must still reach main()")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
