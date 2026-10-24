@@ -55,14 +55,17 @@ between the two forms (or moving the clone) keeps the token — no second login.
 
 If you added ModelScope earlier just for chat, its key is already in
 `providers.json`. This package ships a small CLI that logs the same token into
-the plugin, so you don't have to find it again:
+the plugin, so you don't have to find it again. Every magpie install already
+has it — magpie's plugin folder holds the package:
 
 ```bash
-npx github:MisonL/magpie-plugin-msmoli                 # both sides, and what it would do
-npx github:MisonL/magpie-plugin-msmoli --to-plugin     # log the preset's key into the plugin
+node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --status      # see both sides
+node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --to-plugin   # sync
 ```
 
-Once the package is on npm, the shorter `npx magpie-plugin-msmoli` does the same.
+(Portable installs keep the same file under their `data` folder. `npx
+magpie-plugin-msmoli` will work once the package is on npm — npm 12 blocks
+`npx github:…` by default, so don't start from that.)
 
 It reads magpie's config but never writes it: the writes are magpie's own
 (`magpie plugin login`), and the token is masked in everything it prints. When

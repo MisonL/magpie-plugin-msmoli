@@ -255,6 +255,28 @@ test("says so, rather than guessing, when there is no magpie config", () => {
   }
 })
 
+test("a bare run reports the plan and writes nothing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-bare-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    let called = false
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        called = true
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 0)
+    assert.equal(called, false, "npx with no flags must not sign anything in")
+    assert.match(out.join("\n"), /未执行|请显式指定方向/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 // ---- a failure partway through the two-step replace
 
 test("a failed login after a successful logout says how to recover", async () => {

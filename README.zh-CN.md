@@ -47,14 +47,16 @@ printf 'ms-你的令牌\n' | magpie plugin login msmoli
 #### 已经在 magpie 里配好 ModelScope？一条命令把 key 同步给插件
 
 如果你之前为了聊天已经把 ModelScope 加进「供应商」（`providers.json` 里有 key），
-本包自带一个小工具可以把同一把令牌登录给插件，不用再找一遍：
+本包自带一个小工具可以把同一把令牌登录给插件，不用再找一遍。装插件时 magpie 已经
+把包拷进了自己的插件目录，直接用那里那份即可：
 
 ```bash
-npx github:MisonL/magpie-plugin-msmoli --status      # 先看两边状态
-npx github:MisonL/magpie-plugin-msmoli --to-plugin   # 执行同步
+node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --status      # 先看两边状态
+node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --to-plugin   # 执行同步
 ```
 
-（包发布到 npm 之后，短的 `npx magpie-plugin-msmoli` 也可以。）
+（便携版在同目录结构的 `data` 下。`npx magpie-plugin-msmoli` 要等包发布到 npm
+之后才能用——npm 12 默认禁用 `npx github:…`，别从那条路开始。）
 
 - 它只读 magpie 的两个文件；写入交给 magpie 自己的 CLI（`plugin login`）完成，
   输出里不会出现令牌；

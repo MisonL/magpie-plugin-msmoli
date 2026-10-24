@@ -30,7 +30,7 @@ const USAGE = `msmoli-sync — 把 magpie 里已有的 ModelScope 令牌同步�
 用法：npx magpie-plugin-msmoli [选项]
 
 不带参数：显示两边状态，并把将要执行的动作写清楚；不改动任何东西。
-  --to-plugin   把内置 ModelScope 预设的 key 登录给签到插件（默认方向）
+  --to-plugin   把内置 ModelScope 预设的 key 登录给签到插件
   --to-preset   反向：把签到插件主账号的 key 写进内置预设
   --force       两边令牌不同时也执行（会替换 / 先登出现有登录）
   --from <id>   内置侧的 provider id（默认 ${PRESET}）
@@ -278,6 +278,11 @@ export async function main({
   for (const line of plan.lines) log(line)
   if (plan.action !== "run") return plan.action === "noop" ? 0 : 1
 
+  // 不带 --to-* 时只报计划：裸跑 npx 不该静默写入一个凭据
+  if (!args.to) {
+    log(`(要执行请显式指定方向：--to-plugin 或 --to-preset)`)
+    return 0
+  }
   if (args.status) {
     log(`(--status：以上是计划，未执行)`)
     return 0
