@@ -49,6 +49,19 @@ test("presetCandidates falls back to the inference host for a hand-made vendor",
   assert.deepEqual(presetCandidates(ps).map((p) => p.id), ["mine"])
 })
 
+test("--from disambiguates by id, even between two preset=modelscope rows", () => {
+  // a second provider that also declares preset: modelscope — the default
+  // search finds both, and --from has to pick one by id, not by preset again
+  const ps = [
+    { id: "modelscope", preset: "modelscope", key: A },
+    { id: "relaychat", preset: "modelscope", key: B },
+  ]
+  assert.equal(presetCandidates(ps).length, 2, "default search is ambiguous on purpose here")
+  assert.deepEqual(presetCandidates(ps, "relaychat").map((p) => p.id), ["relaychat"])
+  assert.deepEqual(presetCandidates(ps, "modelscope").map((p) => p.id), ["modelscope"])
+  assert.deepEqual(presetCandidates(ps, "nosuch"), [], "--from matches nothing if there is no such id")
+})
+
 test("presetCandidates ignores a provider with no key", () => {
   assert.deepEqual(presetCandidates([{ id: "modelscope", preset: "modelscope" }]), [])
 })
@@ -277,7 +290,49 @@ test("a bare run reports the plan and writes nothing", async () => {
   }
 })
 
-// ---- a failure partway through the two-step replace
+test("a --from that matches nothing fails clean, not with a crash", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-typo-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--from", "typo", "--status", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+    })
+    const text = out.join("\n")
+    assert.equal(code, 1)
+    assert.match(text, /typo/)
+    assert.doesNotMatch(text, /Cannot read properties/, "a mistyped --from must not reach a null preset")
+    assert.doesNotMatch(text, /undefined/, "no leaked undefined in the message")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a missing preset is refused before planning, both directions", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nopreset-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    for (const to of ["--to-plugin", "--to-preset"]) {
+      const out = []
+      const code = await main({
+        argv: ["--dir", dir, to, "--magpie", "/nonexistent"],
+        log: (s) => out.push(s),
+        spawn: () => {
+          throw new Error("must not run anything without a preset")
+        },
+      })
+      assert.equal(code, 1, `${to} on an empty providers.json`)
+      assert.match(out.join("\n"), /没有|provider add/, `${to}: user gets guidance, not a crash`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---- the failure partway through the two-step replace
 
 test("a failed login after a successful logout says how to recover", async () => {
   const dir = mkdtempSync(join(tmpdir(), "msmoli-half-"))

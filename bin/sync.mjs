@@ -112,14 +112,17 @@ function readJson(file, exists = existsSync) {
 
 export const mask = (t) => (typeof t === "string" && t.length >= 8 ? `${t.slice(0, 4)}…${t.slice(-4)}` : "（不可用）")
 
-// 内置侧的候选：先认 id/preset（magpie 预设的正规路径），没有再按推理域名
-// 认用户自建的 vendor。多于一个候选时工具不猜，让用户 --from 指定。
+// 内置侧的候选：默认先认 id/preset=modelscope（magpie 预设的正规路径），没有
+// 再按推理域名认用户自建的 vendor。--from 是消歧手段，必须只认 id——默认搜索
+// 按 preset 匹配才产生歧义，消歧若还按 preset 就永远解不开（演练抓出的 bug）。
+// 多于一个候选时工具不猜。
 export function presetCandidates(providers, from = "") {
   const list = Array.isArray(providers) ? providers : []
-  const want = from || PRESET
-  const byId = list.filter((p) => typeof p?.key === "string" && p.key && (p.id === want || p.preset === want))
-  if (byId.length || from) return byId
-  return list.filter((p) => typeof p?.key === "string" && p.key && typeof p.chat === "string" && p.chat.includes(HOST))
+  const keyed = (p) => typeof p?.key === "string" && p.key
+  if (from) return list.filter((p) => keyed(p) && p.id === from)
+  const byId = list.filter((p) => keyed(p) && (p.id === PRESET || p.preset === PRESET))
+  if (byId.length) return byId
+  return list.filter((p) => keyed(p) && typeof p?.chat === "string" && p.chat.includes(HOST))
 }
 
 // 插件侧的账号：主键 msmoli 与 msmoli#xxxxxx，按令牌区分。
@@ -268,13 +271,20 @@ export async function main({
     return 1
   }
   const preset = cands[0] ?? null
-  if (!preset && (args.to ?? "plugin") === "plugin") {
-    log(`✗ 内置侧没有带 key 的 ModelScope 预设。`)
-    log(`  先在 magpie 的「供应商」页添加 ModelScope，或 magpie provider add ${PRESET} <key>。`)
+  // 无预设时两条方向都该给指引：--to-preset 也有自己的话术（planToPreset 里），
+  // 但这里先统一拦住，免得 null 一路传到 plan 里崩栈
+  if (!preset) {
+    if (args.from) {
+      log(`✗ 内置侧没有 id 为 "${args.from}" 的 provider。`)
+      log(`  用 --status 看现有的，或先 magpie provider add ${args.from} <key>。`)
+    } else {
+      log(`✗ 内置侧没有带 key 的 ModelScope 预设。`)
+      log(`  先在 magpie 的「供应商」页添加 ModelScope，或 magpie provider add ${PRESET} <key>。`)
+    }
     return 1
   }
 
-  const plan = (args.to ?? "plugin") === "preset" ? planToPreset({ preset, accounts, force: args.force }) : planToPlugin({ preset, accounts, force: args.force })
+  const plan = args.to === "preset" ? planToPreset({ preset, accounts, force: args.force }) : planToPlugin({ preset, accounts, force: args.force })
   for (const line of plan.lines) log(line)
   if (plan.action !== "run") return plan.action === "noop" ? 0 : 1
 
@@ -299,12 +309,22 @@ export async function main({
     return 0
   }
 
-  // 回读验证，别只信退出码
-  const after = pluginAccounts(readJson(join(dir, "plugin-auth.json"), exists))
+  // 回读验证，别只信退出码（方向判断与上面 plan 那行保持一致）
   const want = plan.cmds.at(-1).secret
-  if ((args.to ?? "plugin") === "plugin" && want && !after.some((a) => a.token === want)) {
-    log(`✗ 写入后回读没找到目标令牌——检查 magpie 是否在正常运行。`)
-    return 1
+  if (want) {
+    if (args.to === "preset") {
+      const after = presetCandidates(readJson(join(dir, "providers.json"), exists)?.providers, preset.id)
+      if (!after.some((p) => p.key === want)) {
+        log(`✗ 写入后回读没找到目标 key（${mask(want)}）——检查 magpie 是否在正常运行。`)
+        return 1
+      }
+    } else {
+      const after = pluginAccounts(readJson(join(dir, "plugin-auth.json"), exists))
+      if (!after.some((a) => a.token === want)) {
+        log(`✗ 写入后回读没找到目标令牌（${mask(want)}）——检查 magpie 是否在正常运行。`)
+        return 1
+      }
+    }
   }
   log(`✓ 完成。签到开关在 magpie 的 设置 → 用量 → 插件 → msmoli。`)
   return 0
