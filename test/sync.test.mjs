@@ -1206,3 +1206,30 @@ test("--to-preset --dry-run prints the command with the token masked", async () 
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("isMain falls back to the resolved path when the volume reports no identity", () => {
+  // exFAT/FAT sticks and some SMB shares report ino 0. The inode branch can't
+  // decide there, and with nothing in its place isMain answers false for the
+  // entry file itself — the CLI prints nothing and exits 0, which reads as a
+  // successful sync. A volume with st_ino stubbed to 0 is the only way to
+  // reach that branch, hence the injected stat; a symlink gives the second
+  // spelling the href comparison is meant to miss.
+  const zero = (p) => ({ ino: 0, dev: 1, isFile: () => statSync(p).isFile() })
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-mainino-"))
+  try {
+    const entry = join(dir, "sync.mjs")
+    writeFileSync(entry, "//\n")
+    writeFileSync(join(dir, "other.mjs"), "//\n")
+    const link = join(dir, "sync-link.mjs")
+    try {
+      symlinkSync(entry, link)
+    } catch {
+      return // no symlinks on this machine: nothing to spell differently
+    }
+    assert.notEqual(pathToFileURL(link).href, pathToFileURL(entry).href, "the spellings should differ as strings")
+    assert.equal(isMain(link, pathToFileURL(entry).href, zero), true, "the same file is the entry even with no inode")
+    assert.equal(isMain(join(dir, "other.mjs"), pathToFileURL(entry).href, zero), false, "a different file still is not")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

@@ -1835,3 +1835,173 @@ test("a check-in whose sign-in hand-over rejects with a non-Error says nothing o
     assert.match(r.message, /签到失败|gone/, `should give a usable message, got: ${r.message}`)
   }
 })
+
+test("an error from the host reaches the card scrubbed, like the log's does", async () => {
+  // magpie's own CLI scrubs tokens out of "no key ms-… for provider", so the
+  // host demonstrably does put them in error text. The four card exits used to
+  // pass that text through untouched — only the nickname log did not.
+  const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-card-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const hooks = await MsmoliPlugin({ directory: dir })
+  const real = globalThis.fetch
+  globalThis.fetch = async () => {
+    throw new Error(`invalid header value: ${token}\r\n\u001b[2J‮tail`)
+  }
+  try {
+    const u = await hooks.auth.usage(async () => ({ type: "api", key: token }))
+    const c = await hooks.auth.checkin(async () => ({ type: "api", key: token }))
+    for (const [what, said] of [["usage", u.error], ["checkin", c.message]]) {
+      assert.ok(said, `${what}: there should be a message`)
+      assert.ok(!said.includes(token), `${what}: the token reached the card: ${JSON.stringify(said)}`)
+      const bad = Array.from(said).filter((ch) => {
+        const c = ch.codePointAt(0)
+        return c < 9 || (c > 10 && c < 32) || c === 127 || c === 0x2028 || c === 0x2029 || (c >= 0x202a && c <= 0x202e)
+      })
+      assert.deepEqual(bad, [], `${what}: control characters survived: ${JSON.stringify(said)}`)
+    }
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a host log that throws synchronously does not reject the usage hook", async () => {
+  // usage promises an {error}, never a rejection — and the nickname write-back
+  // sits on its path. `?.catch?.()` only catches a rejected promise, not a
+  // throw made while the call itself is being made.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-logthrow-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const token = "ms-nametest-0000-0000-0000-000000000012"
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => ({
+    status: 200,
+    headers: { get: () => null },
+    body: null,
+    text: async () =>
+      String(url).includes("login/info")
+        ? JSON.stringify({ Code: 200, Data: { NickName: "Mison" } })
+        : JSON.stringify({ success: true, data: { records: [] } }),
+  })
+  try {
+    const client = {
+      auth: { set: async () => { throw new Error("write refused") } },
+      app: { log: () => { throw new Error("log threw") } },
+    }
+    const hooks = await MsmoliPlugin({ directory: dir, client })
+    // the check-in puts the name in the process cache; usage then writes it back
+    await hooks.auth.checkin(async () => ({ type: "api", key: token }))
+    const u = await hooks.auth.usage(async () => ({ type: "api", key: token }))
+    assert.equal(u.error, undefined, `usage should have read fine, got: ${u.error}`)
+    assert.ok(u.windows?.[0], "the card is still filled in")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("the write-back log masks the token before truncating, not after", async () => {
+  // The other order cuts a token in half; half a token is not a token to
+  // split() on, so the front of it reaches the log. Padding puts the token
+  // across the 200-code-point cut.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-cut-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const logged = []
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => ({
+    status: 200,
+    headers: { get: () => null },
+    body: null,
+    text: async () =>
+      String(url).includes("login/info")
+        ? JSON.stringify({ Code: 200, Data: { NickName: "Mison" } })
+        : JSON.stringify({ success: true, data: { records: [] } }),
+  })
+  try {
+    const hooks = await MsmoliPlugin({
+      directory: dir,
+      client: {
+        auth: { set: async () => { throw new Error(`${"x".repeat(190)}${token} trailing`) } },
+        app: { log: async (o) => logged.push(o.body.message) },
+      },
+    })
+    await hooks.auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(logged.length, 1, "the failure is logged")
+    assert.ok(!logged[0].includes(token.slice(0, 8)), `the front of the token survived: ${JSON.stringify(logged[0].slice(180))}`)
+    assert.ok(logged[0].includes("ms-a…5555"), "the masked token is what got logged")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a config file with a BOM is read, not quietly replaced by the default window", async () => {
+  // Notepad and PowerShell's Out-File write a BOM. JSON.parse rejects it, and
+  // a user who wrote checkinWindow: false would get the default window back
+  // with nothing said.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-bom-"))
+  const file = join(dir, "msmoli.json")
+  writeFileSync(file, "﻿" + JSON.stringify({ checkinWindow: false }))
+  const hooks = await MsmoliPlugin({ directory: dir })
+  const realNow = Date.now
+  Date.now = () => Date.parse("2026-10-25T00:30:00+08:00") // before any window
+  try {
+    let asked = 0
+    const real = globalThis.fetch
+    globalThis.fetch = async () => {
+      asked += 1
+      return { status: 200, headers: { get: () => null }, body: null, text: async () => JSON.stringify({ success: true, data: { records: [] } }) }
+    }
+    try {
+      const r = await hooks.auth.checkin(async () => ({ type: "api", key: "ms-bomtest" }))
+      assert.doesNotMatch(r.message, /后自动领取/, `the window was applied despite checkinWindow: false: ${r.message}`)
+      assert.ok(asked > 0, "with the window off, the check-in goes ahead")
+    } finally {
+      globalThis.fetch = real
+    }
+  } finally {
+    Date.now = realNow
+  }
+})
+
+test("a time that is not a time is refused instead of rolled over", async () => {
+  // Date.UTC normalizes: month 13 is January next year, "99:99:99" rolls two
+  // days on. The card would count down to a moment that reads fine and is not
+  // when the grant expires.
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records: [day({ expire_at: "2026-13-45 99:99:99" })] } },
+      },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.windows[0].resetsAt, "", "an impossible time is no time at all")
+    },
+  )
+})
+
+test("a ledger with no data at all is a failure, not an empty day", async () => {
+  // `inactive` ends the day. A body whose data went missing (a proxy rewrite,
+  // a renamed field) is one we did not understand, and has to be retried.
+  await withFetch(
+    { "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true } } },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "failed", `a shapeless body must not settle the day: ${r.outcome}`)
+      assert.match(r.message, /账单格式/)
+    },
+  )
+})
+
+test("the window reads the other separators an IME or an editor substitutes", () => {
+  const at = (v) => {
+    const w = windowOf({ checkinWindow: v })
+    return w && `${String(w.start / 60 | 0).padStart(2, "0")}:${String(w.start % 60).padStart(2, "0")}`
+  }
+  for (const sep of ["-", "–", "—", "−", "~", "～", "〜", "至", "到"]) {
+    assert.equal(at(`09:15${sep}11:45`), "09:15", `separator ${JSON.stringify(sep)} was not read`)
+  }
+})

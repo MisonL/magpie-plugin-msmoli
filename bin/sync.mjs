@@ -480,17 +480,26 @@ export async function main({
 // node bin/sync.mjs 直跑恰好相等，掩盖了这个 bug）。先把 argv[1] 也 realpath
 // 成真实路径再比。
 //
-// realpath 不规范化大小写：大小写不敏感的卷（Windows、macOS 默认）上，同一个
-// 文件按不同拼写调用会得到两个不同的字符串。因此相等与否最终按 inode 判定
-// ——那是文件的身份，与拼写无关；也不能靠折叠大小写，那会在大小写敏感卷上
-// 把两个不同的文件认成同一个，让被 import 的模块把 main() 再跑一遍。
-export function isMain(entry = process.argv[1], self = import.meta.url) {
+// href 还不够的地方有两处，都不涉及大小写：node --preserve-symlinks-main 让
+// import.meta.url 保留链接路径，而 realpathSync 仍把它解开；Windows 的 8.3 短
+// 名（C:\Users\RUNNER~1\…）在 pathToFileURL 里不展开、realpathSync 里展开。
+// 这两种都靠 inode 兜——那是文件的身份，与拼写无关。
+//
+// 报 ino=0 的卷（exFAT/FAT 的 U 盘、部分 SMB 共享与 subst 映射）没有身份可比，
+// 这时退回比 realpath 之后的字符串：它能覆盖上面两种 href 失配，唯一丢掉的
+// 是大小写翻转，而那个场景 href 本来就命中。不这样做的话 isMain 恒 false，
+// 整个文件被跳过——不打印任何东西、退出码 0，用户会以为同步成功了。
+//
+// `stat` 与 `real` 可注入：ino=0 的卷在本机造不出来，测试只能把手伸到这里。
+export function isMain(entry = process.argv[1], self = import.meta.url, stat = statSync, real = realpathSync) {
   if (!entry) return false
   try {
-    if (pathToFileURL(realpathSync(entry)).href === self) return true
-    const theirs = statSync(entry)
-    const mine = statSync(fileURLToPath(self))
-    return theirs.ino !== 0 && theirs.ino === mine.ino && theirs.dev === mine.dev
+    const here = real(entry)
+    if (pathToFileURL(here).href === self) return true
+    const theirs = stat(entry)
+    const mine = stat(fileURLToPath(self))
+    if (theirs.ino !== 0 && theirs.ino === mine.ino && theirs.dev === mine.dev) return true
+    return here === real(fileURLToPath(self))
   } catch {
     return false
   }

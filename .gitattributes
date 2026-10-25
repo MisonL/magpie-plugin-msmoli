@@ -9,8 +9,9 @@
 # this only breaks the paths that matter: a symlinked bin, a global install
 # on WSL/Cygwin, and anyone running it directly.
 #
-# So: text is text, in LF. Marked explicitly rather than with `* text=auto`
-# so binary files stay untouched, and so this file's intent is readable.
+# So: text is text, in LF. `eol=lf` is what does that work — it applies even
+# where core.autocrlf=true — and the binary list below is what keeps a
+# format git cannot sniff correctly from being converted as if it were text.
 * text=auto eol=lf
 
 # Explicitly binary: never convert, never touch.

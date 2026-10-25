@@ -173,7 +173,6 @@ const okOf = (body) => {
 // trusted with control characters: a newline forges a log line, an escape
 // sequence drives the terminal, and a bidi override can turn a name inside
 // out. Visible characters are kept, up to a length that fits a card.
-//
 // The classes, not a hand-listed range: \p{Cc} is C0/C1, \p{Cf} covers the
 // bidi controls, the zero-width joiners, the word joiner and the tag
 // characters (U+E0000\u2013E007F) that can carry hidden data \u2014 the earlier list
@@ -193,12 +192,16 @@ const saidOf = (body) => text(body?.message ?? body?.Message ?? body?.msg ?? bod
 
 const dataOf = (body) => body?.data ?? body?.Data ?? {}
 
-// recordsOf is the ledger's entries. A missing key is an empty ledger (the
-// keys are optional in ModelScope's answers), but a records that is there and
-// is not a list is a body we do not understand — a proxy's rewrite, a changed
-// API — and must fail: read as empty it would report "claimed 0 today".
+// recordsOf is the ledger's entries. `records` missing under a data object is
+// an empty ledger (the keys are optional in ModelScope's answers), but a body
+// with no data at all, or a records that is there and is not a list, is a body
+// we do not understand — a proxy's rewrite, a changed API — and must fail:
+// read as empty it would report "claimed 0 today", and the check-in would
+// answer `inactive`, which ends the day.
 const recordsOf = (body) => {
-  const records = dataOf(body)?.records
+  const data = body?.data ?? body?.Data
+  if (data === undefined || data === null || typeof data !== "object") throw new Error("账单格式不认识：没有 data")
+  const records = data.records
   if (records === undefined || records === null) return []
   if (!Array.isArray(records)) throw new Error("账单格式不认识：records 不是列表")
   return records
@@ -215,6 +218,10 @@ function cnTime(value) {
   const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(String(value ?? ""))
   if (!m) return ""
   const [, y, mo, d, h, mi, s] = m
+  // Date.UTC normalizes rather than rejects: month 13 becomes January of the
+  // next year, "99:99:99" rolls over days. The card would then count down to a
+  // moment that looks perfectly reasonable and is not when the grant expires.
+  if (+mo < 1 || +mo > 12 || +d < 1 || +d > 31 || +h > 23 || +mi > 59 || +s > 59) return ""
   const at = Date.UTC(+y, +mo - 1, +d, +h - 8, +mi, +s)
   return Number.isFinite(at) ? new Date(at).toISOString() : ""
 }
@@ -252,10 +259,13 @@ function configPath(dir) {
 
 // configOf reads the user's overrides, hot each call so a change reaches the
 // next ask without restarting magpie. Anything unreadable or not an object
-// is nothing.
+// is nothing — and the BOM is stripped first, the way aliasOf does it: a file
+// written by Notepad or PowerShell's Out-File starts with one, JSON.parse
+// rejects it, and the user's `checkinWindow: false` would be read as "no
+// setting at all" and replaced by the default window, with nothing said.
 function configOf(dir) {
   try {
-    const raw = JSON.parse(readFileSync(configPath(dir), "utf8"))
+    const raw = JSON.parse(readFileSync(configPath(dir), "utf8").replace(/^\uFEFF/, ""))
     return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}
   } catch {
     return {}
@@ -288,8 +298,10 @@ export function windowOf(cfg) {
   if (typeof raw === "string" && /^(off|false|no)$/i.test(raw.trim())) return null
   // "～" (U+FF5E) is the full-width tilde a Chinese IME produces for the "~"
   // key; it is a different code point from the ASCII one and was falling
-  // through to the default window instead of being read.
-  const pair = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(/[-–—~～至]/) : WINDOW_DEFAULT
+  // through to the default window instead of being read. U+301C (Japanese
+  // IME's wave dash) and U+2212 (a minus sign rather than a hyphen, which
+  // some editors substitute) are the same hazard, one code point further out.
+  const pair = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(/[-–—−~～〜至到]/) : WINDOW_DEFAULT
   const start = minuteOf(pair[0])
   let end = minuteOf(pair[1])
   if (start === null || end === null || start >= end) return { start: DEFAULT_START, end: DEFAULT_END }
@@ -363,10 +375,11 @@ function labelOf(auth, token) {
 // showing, with no sign of why. A file that is mid-write, unreadable, or not
 // the shape we know must therefore count as "don't write", not as "no alias".
 function aliasOf(dir, label) {
-  if (!dir || !label) return ""
+  // no directory is not "the user has no alias": it is having nowhere to look
+  if (!dir || !label) return undefined
   let raw
   try {
-    raw = JSON.parse(readFileSync(join(dir, "providers.json"), "utf8").replace(/^﻿/, ""))
+    raw = JSON.parse(readFileSync(join(dir, "providers.json"), "utf8").replace(/^\uFEFF/, ""))
   } catch (e) {
     // a file that is missing is a fresh install, where there is no user state
     // to clobber — treat it as "no alias" and write. A file that is there but
@@ -398,11 +411,22 @@ function aliasOf(dir, label) {
 // "Mison" instead of "API key …a1b2". The sign-in is written as it already
 // is — the same key, no second copy of the token — with the name beside it;
 // an account that has one already is left alone.
-// maskToken hides all but the ends of a token, for messages that must mention
-// one (the nickname write-back's failure log): the log is magpie's own, but a
-// token has no business in it whole.
+// maskToken hides all but the ends of a token, for messages that mention one.
+// The log is magpie's own, but a token has no business in it whole.
 const maskToken = (token) =>
   typeof token === "string" && token.length >= 12 ? `${token.slice(0, 4)}…${token.slice(-4)}` : "…"
+
+// cardText is what a host error becomes before it reaches the account card or
+// the terminal. The host's message is not our text: magpie's own CLI scrubs
+// tokens out of "no key ms-… for provider" for the same reason, and a message
+// can carry a newline, an escape sequence or a bidi override. Sanitized and
+// masked first, truncated second — the other order cuts a token in half, and
+// half a token is not a token to split() on, so the front of it survives into
+// the log. The nickname write-back's log learned that the hard way.
+const cardText = (value, token) => {
+  const masked = typeof token === "string" && token ? String(value ?? "").split(token).join(maskToken(token)) : String(value ?? "")
+  return text(masked, 200)
+}
 
 // unusableName is a nickname that must not be written back: empty, the token
 // itself (the server would be handed it twice), or a key that the host's
@@ -432,8 +456,17 @@ async function rememberAccountName(client, token, name, auth, dir) {
     named.delete(token)
     // the message can carry whatever the host put in it; scrub the token out
     // of it before it reaches magpie's log
-    const why = text(whyOf(e), 200).split(token).join(maskToken(token))
-    client?.app?.log?.({ body: { level: "warn", service: "msmoli", message: `account name not written back: ${why}` } })?.catch?.(() => {})
+    const why = cardText(whyOf(e), token)
+    let logged = false
+    try {
+      const r = client?.app?.log?.({ body: { level: "warn", service: "msmoli", message: `account name not written back: ${why}` } })
+      if (r && typeof r.catch === "function") r.catch(() => {})
+      logged = true
+    } catch {
+      // a host whose log throws synchronously must not turn a successful
+      // check-in into a failed one, nor a usage read into a rejection
+    }
+    void logged
   }
 }
 
@@ -519,7 +552,7 @@ export async function MsmoliPlugin(input) {
           auth = await getAuth()
           token = tokenOf(auth)
         } catch (e) {
-          return { outcome: "failed", message: whyOf(e) || "签到失败", ...(signedOut(e) ? { signIn: "expired" } : {}) }
+          return { outcome: "failed", message: cardText(whyOf(e), "") || "签到失败", ...(signedOut(e) ? { signIn: "expired" } : {}) }
         }
         if (!token) return { outcome: "failed", message: "没有登录信息，请先登录" }
         // the clock the requests run against: a hook that does not finish in
@@ -587,7 +620,7 @@ export async function MsmoliPlugin(input) {
           }
           return { outcome: "inactive", message: "登录已触达，但今天没有到账记录（账号可能不在活动范围）" }
         } catch (e) {
-          return { outcome: "failed", message: whyOf(e) || "签到失败", ...(signedOut(e) ? { signIn: "expired" } : {}) }
+          return { outcome: "failed", message: cardText(whyOf(e), token) || "签到失败", ...(signedOut(e) ? { signIn: "expired" } : {}) }
         }
       },
 
@@ -601,14 +634,16 @@ export async function MsmoliPlugin(input) {
           auth = await getAuth()
           token = tokenOf(auth)
         } catch (e) {
-          return { error: whyOf(e) || "用量查询失败", signIn: signedOut(e) ? "expired" : "" }
+          return { error: cardText(whyOf(e), "") || "用量查询失败", signIn: signedOut(e) ? "expired" : "" }
         }
         if (!token) return { error: "没有登录信息", signIn: "" }
         const deadline = Date.now() + USAGE_BUDGET_MS
         // the name is only known from login/info, which usage must never
-        // reach; a check-in in this process leaves it here for the card
-        await rememberAccountName(client, token, names.get(token) ?? "", auth, configDir)
+        // reach; a check-in in this process leaves it here for the card.
+        // Inside the try: the hook promises an {error}, never a rejection,
+        // and this path reaches client.auth.set.
         try {
+          await rememberAccountName(client, token, names.get(token) ?? "", auth, configDir)
           const bal = await json(token, BALANCE, deadline)
           if (bal.res.status === 401) throw fail(bal.res.status)
           if (bal.res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
@@ -669,7 +704,7 @@ export async function MsmoliPlugin(input) {
             ],
           }
         } catch (e) {
-          return { error: whyOf(e) || "用量查询失败", signIn: signedOut(e) ? "expired" : "" }
+          return { error: cardText(whyOf(e), token) || "用量查询失败", signIn: signedOut(e) ? "expired" : "" }
         }
       },
     },
