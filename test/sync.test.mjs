@@ -248,19 +248,27 @@ test("runs when node is handed the file directly", () => {
   assert.match(r.stdout, /magpie-plugin-msmoli — 把 magpie/)
 })
 
-test("runs through a symlink, the way npm's .bin and npx invoke it", () => {
+test("runs through a symlink, the way npm's .bin and npx invoke it", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "msmoli-bin-"))
   try {
     const link = join(dir, "magpie-plugin-msmoli")
     try {
       symlinkSync(bin, link)
     } catch {
-      return // Windows without the symlink privilege: nothing to exercise
+      // Windows without the symlink privilege. Said out loud rather than
+      // returned silently: a test that skips itself reads as a pass in CI, and
+      // this one covers the invocation npm actually uses on POSIX.
+      t.skip("symlinks are not available here")
+      return
     }
     const r = spawnSync(link, ["--help"], { encoding: "utf8", timeout: 30_000 })
     // the shebang is what decides this when exec'd by name; skip where the
-    // platform can't run it (no executable bit through the link)
-    if (r.error) return
+    // platform can't run it (no executable bit through the link, or a Windows
+    // spawn that only looks for .exe)
+    if (r.error) {
+      t.skip(`cannot execute a symlinked script here: ${r.error.code ?? r.error.message}`)
+      return
+    }
     assert.equal(r.status, 0, r.stderr)
     assert.match(r.stdout, /magpie-plugin-msmoli — 把 magpie/, "a symlinked invocation must still reach main()")
   } finally {

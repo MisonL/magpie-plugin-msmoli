@@ -349,7 +349,8 @@ an hour, and that retry reads the ledger before claiming, so nothing is lost.
 | `failed` with HTTP 401 | the token was revoked — make a new one and sign in again |
 | `failed` with HTTP 403 | ModelScope's risk control refused the request; the token is fine. It retries in 30 minutes |
 | Before the window the card reads failed, with a line naming the claim time: `09:56 后自动领取（约 1 小时 33 分钟后，无需操作）` | expected — the card leads with when it will claim; see "When it claims" above |
-| Always `inactive` | the sign-in works but nothing shows in today's ledger: the account may not be eligible, or the grant hasn't been written yet (a claim made elsewhere shows as `done`) |
+| Always `inactive` | the sign-in works but nothing shows in today's ledger: the account may not be eligible, or the grant hasn't been written yet (a claim made elsewhere shows as `done`). Before Beijing noon magpie asks again every 30 minutes, so a late grant is picked up; from noon on this answer stands for the day |
+| Two accounts of one ModelScope nickname, and only one of them checks in | magpie before 2026-10-20 kept a plugin's check-in per display name rather than per sign-in, so namesakes collapsed into one. Update magpie: the fix landed upstream on 2026-10-20 (magpie-community/plugins#254) |
 | Edits to this plugin do nothing | path plugins are referenced in place; restart magpie |
 | Installed both ways by accident, and `magpie plugin list` says `msmoli` is "served by" one of them | that is magpie keeping two copies of one provider id. Remove one: `magpie plugin rm github:MisonL/magpie-plugin-msmoli` or `magpie plugin rm <path>`. magpie files your alias with the package it was set against, so removing a copy can take the display name with it — it comes back if you add that package again, or you set the alias once more |
 

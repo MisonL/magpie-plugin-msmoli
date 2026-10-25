@@ -28,6 +28,22 @@ const TEST_CONFIG = join(tmpdir(), `msmoli-test-${process.pid}.json`)
 process.env.MAGPIE_MSMOLI_CONFIG = TEST_CONFIG
 writeFileSync(TEST_CONFIG, JSON.stringify({ checkinWindow: false }))
 
+// withDirectory runs fn with the plugin reading its own config from dir, and
+// puts MAGPIE_MSMOLI_CONFIG back afterwards whatever happens. Deleting the
+// variable without restoring it leaves every later test on the default
+// 08:30-10:00 window — which is how a morning test run started failing, and
+// how a config test came to assert nothing.
+const withDirectory = async (dir, fn) => {
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    return await fn()
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+}
+
 // withWindow sets the window for a test and puts the clock where it says, so
 // "before the window" and "after it" don't depend on when the suite runs.
 const withWindow = async (window, cn, fn) => {
@@ -1843,8 +1859,6 @@ test("an error from the host reaches the card scrubbed, like the log's does", as
   const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
   const dir = mkdtempSync(join(tmpdir(), "msmoli-card-"))
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
-  delete process.env.MAGPIE_MSMOLI_CONFIG
-  const hooks = await MsmoliPlugin({ directory: dir })
   const real = globalThis.fetch
   globalThis.fetch = async () => {
     throw new Error(`invalid header value: ${token}\r\n\u001b[2J‮tail`)
@@ -1872,7 +1886,6 @@ test("a host log that throws synchronously does not reject the usage hook", asyn
   // throw made while the call itself is being made.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-logthrow-"))
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
-  delete process.env.MAGPIE_MSMOLI_CONFIG
   const token = "ms-nametest-0000-0000-0000-000000000012"
   const real = globalThis.fetch
   globalThis.fetch = async (url) => ({
@@ -1906,7 +1919,6 @@ test("the write-back log masks the token before truncating, not after", async ()
   // across the 200-code-point cut.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-cut-"))
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
-  delete process.env.MAGPIE_MSMOLI_CONFIG
   const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
   const logged = []
   const real = globalThis.fetch
@@ -1939,16 +1951,16 @@ test("the write-back log masks the token before truncating, not after", async ()
 test("a config file with a BOM is read, not quietly replaced by the default window", async () => {
   // Notepad and PowerShell's Out-File write a BOM. JSON.parse rejects it, and
   // a user who wrote checkinWindow: false would get the default window back
-  // with nothing said.
+  // with nothing said. The file has to be the one the plugin reads: the env
+  // variable wins over the directory, so it is cleared for this test.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-bom-"))
-  const file = join(dir, "msmoli.json")
-  writeFileSync(file, "﻿" + JSON.stringify({ checkinWindow: false }))
-  const hooks = await MsmoliPlugin({ directory: dir })
-  const realNow = Date.now
-  Date.now = () => Date.parse("2026-10-25T00:30:00+08:00") // before any window
-  try {
-    let asked = 0
+  writeFileSync(join(dir, "msmoli.json"), "\uFEFF" + JSON.stringify({ checkinWindow: false }))
+  await withDirectory(dir, async () => {
+    const hooks = await MsmoliPlugin({ directory: dir })
+    const realNow = Date.now
+    Date.now = () => Date.parse("2026-10-25T00:30:00+08:00") // before any window
     const real = globalThis.fetch
+    let asked = 0
     globalThis.fetch = async () => {
       asked += 1
       return { status: 200, headers: { get: () => null }, body: null, text: async () => JSON.stringify({ success: true, data: { records: [] } }) }
@@ -1959,10 +1971,9 @@ test("a config file with a BOM is read, not quietly replaced by the default wind
       assert.ok(asked > 0, "with the window off, the check-in goes ahead")
     } finally {
       globalThis.fetch = real
+      Date.now = realNow
     }
-  } finally {
-    Date.now = realNow
-  }
+  })
 })
 
 test("a time that is not a time is refused instead of rolled over", async () => {
@@ -2003,5 +2014,99 @@ test("the window reads the other separators an IME or an editor substitutes", ()
   }
   for (const sep of ["-", "–", "—", "−", "~", "～", "〜", "至", "到"]) {
     assert.equal(at(`09:15${sep}11:45`), "09:15", `separator ${JSON.stringify(sep)} was not read`)
+  }
+})
+
+test("done reports the day's grant from before the trigger, not from a page that changed", async () => {
+  // the account was already in today: the credit is what the ledger said
+  // before login/info was touched. Reading it again after the trigger lets a
+  // page that changed between the two reads answer "今日已领取 0 魔粒".
+  let reads = 0
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname
+    if (path === "/api/v1/users/login/info") return reply({ body: { Code: 200, Data: { NickName: "alice" } } })
+    reads += 1
+    // the first (pre-trigger) read has the grant; every later one is empty
+    return reply({
+      body: {
+        success: true,
+        data: { records: reads === 1 ? [day(), day({ rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50 })] : [] },
+      },
+    })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+    assert.equal(r.outcome, "done")
+    assert.equal(r.credit, 250, `the day's own grant, not a later empty page: ${r.message}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a spent day with no grant today shows a bar that matches the numbers", async () => {
+  // before the day's grant, spending comes out of what is left. used=0 next to
+  // "今日用 348.5 / 领 0" says the bar did not move while the text says it did.
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 100 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [spend(348.5, 1)] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      const w = u.windows[0]
+      assert.equal(w.limit, 0)
+      assert.equal(w.amount, 348.5)
+      assert.ok(w.used > 0 && w.used < 100, `the bar should be part-way, got ${w.used}`)
+      // 348.5 of the 448.5 it had
+      assert.equal(w.used, Math.round((348.5 / 448.5) * 10000) / 100)
+    },
+  )
+})
+
+test("a summed credit has no floating-point tail", async () => {
+  // 0.1 + 0.2 is 0.30000000000000004, and it goes straight into the card
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records: [day({ total_amount: 0.1 }), day({ rule_key: "aliyun_bindlogin", total_amount: 0.2 })] } },
+      },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.windows[0].limit, 0.3, `a tail survived: ${u.windows[0].display}`)
+      assert.ok(!/0\.30000000000000004/.test(u.windows[0].display), u.windows[0].display)
+    },
+  )
+})
+
+test("a key that is there but cannot be sent is not reported as a missing sign-in", async () => {
+  // the key is present, just unusable (a newline from a paste). "没有登录信息"
+  // sends the user to sign in again, which is not what is wrong.
+  const withBadKey = async () => ({ type: "api", key: "ms-aaaa1111\nbbbb-2222" })
+  const r = await auth.checkin(withBadKey)
+  assert.equal(r.outcome, "failed")
+  assert.match(r.message, /无法识别/, `should name the key, got: ${r.message}`)
+  assert.doesNotMatch(r.message, /没有登录信息/)
+  const u = await auth.usage(withBadKey)
+  assert.match(u.error, /无法识别/, `usage should name it too, got: ${u.error}`)
+  // and an empty sign-in still says to sign in
+  const none = await auth.checkin(async () => ({}))
+  assert.match(none.message, /没有登录信息/)
+})
+
+test("a network failure says what happened instead of the bare English", async () => {
+  const real = globalThis.fetch
+  globalThis.fetch = async () => {
+    throw new TypeError("fetch failed")
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+    assert.equal(r.outcome, "failed")
+    assert.doesNotMatch(r.message, /^fetch failed$/, `the raw English reached the card: ${r.message}`)
+    assert.match(r.message, /网络|代理|重定向/, `should say what it may be, got: ${r.message}`)
+  } finally {
+    globalThis.fetch = real
   }
 })

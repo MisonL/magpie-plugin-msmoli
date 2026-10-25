@@ -52,6 +52,13 @@ const CHECKIN_BUDGET_MS = 25 * 1000
 // A usage read is one balance and one ledger read under a 20s budget.
 const USAGE_BUDGET_MS = 18 * 1000
 
+// tokenOf is the key this sign-in carries, or "" when there is none or it is
+// not one we can send. The two are told apart by the caller so a key that is
+// there and unusable does not read as "you never signed in".
+const unusableKey = (auth) => {
+  const key = auth?.type === "api" ? String(auth.key ?? "").trim() : ""
+  return Boolean(key) && !/^[\x21-\x7e]+$/.test(key)
+}
 const tokenOf = (auth) => {
   const token = auth?.type === "api" ? String(auth.key ?? "").trim() : ""
   // A token with anything but visible ASCII in it would put the whole value
@@ -88,18 +95,32 @@ async function json(token, path, deadline = Infinity) {
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(new Error("timeout")), budget)
   try {
-    const res = await fetch(SITE + path, {
-      // a redirect that leaves modelscope.cn must not carry the session
-      // cookie off-site; the runtimes happen not to forward it, but say so
-      redirect: "error",
-      headers: {
-        Cookie: "m_session_id=" + token,
-        "User-Agent": UA,
-        Referer: SITE + "/",
-        Accept: "application/json",
-      },
-      signal: ctl.signal,
-    })
+    let res
+    try {
+      res = await fetch(SITE + path, {
+        // a redirect that leaves modelscope.cn must not carry the session
+        // cookie off-site; the runtimes happen not to forward it, but say so
+        redirect: "error",
+        headers: {
+          Cookie: "m_session_id=" + token,
+          "User-Agent": UA,
+          Referer: SITE + "/",
+          Accept: "application/json",
+        },
+        signal: ctl.signal,
+      })
+    } catch (e) {
+      // fetch's own failures are a bare English "fetch failed", and that one
+      // string covers a dead network, a proxy, a captive portal and the
+      // redirect this call refuses — the card would show it and nothing else.
+      if (e === ctl.signal.reason || /timeout/i.test(String(e?.message ?? ""))) {
+        throw new Error(`请求超时（${Math.round(budget / 1000)} 秒）`)
+      }
+      if (e?.name === "TypeError" || /fetch failed/i.test(String(e?.message ?? ""))) {
+        throw new Error("请求失败：网络不通、被代理拦截，或被重定向到了别的站点")
+      }
+      throw e
+    }
     const text = await readBounded(res)
     let body = null
     try {
@@ -504,7 +525,13 @@ const num = (v) => {
   return Number.isFinite(n) ? n : 0
 }
 
-const sumOf = (records) => records.reduce((n, r) => n + num(r?.total_amount), 0)
+// yin is a credit amount as a card says it: at most two decimals, with a
+// trailing 0.30 written as 0.3. The tiers are 0.5/1/2, but a grant or a spend
+// summed in binary floating point comes out as 0.30000000000000004, and that
+// goes straight into the card and into the division below.
+const yin = (n) => Math.round(n * 100) / 100
+
+const sumOf = (records) => yin(records.reduce((n, r) => n + num(r?.total_amount), 0))
 
 // amountOf is what a grant gave, as it goes into a message: the raw JSON is
 // whatever the server said, so it is coerced and sanitized like every other
@@ -554,7 +581,13 @@ export async function MsmoliPlugin(input) {
         } catch (e) {
           return { outcome: "failed", message: cardText(whyOf(e), "") || "签到失败", ...(signedOut(e) ? { signIn: "expired" } : {}) }
         }
-        if (!token) return { outcome: "failed", message: "没有登录信息，请先登录" }
+        if (!token)
+          return {
+            outcome: "failed",
+            // a key that is there but unusable is not a missing one: telling
+            // the user to sign in sends them to the wrong place
+            message: unusableKey(auth) ? "令牌内容无法识别（含空格、换行或非 ASCII 字符），请重新登录" : "没有登录信息，请先登录",
+          }
         // the clock the requests run against: a hook that does not finish in
         // time has failed, as far as the host is concerned, and it asks again
         const deadline = Date.now() + CHECKIN_BUDGET_MS
@@ -581,6 +614,7 @@ export async function MsmoliPlugin(input) {
 
         try {
           const before = await todayEarn(token, deadline)
+          const beforeDaily = before.filter((r) => DAILY_RULES.includes(r?.rule_key))
           const claimed = before.some((r) => r?.rule_key === "daily_active")
 
           const { res, body, parsed } = await json(token, LOGIN_INFO, deadline)
@@ -598,25 +632,33 @@ export async function MsmoliPlugin(input) {
           rememberName(token, name)
           await rememberAccountName(client, token, name, auth, configDir)
 
-          const daily = (await todayEarn(token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key))
-          const credit = sumOf(daily)
-
+          // done 用触发**之前**那一页的合计：今天已经领过，领到的就是那时
+          // 账本上的数。用触发之后那一页的话，两次读之间账本一变（行被挤到
+          // 下一页、或当日合计被重算），卡片会显示「今日已领取 0 魔粒」。
           if (claimed) {
-            const which = daily.map((r) => text(r.title, 40)).filter(Boolean).join(" + ")
+            const credit = sumOf(beforeDaily)
+            const which = beforeDaily.map((r) => text(r.title, 40)).filter(Boolean).join(" + ")
             return { outcome: "done", credit, message: `今日已领取 ${credit} 魔粒` + (which ? `（${which}）` : "") }
           }
+
+          const daily = (await todayEarn(token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key))
           if (daily.length) {
+            const credit = sumOf(daily)
             const which = daily.map((r) => `${text(r.title, 40)} +${amountOf(r)}`).join("，")
             return { outcome: "claimed", credit, message: `领取 ${credit} 魔粒：${which}` }
           }
           // 触达了却没有到账记录：可能是账本还没写出来（发放是异步的），
-          // 也可能这个账号本来就不在活动范围。magpie 把 inactive 当作当天
-          // 已了结、不再重试，所以再读一次账本确认，别把晚到的发放丢掉。
+          // 也可能这个账号本来就不在活动范围。再读一次账本确认，别把刚写
+          // 出来的发放丢掉。这一次重读买不到「等一会儿」——发放若真是几秒
+          // 后才写出来，紧接着的重读也读不到；补上那一段的是宿主：北京时间
+          // 12 点前，done/inactive 这类还没见到领取的回答会被当作暂定答案
+          // 每 30 分钟重问一次（checkin.go 的 provisional，由
+          // checkinSureHour 决定），到那时账本已经写出来了。
           const later = (await todayEarn(token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key))
           if (later.length) {
-            const credit2 = sumOf(later)
+            const credit = sumOf(later)
             const which = later.map((r) => `${text(r.title, 40)} +${amountOf(r)}`).join("，")
-            return { outcome: "claimed", credit: credit2, message: `领取 ${credit2} 魔粒：${which}` }
+            return { outcome: "claimed", credit, message: `领取 ${credit} 魔粒：${which}` }
           }
           return { outcome: "inactive", message: "登录已触达，但今天没有到账记录（账号可能不在活动范围）" }
         } catch (e) {
@@ -636,7 +678,7 @@ export async function MsmoliPlugin(input) {
         } catch (e) {
           return { error: cardText(whyOf(e), "") || "用量查询失败", signIn: signedOut(e) ? "expired" : "" }
         }
-        if (!token) return { error: "没有登录信息", signIn: "" }
+        if (!token) return { error: unusableKey(auth) ? "令牌内容无法识别，请重新登录" : "没有登录信息", signIn: "" }
         const deadline = Date.now() + USAGE_BUDGET_MS
         // the name is only known from login/info, which usage must never
         // reach; a check-in in this process leaves it here for the card.
@@ -665,6 +707,10 @@ export async function MsmoliPlugin(input) {
             if (r?.gmt_created !== day) continue
             const amount = num(r?.total_amount)
             if (r?.type === "EARN") {
+              // 「领」是今天入账的全部，促销一类也算：卡片问的是「今天进来
+              // 多少、用掉多少」，把促销排除会让余额涨了 500 而卡片写「领 0」。
+              // 签到报的 credit 是另一个问题（这次签到领到多少），只算日常
+              // 额度，两个数不一样是各自的答案，不是同一个数的两种算法。
               earned += amount
               if (DAILY_RULES.includes(r?.rule_key) && r?.expire_at && (!earliest || r.expire_at < earliest)) earliest = r.expire_at
             } else if (r?.type === "SPEND_CONFIRM") {
@@ -677,8 +723,21 @@ export async function MsmoliPlugin(input) {
           // 且余额为零，才算用尽。下限夹到 0：账本里的退款是负数的
           // SPEND_CONFIRM，不夹就会在卡片上出现「今日用 -50 / 领 200」和
           // 负百分比——宿主自己会夹，这里再兜一次。
+          // summed in floating point: 0.1 + 0.2 is 0.30000000000000004, and it
+          // would go into the card as written
+          earned = yin(earned)
+          spent = yin(spent)
           const usedToday = Math.max(0, spent)
-          const used = earned > 0 ? (usedToday / earned) * 100 : available > 0 ? 0 : 100
+          // 没有今天的入账时，百分比的分母换成「今天手里有多少」——用掉的
+          // 加上还剩的。分母为 0 时沿用旧口径：余额也空了才算用尽。
+          // 否则卡片会出现 used=0、今日用 348.5、领 0 的组合，进度条说没动，
+          // 文字说花掉了一堆。
+          const used =
+            earned > 0
+              ? Math.round((usedToday / earned) * 10000) / 100
+              : usedToday + available > 0
+                ? Math.round((usedToday / (usedToday + available)) * 10000) / 100
+                : 100
 
           // 今天还没领到时，把时段里的目标时刻写在卡片上，别让「领 0」
           // 看起来像是出了问题。
