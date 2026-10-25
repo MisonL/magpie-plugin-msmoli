@@ -139,7 +139,9 @@ The endpoints it uses, all on `modelscope.cn` with `Cookie: m_session_id=ms-…`
 | Ledger | `GET /openapi/v1/magicubes/transactions?page=1&page_size=50` |
 
 `type` in the ledger has been seen as `EARN` and `SPEND_CONFIRM`; there is
-also an `EXPIRE`, which this plugin ignores.
+also an `EXPIRE`, which this plugin ignores. The ledger is aggregated by day —
+one row per day, with a `count` — and sorted newest first, so the single page
+of 50 it reads always contains today's rows.
 
 ### When it claims: the check-in window
 

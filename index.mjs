@@ -29,6 +29,12 @@ const DAILY_RULES = ["daily_active", "aliyun_bindlogin"]
 const ID = "msmoli"
 
 const TIMEOUT_MS = 8000
+// PAGE_SIZE is one page of the ledger, and one page is all that is read. The
+// ledger is aggregated by day — one row per day, with a `count` — and sorted
+// newest first, so 50 rows reach back 50 days and today's grants are always on
+// page 1. If ModelScope ever moves to one row per transaction, this has to
+// start following the cursor in the answer; today's EARN could then fall off
+// page 1 and a claim would read as "nothing granted".
 const PAGE_SIZE = 50
 
 // A hook's whole budget, not one request's. magpie runs a check-in round for

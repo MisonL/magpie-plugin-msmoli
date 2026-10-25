@@ -118,6 +118,8 @@ ModelScope 没有公开的签到端点。它有的是一个副作用：`GET /api
 | 账单 | `GET /openapi/v1/magicubes/transactions?page=1&page_size=50` |
 
 账单里的 `type` 见到过 `EARN` 与 `SPEND_CONFIRM`，另有一种 `EXPIRE`（本插件忽略它）。
+账单是**按天聚合**的——一天一行、`count` 记当天次数——并按日期倒序，所以只读一页
+50 条也一定包含今天的记录。
 
 ### 什么时候领：签到时段
 
