@@ -66,12 +66,14 @@ node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --t
 ```
 
 Installed from a clone, run the file in the clone — magpie references that
-folder and copies nothing (`./bin/sync.mjs` below; on Windows or WSL, where the
+folder and copies nothing (`./bin/sync.mjs`; on Windows or WSL, where the
 file may not carry an executable bit, run it as `node bin/sync.mjs`). Portable
 installs keep the same layout under their `data` folder; if detection misses,
-`--dir <magpie's folder>` and `--magpie <path to the magpie binary>` say where
-things are. `npx magpie-plugin-msmoli` will work once the package is on npm —
-npm 12 blocks `npx github:…` by default, so don't start from that.
+`--dir <magpie's config folder>` and `--magpie <path to the magpie binary>` say
+where things are: for a portable install that is its `data` folder, not the
+folder the executable sits in. `npx magpie-plugin-msmoli` will work once the
+package is on npm — npm 12 blocks `npx github:…` by default, so don't start
+from that.
 
 It reads magpie's config but never writes it: the writes are magpie's own
 (`magpie plugin login`, `magpie plugin logout`, `magpie provider key`), and the
@@ -139,9 +141,14 @@ The endpoints it uses, all on `modelscope.cn` with `Cookie: m_session_id=ms-…`
 | Ledger | `GET /openapi/v1/magicubes/transactions?page=1&page_size=50` |
 
 `type` in the ledger has been seen as `EARN` and `SPEND_CONFIRM`; there is
-also an `EXPIRE`, which this plugin ignores. The ledger is aggregated by day —
-one row per day, with a `count` — and sorted newest first, so the single page
-of 50 it reads always contains today's rows.
+also an `EXPIRE`, which this plugin ignores. Rows are aggregated per day, type,
+`rule_key` and `model_tier` — a day's spending shows one row per model tier it
+used — with a `count` on each, and the list is sorted newest first. The ordering
+is what makes the single page of 50 enough: today's rows come before any older
+one. Measured on a live account that is 3–7 rows a day, so a page reaches back
+about a fortnight rather than 50 days; what the read would not survive is a
+single day with more than 50 rows. Asking for a larger page does not help —
+the server answers `page_size=200` with 50.
 
 ### When it claims: the check-in window
 

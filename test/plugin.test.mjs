@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -77,8 +77,8 @@ const day = (over = {}) => ({
   ...over,
 })
 
-const spend = (amount, count = 1) => ({
-  gmt_created: today,
+const spend = (amount, count = 1, on = today) => ({
+  gmt_created: on,
   type: "SPEND_CONFIRM",
   rule_key: "api_inference",
   model_tier: "ultra",
@@ -1568,5 +1568,270 @@ test("the name cache keeps the most recently seen, not the first seen", async ()
     assert.equal(touched.user, "u0", "the account that checked in most recently after its last use is kept")
   } finally {
     globalThis.fetch = real
+  }
+})
+
+test("a providers.json that cannot be read is not written over", async () => {
+  // Three states, and the third is the one that matters here: a missing file
+  // is a fresh install (write the name), an alias means the user named the
+  // account (leave it), and a file that is there but unreadable is state we
+  // cannot see — writing the nickname would re-key an alias we could not
+  // read, dropping the user's name from the card with no sign of why.
+  for (const [i, broken] of ["{ not json", "", "null", "[1,2,3"].entries()) {
+    const dir = mkdtempSync(join(tmpdir(), "msmoli-badalias-"))
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    writeFileSync(join(dir, "providers.json"), broken)
+    const saved = process.env.MAGPIE_MSMOLI_CONFIG
+    delete process.env.MAGPIE_MSMOLI_CONFIG
+    try {
+      const writes = []
+      const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+      const token = `ms-badalias-0000-0000-0000-0000000000${String(i).padStart(2, "0")}`
+      await withFetch(
+        {
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+        },
+        async () => {
+          await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        },
+      )
+      assert.equal(writes.length, 0, `an unreadable providers.json (${JSON.stringify(broken)}) must not be written over`)
+    } finally {
+      if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+      else process.env.MAGPIE_MSMOLI_CONFIG = saved
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test("a providers.json that is missing is a fresh install, and gets the name", async () => {
+  // the other side of the same distinction: nothing to clobber
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-noalias-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    const token = "ms-noalias-0000-0000-0000-000000000016"
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+      },
+    )
+    assert.equal(writes.length, 1, "a missing providers.json must not stop the write")
+    assert.equal(writes[0].body.accountId, "Mison")
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("usage counts only today's rows, not yesterday's grants", async () => {
+  // the ledger is a rolling history, so the day filter is what keeps the card
+  // from reporting a grant that has already expired. Every other fixture gives
+  // its rows gmt_created: today, which leaves the filter itself unpinned —
+  // removing it changed nothing the suite could see.
+  const yesterday = new Date(Date.parse(`${today}T00:00:00+08:00`) - 86400e3).toISOString().slice(0, 10)
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: {
+          success: true,
+          data: {
+            records: [
+              day({ gmt_created: yesterday, total_amount: 200 }),
+              day({ gmt_created: yesterday, rule_key: "aliyun_bindlogin", total_amount: 50 }),
+              spend(4, 2, yesterday),
+            ],
+          },
+        },
+      },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      // limit is what the day granted, amount what it spent: yesterday's 250
+      // must show up in neither
+      assert.equal(u.windows[0].limit, 0, "yesterday's grant is not today's")
+      assert.equal(u.windows[0].amount, 0, "nor is yesterday counted as spend")
+    },
+  )
+})
+
+test("usage resets at the earliest grant that is still running", async () => {
+  // the card's countdown has to end when the first of the day's grants
+  // expires, not the last: a grant that runs out unnoticed is credits the
+  // user believes they still have.
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: {
+          success: true,
+          data: {
+            records: [
+              // the one that runs out first is listed first, so a "keep the
+              // last one seen" reading of the ledger would answer tomorrow
+              day({ rule_key: "aliyun_bindlogin", total_amount: 50, expire_at: `${today} 13:05:10` }),
+              day({ rule_key: "daily_active", total_amount: 200, expire_at: `${tomorrow} 00:00:24` }),
+            ],
+          },
+        },
+      },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.windows[0].resetsAt, new Date(`${today}T13:05:10+08:00`).toISOString())
+    },
+  )
+})
+
+test("a check-in whose ledger read is refused by risk control says so", async () => {
+  // the first read of the day is the ledger, and it can be refused before
+  // login/info is ever reached. Reporting that as "not JSON" would send the
+  // user to look at the wrong thing.
+  await withFetch(
+    { "/openapi/v1/magicubes/transactions?page=1&page_size=50": { status: 403, body: { success: false, code: "RiskControl" } } },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "failed")
+      assert.match(r.message, /风控/, `should name risk control, got: ${r.message}`)
+      assert.doesNotMatch(r.message, /不是 JSON/)
+      assert.notEqual(r.signIn, "expired")
+    },
+  )
+})
+
+test("a usage read refused by risk control names it, without 'not JSON' in the message", async () => {
+  // the earlier assertion accepted /403/, and the generic refusal for any
+  // non-200 carries "HTTP 403" too — so the branch that says 风控 was never
+  // actually exercised.
+  for (const at of ["balance", "transactions"]) {
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/balance":
+          at === "balance"
+            ? { status: 403, body: { success: false } }
+            : { body: { success: true, data: { available_balance: 5 } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50":
+          at === "transactions" ? { status: 403, body: { success: false } } : { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+        assert.match(u.error, /风控/, `${at}: should name risk control, got: ${u.error}`)
+        assert.doesNotMatch(u.error, /不是 JSON/, `${at}: a 403 is not a parse failure`)
+        assert.equal(u.signIn, "", `${at}: a 403 is not a bad token`)
+      },
+    )
+  }
+})
+
+test("an envelope that says Code 200 is an answer, not a failure", async () => {
+  // login/info answers {Code: 200, Data} with no success flag at all; the
+  // ledger and balance always carry `success`, so that branch of okOf is only
+  // reached if this test reaches it.
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { Code: 200, Data: { available_balance: 7 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { Code: 200, Data: { records: [] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.error, undefined, `Code 200 should read as success: ${u.error}`)
+      assert.match(u.windows[0].display, /余额 7/)
+    },
+  )
+  // and a Code that is not 200 is still a refusal
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { Code: 500, Message: "boom" } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { Code: 200, Data: { records: [] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.match(u.error, /boom/)
+    },
+  )
+})
+
+test("a grant title that would be cut mid-pair keeps its whole characters", async () => {
+  // text() counts code points so a truncation cannot leave half an emoji
+  // behind; the earlier fixtures all had short titles, so the cut never ran.
+  // The title is cut at 40, so 39 letters plus two emoji has to give back one.
+  const title = `${"a".repeat(39)}😀😀`
+  // the first ledger read is the "before" one and has to be empty, or the
+  // check-in reads as already done and never reports the grant's title
+  let reads = 0
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname + new URL(url).search
+    if (path === "/api/v1/users/login/info") return reply({ body: { Code: 200, Data: { NickName: "alice" } } })
+    reads += 1
+    return reply({ body: { success: true, data: { records: reads === 1 ? [] : [day({ title })] } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+    assert.equal(r.outcome, "claimed")
+    assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(r.message), `a lone surrogate survived: ${JSON.stringify(r.message)}`)
+    assert.ok(r.message.includes("😀"), "the emoji that fit are whole")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a second check-in in the same process does not write the name again", async () => {
+  // `named` is the once-per-token guard. The earlier test's second ask carried
+  // accountId the host had already saved, so the "already named" condition
+  // short-circuited first and the guard itself was never reached.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-once-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    const token = "ms-nametest-0000-0000-0000-000000000011"
+    let reads = 0
+    const real = globalThis.fetch
+    globalThis.fetch = async (url) => {
+      const path = new URL(url).pathname
+      if (path === "/api/v1/users/login/info") return reply({ body: { Code: 200, Data: { NickName: "Mison" } } })
+      reads += 1
+      return reply({ body: { success: true, data: { records: [] } } })
+    }
+    try {
+      // both asks hand over a bare api sign-in, as a host that has not saved
+      // the name yet would: only `named` can stop the second write
+      await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+      await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+      assert.equal(writes.length, 1, "the name is written once, not once per ask")
+      assert.equal(writes[0].body.accountId, "Mison")
+      void reads
+    } finally {
+      globalThis.fetch = real
+    }
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a check-in whose sign-in hand-over rejects with a non-Error says nothing odd", async () => {
+  // the host can reject with a bare object. whyOf is what keeps that from
+  // reaching the card as "[object Object]" — only the usage path was pinned.
+  for (const thrown of [{ code: 42 }, "gone"]) {
+    const r = await auth.checkin(async () => {
+      throw thrown
+    })
+    assert.equal(r.outcome, "failed")
+    assert.doesNotMatch(r.message, /object Object/, `a non-Error leaked through: ${r.message}`)
+    assert.match(r.message, /签到失败|gone/, `should give a usable message, got: ${r.message}`)
   }
 })

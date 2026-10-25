@@ -454,7 +454,10 @@ test("a broken providers.json is refused, not crashed on", async () => {
       },
     })
     assert.equal(code, 1)
-    assert.match(out.join("\n"), /没有|provider add/)
+    // "there but unreadable" must not be reported as "not configured": that
+    // sends the user off to add a provider that is already there
+    assert.match(out.join("\n"), /读不出来/)
+    assert.doesNotMatch(out.join("\n"), /未配置|provider add/, "a damaged file is not an absent one")
     assert.doesNotMatch(out.join("\n"), /SyntaxError|at /)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -984,4 +987,222 @@ test("findMagpieBin checks Program Files as well as LocalAppData on Windows", ()
   })
   assert.equal(got, want)
   assert.equal(seen[0], join(local, "Programs", "magpie", "magpie.exe"), "LOCALAPPDATA is tried first")
+})
+
+test("a token with a control character at either end prints no control character", async () => {
+  // the ends are the only part of a key this tool ever shows, and they come
+  // from a file: a key pasted with a trailing newline, or a providers.json
+  // someone else wrote, would put that character straight on the terminal
+  for (const t of [
+    "ms-aaaa1111-bbbb-2222-abcd\n",
+    "ms-aaaa1111-bbbb-2222-abcd\r\n",
+    "ms-\u001b[31maaaa-1111-2222-3333",
+    "ms-aaaa1111-bbbb-2222-\u001b[2Jzzzz",
+  ]) {
+    const out = mask(t)
+    assert.doesNotMatch(out, /[\p{Cc}\p{Cf}]/u, `mask(${JSON.stringify(t)}) = ${JSON.stringify(out)}`)
+  }
+  // and the normal case still shows both ends
+  assert.equal(mask(A), "ms-a…5555")
+})
+
+// ---- the third review round's findings
+
+test("--from cannot reach a provider that is not ModelScope's", async () => {
+  // --from is a disambiguator, not an override: short-circuiting it before the
+  // host check let `--from openai --to-plugin` hand OpenAI's key to the
+  // sign-in plugin, and `--from openai --to-preset` write the ms token over a
+  // third-party provider. Neither is what "sync my ModelScope key" means.
+  const ps = [
+    { id: "openai", key: "sk-openai", chat: "https://api.openai.com/v1" },
+    { id: "modelscope", preset: "modelscope", key: A },
+    { id: "relay", key: B, chat: "https://api-inference.modelscope.cn/v1" },
+  ]
+  assert.deepEqual(presetCandidates(ps, "openai"), [], "a third-party provider is never a candidate")
+  assert.deepEqual(presetCandidates(ps, "relay").map((p) => p.id), ["relay"], "a ModelScope-hosted relay still is")
+  assert.deepEqual(presetCandidates(ps, "modelscope").map((p) => p.id), ["modelscope"])
+})
+
+test("a missing value for --dir/--magpie is an error, not a silent fallback", async () => {
+  // `--dir ""` used to read as "not given" and fall back to the machine's own
+  // magpie: a credential written to a target the user never named
+  for (const argv of [["--dir", ""], ["--dir"], ["--dir", "--dry-run"], ["--magpie"], ["--from"]]) {
+    const spawned = []
+    let code
+    let err
+    try {
+      code = await main({ argv, log: () => {}, spawn: (...a) => { spawned.push(a); return { status: 0, stdout: "", stderr: "" } } })
+    } catch (e) {
+      err = e
+    }
+    assert.ok(err || code === 1, `${JSON.stringify(argv)} must not fall through to a run`)
+    assert.equal(spawned.length, 0, `${JSON.stringify(argv)} must not spawn anything`)
+  }
+})
+
+test("--dry-run works on a machine with no magpie binary to find", async () => {
+  // dry-run spawns nothing, so requiring a binary made it fail exactly where a
+  // preview is most useful: before magpie is installed
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-dry-nobin-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--dry-run"],
+      log: (s) => out.push(s),
+      exists: (p) => p.startsWith(dir),
+      spawn: () => {
+        throw new Error("dry run must not spawn")
+      },
+    })
+    assert.equal(code, 0)
+    const text = out.join("\n")
+    assert.match(text, /plugin login msmoli/, "the command is still shown")
+    assert.match(text, /--dry-run：未执行/)
+    assert.doesNotMatch(text, /没找到 magpie 可执行文件/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a logout that exits 0 without signing out is caught, not reported as done", async () => {
+  // the tool refuses to --force more than one account because logout signs
+  // them all out; a logout that reports success and leaves the old account
+  // behind makes login add a second one, and "an account holds the token"
+  // is still true — so the read-back has to count them
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nologout-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: (_c, argv) => {
+        if (argv.includes("logout")) return { status: 0, stdout: "", stderr: "" } // exits 0, deletes nothing
+        // login appends rather than replaces, the way a host keyed by accountId does
+        writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B }, "msmoli#a1b2c3": { type: "api", key: A } }))
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    const text = out.join("\n")
+    assert.equal(code, 1, "two accounts is not success")
+    assert.doesNotMatch(text, /✓ 完成/)
+    assert.match(text, /2 个账号/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a read-back that cannot parse says so, not 'check magpie is running'", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-rbbroken-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        // the write landed, but the file it landed in is not parseable now
+        writeFileSync(join(dir, "plugin-auth.json"), "{ partial")
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    const text = out.join("\n")
+    assert.equal(code, 1)
+    assert.match(text, /读不出来/, "name the real problem")
+    assert.doesNotMatch(text, /检查 magpie 是否在正常运行/, "the write did land; that advice is wrong here")
+    assert.ok(!text.includes(A), "still no whole token")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("giving both directions is an error, not a silent last-one-wins", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-bothdirs-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    let spawned = false
+    let code
+    let err
+    try {
+      code = await main({
+        argv: ["--dir", dir, "--to-plugin", "--to-preset", "--status"],
+        log: () => {},
+        spawn: () => {
+          spawned = true
+          return { status: 0, stdout: "", stderr: "" }
+        },
+      })
+    } catch (e) {
+      err = e
+    }
+    assert.ok(err, "conflicting directions should be refused outright")
+    assert.match(String(err.message), /只能给一个/)
+    assert.equal(spawned, false)
+    void code
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("--status alone reports the plan instead of asking for a direction", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-statusonly-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({ argv: ["--dir", dir, "--status"], log: (s) => out.push(s), spawn: () => ({ status: 0, stdout: "", stderr: "" }) })
+    const text = out.join("\n")
+    assert.equal(code, 0)
+    assert.match(text, /--status：以上是计划，未执行/)
+    assert.doesNotMatch(text, /要执行请显式指定方向/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a --from value with control characters is printed as text", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-fromesc-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    await main({ argv: ["--dir", dir, "--from", "x\u001b[2Jy", "--status"], log: (s) => out.push(s), spawn: () => ({ status: 0, stdout: "", stderr: "" }) })
+    const text = out.join("\n")
+    assert.ok(!text.includes("\u001b"), "an escape sequence reached the terminal")
+    assert.match(text, /x\s*\[2J\s*y|xy/, "the value is still recognisable, with the escape shown as space")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("--to-preset --dry-run prints the command with the token masked", async () => {
+  // the preset direction is the one that puts a token in argv, so it is the
+  // one whose echoed command can print it whole. Both --dry-run tests used to
+  // go through --to-plugin, where the token arrives on stdin and never shows —
+  // so hidden() could be deleted and the suite stayed green.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-drypreset-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-preset", "--force", "--dry-run"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        throw new Error("--dry-run must not spawn")
+      },
+    })
+    const text = out.join("\n")
+    assert.equal(code, 0)
+    assert.match(text, /^\$ magpie provider key modelscope /m, `the command should be echoed:\n${text}`)
+    assert.ok(!text.includes(B), `the dry-run echo leaked the token whole:\n${text}`)
+    assert.ok(text.includes(mask(B)), "the echo shows the token masked")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

@@ -30,11 +30,16 @@ const ID = "msmoli"
 
 const TIMEOUT_MS = 8000
 // PAGE_SIZE is one page of the ledger, and one page is all that is read. The
-// ledger is aggregated by day — one row per day, with a `count` — and sorted
-// newest first, so 50 rows reach back 50 days and today's grants are always on
-// page 1. If ModelScope ever moves to one row per transaction, this has to
-// start following the cursor in the answer; today's EARN could then fall off
-// page 1 and a claim would read as "nothing granted".
+// ledger is aggregated — one row per (day, type, rule_key, model_tier), with a
+// `count` on each — and sorted newest first, so today's rows are always at the
+// front of page 1. Measured on a live account: 3–7 rows a day, i.e. one page
+// reaches back a fortnight or so, not 50 days. That is enough because the
+// ordering, not the page size, is what puts today first; what would break it
+// is a single day with more than 50 rows. The server also caps page_size at 50
+// (asking for 200 answers with page_size 50), so there is no headroom to buy
+// by asking for more — a day's rows running past page 1 would need a second
+// read, or the day's totals come out short (and a claim whose `daily_active`
+// fell past the cut would read as "nothing granted").
 const PAGE_SIZE = 50
 
 // A hook's whole budget, not one request's. magpie runs a check-in round for
@@ -352,11 +357,11 @@ function labelOf(auth, token) {
 
 // aliasOf is the name the user gave this account in magpie's own
 // providers.json — "" when they haven't, undefined when the file could not be
-// read. The distinction matters: an alias is kept under the account's label of
-// the moment, so a write-back that renames the account would leave the user's
-// name keyed to a label nothing carries any more — it would stop showing, with
-// no sign of why. A file that is mid-write or unreadable must therefore count
-// as "don't write", not as "no alias".
+// understood. The distinction matters: an alias is kept under the account's
+// label of the moment, so a write-back that renames the account would leave
+// the user's name keyed to a label nothing carries any more — it would stop
+// showing, with no sign of why. A file that is mid-write, unreadable, or not
+// the shape we know must therefore count as "don't write", not as "no alias".
 function aliasOf(dir, label) {
   if (!dir || !label) return ""
   let raw
@@ -368,6 +373,11 @@ function aliasOf(dir, label) {
     // cannot be read is state we must not write over blindly.
     return e?.code === "ENOENT" ? "" : undefined
   }
+  // `null` and `[1,2,3]` parse but say nothing about this account, and a
+  // lookup against them finds no alias. Reading that as "the user has none"
+  // would write the nickname over state we never saw — the same mistake as
+  // for an unreadable file, so it gets the same answer.
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined
   const key = label.trim().toLowerCase()
   const lists = [raw?.providers]
   if (Array.isArray(raw?.pluginLeft)) lists.push(...raw.pluginLeft.map((l) => l?.provider))

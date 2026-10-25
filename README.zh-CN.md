@@ -58,14 +58,16 @@ node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --t
 
 用 clone 方式装的，跑 clone 里那份（`./bin/sync.mjs`；Windows 或 WSL 上文件可能没有
 可执行位，用 `node bin/sync.mjs` 跑）——magpie 只是按位置引用那个文件夹，并不会拷走。
-便携版的目录结构相同，只是根目录是它的 `data` 文件夹；探测不到时用 `--dir <magpie 的
-目录>` 和 `--magpie <magpie 可执行文件的路径>` 指明。`npx magpie-plugin-msmoli` 要等
+便携版的目录结构相同，只是根目录是它的 `data` 文件夹；探测不到时用 `--dir <magpie 的配置
+目录>`（安装版是 `~/.config/magpie`，便携版是它的 `data` 目录）和 `--magpie <magpie 可执行
+文件的路径>` 指明。`npx magpie-plugin-msmoli` 要等
 包发布到 npm 之后才能用——npm 12 默认禁用 `npx github:…`，别从那条路开始。
 
 - 它只读 magpie 的两个文件；写入交给 magpie 自己的 CLI（`plugin login`、
   `plugin logout`、`provider key`）完成，输出里不会出现令牌，失败信息也一样；
 - 插件已经用同一把令牌登录时它什么都不改；两边是**不同**的令牌时它默认拒绝
-  ——直接 login 会新增第二个账号，换一把则需要 `--force`；
+  ——直接 login 会新增第二个账号，换一把则需要 `--force`，且只在插件**只有一个账号**时
+  才放行（logout 会一次登出该 provider 的全部账号）；
 - 反向也有：`--to-preset` 把插件主账号的令牌写回内置预设（要 `--force`，因为那把
   key 是聊天正在用的）；
 - 内置侧若有多个可能的 provider（比如自己搭的同域名中转），它不猜，用
@@ -118,8 +120,10 @@ ModelScope 没有公开的签到端点。它有的是一个副作用：`GET /api
 | 账单 | `GET /openapi/v1/magicubes/transactions?page=1&page_size=50` |
 
 账单里的 `type` 见到过 `EARN` 与 `SPEND_CONFIRM`，另有一种 `EXPIRE`（本插件忽略它）。
-账单是**按天聚合**的——一天一行、`count` 记当天次数——并按日期倒序，所以只读一页
-50 条也一定包含今天的记录。
+记录按「日期 + 类型 + 规则 + 模型档位」聚合——某天用了几个档位，当天就有几条消耗记录——
+每条带 `count`，列表按日期倒序。让「一页 50 条」够用的是**倒序**：今天的行排在所有更早
+的行前面。实测一个账号每天 3~7 行，所以一页大约覆盖两周、而不是 50 天；真正会出问题的是
+「单日超过 50 行」那种情况。加大每页条数也没用——服务端把 `page_size=200` 也按 50 回。
 
 ### 什么时候领：签到时段
 

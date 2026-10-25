@@ -35,7 +35,7 @@ const USAGE = `magpie-plugin-msmoli — 把 magpie 里已有的 ModelScope 令�
   --force       两边令牌不同时也执行（会替换 / 先登出现有登录）
   --from <id>   内置侧只认 id 恰好为它的 provider（不给时先找 id/preset 为 modelscope 的，
                 再找 chat 指向 api-inference.modelscope.cn 的自建 vendor）
-  --dir <路径>  magpie 配置目录（便携版探测不到时用这个）
+  --dir <路径>  magpie 的配置目录（安装版是 ~/.config/magpie，便携版是它 data 目录）
   --magpie <路径>  magpie 可执行文件（默认找各平台的常见安装位置，不经 PATH）
   --status      只报告，不执行
   --dry-run     打印将要执行的命令，不执行
@@ -45,14 +45,26 @@ const USAGE = `magpie-plugin-msmoli — 把 magpie 里已有的 ModelScope 令�
 
 function parseArgs(argv) {
   const out = { dir: "", magpie: "", from: "", to: "", force: false, dryRun: false, status: false, help: false }
-  const take = (i) => argv[i] ?? ""
+  // A flag is not a value. `--dir --dry-run` would otherwise take "--dry-run"
+  // as the folder and then fail somewhere far from the mistake, and
+  // `--dir ""` would read as "not given" and silently fall back to the
+  // machine's own magpie — writing a credential to a target nobody named.
+  const take = (i) => {
+    const v = argv[i]
+    if (v === undefined || v === "" || v.startsWith("--")) throw new Error(`缺少值：${argv[i - 1]} 后面要跟一个参数`)
+    return v
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === "--dir") out.dir = take(++i)
     else if (a === "--magpie") out.magpie = take(++i)
     else if (a === "--from") out.from = take(++i)
-    else if (a === "--to-plugin") out.to = "plugin"
-    else if (a === "--to-preset") out.to = "preset"
+    else if (a === "--to-plugin" || a === "--to-preset") {
+      // 两个方向同时给时后者静默获胜，等于悄悄丢掉前一个：说清楚比择一好
+      const want = a === "--to-plugin" ? "plugin" : "preset"
+      if (out.to && out.to !== want) throw new Error("--to-plugin 与 --to-preset 只能给一个")
+      out.to = want
+    }
     else if (a === "--force") out.force = true
     else if (a === "--dry-run") out.dryRun = true
     else if (a === "--status") out.status = true
@@ -126,10 +138,15 @@ export function readJson(file, exists = existsSync) {
 // mask reveals only the ends. Under 12 characters there is no middle worth
 // hiding and no tail worth showing: 8 characters would print the whole thing
 // ("1234…5678" is 8/8), so it says how long it is instead.
+//
+// The ends go through show(): a key read out of providers.json is a string
+// from a file, and a token pasted with a trailing newline (or a poisoned file)
+// would otherwise print that control character to the terminal — the ends are
+// the only part of it this tool ever displays, so they are where it matters.
 export const mask = (t) => {
   if (typeof t !== "string" || !t) return "（不可用）"
   if (t.length < 12) return `（${t.length} 字符）`
-  return `${t.slice(0, 4)}…${t.slice(-4)}`
+  return `${show(t.slice(0, 4))}…${show(t.slice(-4))}`
 }
 
 // 内置侧的候选：默认先认 id/preset=modelscope（magpie 预设的正规路径），没有
@@ -141,10 +158,15 @@ export const mask = (t) => {
 // "api-inference.modelscope.cn.evil.tld" 也为真，而那会把真令牌写进一个
 // chat 指向第三方的 provider（--to-preset）或把第三方的 key 当 cookie 发给
 // modelscope.cn（--to-plugin）。
+//
+// --from 只在这道校验**之内**挑一个：它先是「内置侧」的候选，然后才是消歧。
+// 早先它短路在域名校验之前，于是 `--from openai` 会把 OpenAI 的 key 登录给
+// 插件、或用 ms 令牌覆盖掉那个第三方 provider —— 两个方向都静默写错凭据。
 export function presetCandidates(providers, from = "") {
   const list = Array.isArray(providers) ? providers : []
   const keyed = (p) => typeof p?.key === "string" && p.key
-  if (from) return list.filter((p) => keyed(p) && p.id === from)
+  const ours = (p) => p?.id === PRESET || p?.preset === PRESET || hostOf(p?.chat) === HOST
+  if (from) return list.filter((p) => keyed(p) && p.id === from && ours(p))
   const byId = list.filter((p) => keyed(p) && (p.id === PRESET || p.preset === PRESET))
   if (byId.length) return byId
   return list.filter((p) => keyed(p) && hostOf(p.chat) === HOST)
@@ -300,6 +322,15 @@ function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
   }
 }
 
+// unreadableAfter is the read-back's own failure: the file is there and does
+// not parse, which is not the same as a write that did not land. Saying
+// "check magpie is running" here sends the user after the wrong thing.
+function unreadableAfter(name, dir, want, log) {
+  log(`? 写入已执行，但回读时 ${show(join(dir, name))} 读不出来，无法确认（${mask(want)}）。`)
+  log(`  先确认 magpie 正常，再看一眼插件列表里那把 key 在不在。`)
+  return 1
+}
+
 // ---- main
 
 export async function main({
@@ -334,7 +365,16 @@ export async function main({
   }
   log(`magpie 配置目录：${show(dir)}`)
 
-  const providers = readJson(join(dir, "providers.json"), exists)?.providers
+  const providersRaw = readJson(join(dir, "providers.json"), exists)
+  // "there but unreadable" is not "not configured": telling the user to add a
+  // provider that already exists invites overwriting a file that may be
+  // recoverable. Same distinction the auth file below has had since the fix.
+  if (providersRaw === null) {
+    log(`✗ ${show(join(dir, "providers.json"))} 存在但读不出来（可能正在被写或已损坏）。`)
+    log(`  不猜它的内容：先确认 magpie 正常，或备份后重试。`)
+    return 1
+  }
+  const providers = providersRaw?.providers
   const authRaw = readJson(join(dir, "plugin-auth.json"), exists)
   if (authRaw === null) {
     log(`✗ ${show(join(dir, "plugin-auth.json"))} 存在但读不出来（可能正在被写或已损坏）。`)
@@ -356,8 +396,8 @@ export async function main({
   // 但这里先统一拦住，免得 null 一路传到 plan 里崩栈
   if (!preset) {
     if (args.from) {
-      log(`✗ 内置侧没有 id 为 "${args.from}" 的 provider。`)
-      log(`  用 --status 看现有的，或先 magpie provider add ${args.from} <key>。`)
+      log(`✗ 内置侧没有 id 为 "${show(args.from)}" 的 provider。`)
+      log(`  用 --status 看现有的，或先 magpie provider add ${show(args.from)} <key>。`)
     } else {
       log(`✗ 内置侧没有带 key 的 ModelScope 预设。`)
       log(`  先在 magpie 的「供应商」页添加 ModelScope，或 magpie provider add ${PRESET} <key>。`)
@@ -369,16 +409,21 @@ export async function main({
   for (const line of plan.lines) log(line)
   if (plan.action !== "run") return plan.action === "noop" ? 0 : 1
 
+  // --status 是「只报告」，先于方向判断：只给 --status 时该说「这是计划」，
+  // 而不是提示用户去指定方向——他要的就是报告
+  if (args.status) {
+    log(`(--status：以上是计划，未执行)`)
+    return 0
+  }
   // 不带 --to-* 时只报计划：裸跑 npx 不该静默写入一个凭据
   if (!args.to) {
     log(`(要执行请显式指定方向：--to-plugin 或 --to-preset)`)
     return 0
   }
-  if (args.status) {
-    log(`(--status：以上是计划，未执行)`)
-    return 0
-  }
-  if (!bin) {
+  // --dry-run spawns nothing, so it must not be gated on finding a binary:
+  // the machine where magpie is not installed yet is exactly where a preview
+  // is worth having, and the old order failed there before printing a command.
+  if (!bin && !args.dryRun) {
     log(`✗ 没找到 magpie 可执行文件（找过各平台的安装位置）。`)
     log(`  用 --magpie <路径> 指定，例如 macOS 的 /Applications/magpie.app/Contents/MacOS/magpie。`)
     return 1
@@ -395,17 +440,31 @@ export async function main({
     return 0
   }
 
-  // 回读验证，别只信退出码（方向判断与上面 plan 那行保持一致）
+  // 回读验证，别只信退出码（方向判断与上面 plan 那行保持一致）。
+  // 回读读不动（null）是另一回事：把它报成「没找到令牌」会把人推去查
+  // magpie 是否在运行，而写入其实成功了——两种失败要分开说。
   const want = plan.cmds.at(-1).secret
   if (want) {
     if (args.to === "preset") {
-      const after = presetCandidates(readJson(join(dir, "providers.json"), exists)?.providers, preset.id)
+      const raw = readJson(join(dir, "providers.json"), exists)
+      if (raw === null) return unreadableAfter("providers.json", dir, want, log)
+      const after = presetCandidates(raw?.providers, preset.id)
       if (!after.some((p) => p.key === want)) {
         log(`✗ 写入后回读没找到目标 key（${mask(want)}）——检查 magpie 是否在正常运行。`)
         return 1
       }
     } else {
-      const after = pluginAccounts(readJson(join(dir, "plugin-auth.json"), exists))
+      const raw = readJson(join(dir, "plugin-auth.json"), exists)
+      if (raw === null) return unreadableAfter("plugin-auth.json", dir, want, log)
+      const after = pluginAccounts(raw)
+      // 回读要数账号：logout 没真删（退出码 0 却没动手）时，login 会把新
+      // 令牌加成第二个账号，而「有一个账号拿着目标令牌」照样成立——那正是
+      // planToPlugin 明说 --force 不适用、工具却亲手造出来的状态。
+      if (plan.cmds.length > 1 && after.length > 1) {
+        log(`✗ 回读发现插件现在有 ${after.length} 个账号（${after.map((a) => show(a.name)).join("、")}）。`)
+        log(`  旧账号没被登出，login 追加了一个。请在 magpie 里删掉多余账号后重试。`)
+        return 1
+      }
       if (!after.some((a) => a.token === want)) {
         log(`✗ 写入后回读没找到目标令牌（${mask(want)}）——检查 magpie 是否在正常运行。`)
         return 1
