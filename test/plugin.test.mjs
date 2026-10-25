@@ -1505,3 +1505,68 @@ test("a usage read that meets a dead token marks the sign-in expired, at either 
     )
   }
 })
+
+test("a declared oversize is refused before the body is read at all", async () => {
+  // the precheck exists so a hostile or broken endpoint cannot make the host
+  // buffer 300KB before the cap is noticed: the reader must never be pulled
+  const real = globalThis.fetch
+  let pulled = false
+  globalThis.fetch = async () => ({
+    status: 200,
+    headers: { get: (n) => (n.toLowerCase() === "content-length" ? String(400 * 1024) : null) },
+    body: {
+      getReader() {
+        pulled = true
+        return {
+          async read() {
+            return { done: false, value: new Uint8Array(1024) }
+          },
+          async cancel() {},
+          releaseLock() {},
+        }
+      },
+    },
+    text: async () => "x",
+  })
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+    assert.match(u.error ?? "", /过大/)
+  } finally {
+    globalThis.fetch = real
+  }
+  assert.equal(pulled, false, "a declared oversize must be refused without reading it")
+})
+
+test("the name cache keeps the most recently seen, not the first seen", async () => {
+  // it is an LRU so the account that just checked in is the one still named;
+  // a plain FIFO would evict it right after its own check-in
+  const tokens = Array.from({ length: 10 }, (_, i) => `ms-lru2-0000-0000-0000-0000000000${String(i).padStart(2, "0")}`)
+  const feed = (i) => {
+    globalThis.fetch = fakeFetch({
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: `u${i}` } } },
+    })
+  }
+  const real = globalThis.fetch
+  try {
+    for (let i = 0; i < 7; i++) {
+      feed(i)
+      await auth.checkin(async () => ({ type: "api", key: tokens[i] }))
+    }
+    // touch the oldest again, then add four more to push it past the bound
+    feed(0)
+    await auth.checkin(async () => ({ type: "api", key: tokens[0] }))
+    for (let i = 7; i < 10; i++) {
+      feed(i)
+      await auth.checkin(async () => ({ type: "api", key: tokens[i] }))
+    }
+    globalThis.fetch = fakeFetch({
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+    })
+    const touched = await auth.usage(async () => ({ type: "api", key: tokens[0] }))
+    assert.equal(touched.user, "u0", "the account that checked in most recently after its last use is kept")
+  } finally {
+    globalThis.fetch = real
+  }
+})
