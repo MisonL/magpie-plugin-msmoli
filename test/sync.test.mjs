@@ -888,17 +888,21 @@ test("a missing binary keeps the plain hint", async () => {
 })
 
 test("a macOS install in ~/.local/bin is found too", () => {
+  // expected path via join(), as the code builds it: a hard-coded POSIX
+  // literal would not match on Windows
+  const home = pathToFileURL("/h").pathname.replace(/\/$/, "")
+  const want = join(home, ".local", "bin", "magpie")
   const seen = []
   const got = findMagpieBin({
     os: "darwin",
     env: {},
-    home: "/h",
+    home,
     exists: (p) => {
       seen.push(p)
-      return p === "/h/.local/bin/magpie"
+      return p === want
     },
   })
-  assert.equal(got, "/h/.local/bin/magpie")
+  assert.equal(got, want)
   assert.ok(seen.includes("/Applications/magpie.app/Contents/MacOS/magpie"), "the app bundle is still tried first")
 })
 
