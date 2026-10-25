@@ -8,7 +8,7 @@ import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { MsmoliPlugin } from "../index.mjs"
+import { MsmoliPlugin, windowOf } from "../index.mjs"
 
 // The check-in window reads its own config file, which the host would keep at
 // ~/.config/magpie/msmoli.json. Tests point it at a temp file so the suite
@@ -88,27 +88,35 @@ const spend = (amount, count = 1) => ({
 
 // reply is what fetch gives back: the plugin reads the body as a stream, so
 // a fake answers in kind. `raw` stands in for a body that isn't JSON, and
-// `bytes` for one that is too large to read.
+// `bytes` for one that is too large to read. `noLength` drops the
+// content-length header, so the size cap has to be enforced while reading;
+// `noBody` drops the stream, leaving only text() — the other branch of
+// readBounded.
 const reply = (hit) => {
   const text = hit.raw !== undefined ? hit.raw : JSON.stringify(hit.body ?? {})
   const bytes = hit.bytes !== undefined ? hit.bytes : new TextEncoder().encode(text)
   return {
     status: hit.status ?? 200,
-    headers: { get: (name) => (name.toLowerCase() === "content-length" ? String(bytes.length) : null) },
-    body: {
-      getReader() {
-        let sent = false
-        return {
-          async read() {
-            if (sent) return { done: true, value: undefined }
-            sent = true
-            return { done: false, value: bytes }
-          },
-          async cancel() {},
-          releaseLock() {},
-        }
-      },
+    headers: {
+      get: (name) =>
+        name.toLowerCase() !== "content-length" || hit.noLength ? null : String(bytes.length),
     },
+    body: hit.noBody
+      ? undefined
+      : {
+          getReader() {
+            let sent = false
+            return {
+              async read() {
+                if (sent) return { done: true, value: undefined }
+                sent = true
+                return { done: false, value: bytes }
+              },
+              async cancel() {},
+              releaseLock() {},
+            }
+          },
+        },
     text: async () => text,
   }
 }
@@ -222,10 +230,73 @@ test("a refused token fails the check-in as expired", async () => {
   )
 })
 
+test("a token refused at login/info expires the check-in too", async () => {
+  // the ledger read comes first; when it succeeds the login/info read is the
+  // one that finds the token dead, and its 401 has to expire the account the
+  // same way — otherwise magpie keeps re-asking with a dead token
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      "/api/v1/users/login/info": { status: 401, body: { message: "unauthorized" } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-bad" }))
+      assert.equal(r.outcome, "failed")
+      assert.equal(r.signIn, "expired")
+    },
+  )
+})
+
+test("a check-in that cannot read the ledger fails rather than settling the day", async () => {
+  // a proxy's error page or a changed API is not an empty ledger. Read as
+  // empty it would answer inactive, which magpie takes as the day being
+  // settled — the day's claim would be lost with no retry.
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { raw: "<html>proxy error</html>" },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "failed", "an unreadable ledger must not read as inactive")
+    },
+  )
+})
+
+test("a check-in envelope that is not a success fails, not settles", async () => {
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: false, message: "bad request" } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "failed")
+      assert.match(r.message, /bad request/)
+    },
+  )
+})
+
+test("a check-in 403 is risk control too, and does not sign the account out", async () => {
+  // the check-in touches login/info, whose 403 is also risk control: marking
+  // it expired would sign out an account that is perfectly fine
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      "/api/v1/users/login/info": { status: 403, body: { success: false, code: "RiskControl" } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "failed")
+      assert.match(r.message, /风控/)
+      assert.notEqual(r.signIn, "expired", "a 403 is not a bad token")
+    },
+  )
+})
+
 test("checkin without a sign-in fails instead of asking", async () => {
   const r = await auth.checkin(async () => ({}))
-  assert.equal(r.outcome, "failed")
-})
+  assert.equal(r.outcome, "failed")})
 
 test("usage reads the balance and the day's ledger, and never the sign-in endpoint", async () => {
   const body = {
@@ -503,16 +574,29 @@ test("a token with a line break in it is refused before it can be echoed", async
 })
 
 test("a 403 is risk control, not a token that expired", async () => {
-  await withFetch(
-    {
-      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { status: 403, body: { success: false, code: "RiskControl" } },
-    },
-    async () => {
-      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
-      assert.ok(u.error, "usage should report the refusal")
-      assert.equal(u.signIn, "", "a 403 must not mark the sign-in expired")
-    },
-  )
+  // both 403 sites have to be reached: the balance read first, then the
+  // ledger. A fixture that only refuses the ledger never gets past the
+  // balance, so the ledger's own 403 was never exercised.
+  for (const at of ["balance", "transactions"]) {
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/balance":
+          at === "balance"
+            ? { status: 403, body: { success: false, code: "RiskControl" } }
+            : { body: { success: true, data: { available_balance: 5 } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50":
+          at === "transactions"
+            ? { status: 403, body: { success: false, code: "RiskControl" } }
+            : { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+        assert.ok(u.error, `usage should report the refusal at ${at}`)
+        assert.match(u.error, /风控|403/, `${at}: the message should name the refusal`)
+        assert.equal(u.signIn, "", `${at}: a 403 must not mark the sign-in expired`)
+      },
+    )
+  }
 })
 
 test("a response too large to read is refused", async () => {
@@ -525,6 +609,38 @@ test("a response too large to read is refused", async () => {
       const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
       assert.ok(u.error, "usage should report the refusal")
       assert.match(u.error, /过大/)
+    },
+  )
+})
+
+test("a body over the cap is cut off while it is read, with no length to check first", async () => {
+  // a chunked answer has no content-length, so the only guard left is the
+  // running byte count: without it the whole body is buffered
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { noLength: true, bytes: new Uint8Array(300 * 1024) },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.match(u.error ?? "", /过大/, "the running count has to stop it")
+    },
+  )
+})
+
+test("the cap counts bytes, whichever way the body arrives", async () => {
+  // 100k Chinese characters are 300KB on the wire but only 100k UTF-16 units:
+  // a cap compared against text.length lets three times the limit through.
+  // Both branches of readBounded have to agree on the unit.
+  const big = "中".repeat(100_000)
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { noBody: true, raw: big, noLength: true },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.match(u.error ?? "", /过大/, "300KB of text must not pass a 256KiB cap")
     },
   )
 })
@@ -1038,4 +1154,354 @@ test("a non-finite amount from the server never reaches the card", async () => {
       assert.doesNotMatch(JSON.stringify(u), /Infinity|NaN/)
     },
   )
+})
+
+test("a ledger with a refund in it never shows a negative day", async () => {
+  // a refund is recorded as a negative SPEND_CONFIRM. Summed as it comes, the
+  // card would read "今日用 -50 / 领 200" with a negative percentage.
+  const body = { success: true, data: { records: [day(), spend(200), spend(-250)] } }
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 300 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      const w = u.windows[0]
+      assert.equal(w.amount, 0, `spend must not go negative, got ${w.amount}`)
+      assert.equal(w.used, 0)
+      assert.doesNotMatch(u.windows[0].display, /-/, "no minus sign in the day's line")
+    },
+  )
+})
+
+test("a non-Error rejection says something, not [object Object]", async () => {
+  // getAuth can reject with anything the host hands over; String() of a bare
+  // object reads as "[object Object]" on the card, which looks like the
+  // plugin broke rather than the sign-in being unusable
+  const u = await auth.usage(async () => {
+    throw { code: 42 }
+  })
+  assert.ok(u.error, "it must report an error")
+  assert.doesNotMatch(u.error, /\[object/, `the message was ${JSON.stringify(u.error)}`)
+
+  const plain = await auth.usage(async () => {
+    throw "no hand-over"
+  })
+  assert.equal(plain.error, "no hand-over", "a string rejection is its own message")
+})
+
+test("a spent budget sends no request at all", async () => {
+  // a request that is not sent cannot be recorded upstream; one sent with no
+  // budget left is answered after the hook the host already gave up on. Here
+  // the balance read takes longer than the whole budget, so the ledger read
+  // must not go out.
+  const realFetch = globalThis.fetch
+  const realNow = Date.now
+  let clock = Date.parse(`${today} 10:30:00`.replace(" ", "T") + "+08:00")
+  Date.now = () => clock
+  const asked = []
+  globalThis.fetch = async (url) => {
+    asked.push(new URL(url).pathname)
+    clock += 60_000 // this one answer outlasts the hook's whole budget
+    return reply({ body: { success: true, data: { available_balance: 300 } } })
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+    assert.ok(u.error, "usage must fail rather than answer")
+  } finally {
+    globalThis.fetch = realFetch
+    Date.now = realNow
+  }
+  assert.deepEqual(asked, ["/openapi/v1/magicubes/balance"], "no request may go out with the budget gone")
+})
+
+// ── 时段解析：直接读 windowOf，别依赖当天的哈希落点 ────────────────────────
+// 目标时刻是「日 + 账号」的哈希，端到端测 LAST 截断只在哈希恰好落进
+// 23:00 以后的那些日子才生效（实测约一半的日期会放过回归）。截断本身是
+// 纯函数，直接断言它。
+test("windowOf caps the end at 23:00, whatever the configured end", () => {
+  for (const end of ["23:59", "23:30", "23:01"]) {
+    const w = windowOf({ checkinWindow: ["22:00", end] })
+    assert.equal(w?.end, 23 * 60, `end ${end} must be capped`)
+  }
+  // a start at or past the cap is not a window: the default applies
+  assert.deepEqual(windowOf({ checkinWindow: ["23:10", "23:59"] }), { start: 8 * 60 + 30, end: 10 * 60 })
+  // an ordinary window is left alone
+  assert.deepEqual(windowOf({ checkinWindow: ["08:30", "10:00"] }), { start: 8 * 60 + 30, end: 10 * 60 })
+  assert.deepEqual(windowOf({ checkinWindow: ["22:00", "23:00"] }), { start: 22 * 60, end: 23 * 60 })
+})
+
+test("windowOf reads the shapes a user writes, and refuses the ones it cannot", () => {
+  // every separator below is tried on a window that is *not* the default, so
+  // a separator the split misses falls back to 08:30-10:00 and shows up here
+  for (const sep of ["-", "~", "～", "–", "—", " 至 "]) {
+    assert.deepEqual(
+      windowOf({ checkinWindow: `13:00${sep}14:00` }),
+      { start: 13 * 60, end: 14 * 60 },
+      `"${sep}" must separate the two times`,
+    )
+  }
+  assert.deepEqual(windowOf({ checkinWindow: "08:30-10:00" }), { start: 8 * 60 + 30, end: 10 * 60 })
+  for (const off of [false, "off", "OFF", "false", "no"]) {
+    assert.equal(windowOf({ checkinWindow: off }), null, `${JSON.stringify(off)} turns the window off`)
+  }
+  for (const bad of [["10:00", "08:30"], ["24:00", "25:00"], ["08:60", "10:00"], ["8:30", "10:00"], ["nope", "10:00"], [], null, 7]) {
+    assert.deepEqual(windowOf({ checkinWindow: bad }), { start: 8 * 60 + 30, end: 10 * 60 }, `${JSON.stringify(bad)} falls back to the default`)
+  }
+})
+
+test("a write-back failure is retried later, and never logs the token", async () => {
+  // the host can refuse the write (a locked file, a daemon restarting). The
+  // name has to be tried again on the next ask, and the log line must not
+  // carry the token even if the host's error message echoes it.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-wbfail-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const token = "ms-wbfail-0000-0000-0000-000000000013"
+    let attempts = 0
+    const logs = []
+    const withClient = await MsmoliPlugin({
+      directory: dir,
+      client: {
+        auth: {
+          set: async () => {
+            attempts += 1
+            throw new Error(`auth store busy (key ${token})`)
+          },
+        },
+        app: { log: (entry) => logs.push(entry) },
+      },
+    })
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(attempts, 1)
+        const logged = logs.map((l) => l.body?.message ?? "").join("\n")
+        assert.ok(logged.includes("account name not written back"), "the failure is logged")
+        assert.ok(!logged.includes(token), `the token leaked into the log: ${logged}`)
+        assert.match(logged, /ms-w…0013/, "the masked tail still identifies the account")
+
+        // the next ask tries again — the name is not remembered as written
+        await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(attempts, 2, "a failed write must be retried on the next ask")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a logged rejection that is not an Error does not print [object Object]", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-wbobj-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const logs = []
+    const withClient = await MsmoliPlugin({
+      directory: dir,
+      client: {
+        auth: { set: async () => { throw { code: "EBUSY" } } },
+        app: { log: (entry) => logs.push(entry) },
+      },
+    })
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: "ms-wbobj-0000-0000-0000-000000000014" }))
+        const logged = logs.map((l) => l.body?.message ?? "").join("\n")
+        assert.doesNotMatch(logged, /\[object Object\]/)
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a nickname that is a prototype key is not written back", async () => {
+  // the host looks names up in an object; "__proto__"/"constructor" would be
+  // inherited properties rather than a name
+  for (const name of ["__proto__", "constructor", "prototype"]) {
+    const dir = mkdtempSync(join(tmpdir(), "msmoli-proto-"))
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    const saved = process.env.MAGPIE_MSMOLI_CONFIG
+    delete process.env.MAGPIE_MSMOLI_CONFIG
+    try {
+      const writes = []
+      const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+      const token = `ms-proto-0000-0000-0000-0000000000${name.length}`
+      await withFetch(
+        {
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: name } } },
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+        },
+        async () => {
+          await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+          assert.equal(writes.length, 0, `${name} must not be stored as an account name`)
+        },
+      )
+    } finally {
+      if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+      else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    }
+  }
+})
+
+test("an alias kept on a plugin-left provider still counts as the user's name", async () => {
+  // magpie keeps removed plugins' providers under pluginLeft; an account
+  // installed to the plugin sidebar has its alias there
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-left-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const token = "ms-left-0000-0000-0000-000000000015"
+  writeFileSync(
+    join(dir, "providers.json"),
+    JSON.stringify({
+      providers: [{ id: "openai" }],
+      pluginLeft: [{ plugin: "msmoli", provider: [{ id: "msmoli", accountNames: { "api key …0015": "主号" } }] }],
+    }),
+  )
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(writes.length, 0, "the user's name lives in pluginLeft, and must not be overwritten")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("an expiry the plugin cannot parse resets nothing, rather than 1970", async () => {
+  const body = { success: true, data: { records: [day({ expire_at: "not a date" })] } }
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 10 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.windows[0].resetsAt, "", "an unparseable expiry is no reset time")
+    },
+  )
+})
+
+test("the pre-window wait is worded like a person would say it", async () => {
+  // "596 分钟后" reads like a dump; the card shows "9 小时 56 分钟". The
+  // target is a hash, but any target in the default window is at least an
+  // hour away from 07:00, so the hour form is what has to appear.
+  await withWindow(["08:30", "10:00"], `${today} 07:00:00`, async () => {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-words" }))
+    assert.match(r.message, /约 (\d+ 小时( \d+ 分钟)?|\d+ 分钟)后/)
+    assert.doesNotMatch(r.message, /约 \d{3,} 分钟后/, "three-digit minutes must not appear")
+  })
+})
+
+test("a success flag that is not a boolean is not read as success", async () => {
+  // the server (or a proxy) could answer "success": "false" as a string;
+  // `!== undefined` would read that as a success, and a refused answer would
+  // pass for an empty balance
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: "false", data: { available_balance: 999 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.ok(u.error, `a string "false" must not pass for success: ${JSON.stringify(u)}`)
+      assert.equal(u.windows, undefined)
+    },
+  )
+})
+
+test("a login/info that is not JSON fails the check-in rather than settling the day", async () => {
+  // reaching login/info is the claim; a proxy's error page in its place must
+  // not read as "no nickname" and slide on into the inactive path
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      "/api/v1/users/login/info": { raw: "<html>proxy error</html>" },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "failed", "an unreadable login/info must not settle the day")
+      assert.match(r.message, /登录接口/)
+    },
+  )
+})
+
+test("the name cache is bounded: the oldest account's name falls out", async () => {
+  // login/info is the claim, so the name is only ever read at check-in; the
+  // cache is capped so a long-lived host does not grow one entry per account
+  // seen forever. Ten accounts, so at least one has to be gone.
+  const tokens = Array.from({ length: 10 }, (_, i) => `ms-lru-0000-0000-0000-000000000${String(i).padStart(2, "0")}`)
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+    },
+    async () => {
+      for (const [i, token] of tokens.entries()) {
+        globalThis.fetch = fakeFetch({
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: `user${i}` } } },
+        })
+        await auth.checkin(async () => ({ type: "api", key: token }))
+      }
+      globalThis.fetch = fakeFetch({
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      })
+      const first = await auth.usage(async () => ({ type: "api", key: tokens[0] }))
+      const last = await auth.usage(async () => ({ type: "api", key: tokens[9] }))
+      assert.equal(last.user, "user9", "the newest name is still there")
+      assert.equal(first.user, "", "the oldest must have been evicted")
+    },
+  )
+})
+
+test("a usage read that meets a dead token marks the sign-in expired, at either step", async () => {
+  // usage touches balance first, then the ledger; a 401 at either one means
+  // the token is no good, and magpie only signs the account out if the hook
+  // says so
+  for (const at of ["balance", "transactions"]) {
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/balance":
+          at === "balance"
+            ? { status: 401, body: { message: "unauthorized" } }
+            : { body: { success: true, data: { available_balance: 5 } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50":
+          at === "transactions"
+            ? { status: 401, body: { message: "unauthorized" } }
+            : { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        const u = await auth.usage(async () => ({ type: "api", key: "ms-bad" }))
+        assert.ok(u.error, `${at}: a 401 is an error`)
+        assert.equal(u.signIn, "expired", `${at}: a 401 must expire the sign-in`)
+      },
+    )
+  }
 })

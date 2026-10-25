@@ -56,11 +56,11 @@ node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --s
 node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --to-plugin   # 执行同步
 ```
 
-用 clone 方式装的，跑 clone 里那份（`./bin/sync.mjs`）——magpie 只是按位置引用那个
-文件夹，并不会拷走。便携版的目录结构相同，只是根目录是它的 `data` 文件夹；探测不到时
-用 `--dir <magpie 的目录>` 和 `--magpie <magpie 可执行文件的路径>` 指明。
-`npx magpie-plugin-msmoli` 要等包发布到 npm 之后才能用——npm 12 默认禁用
-`npx github:…`，别从那条路开始。
+用 clone 方式装的，跑 clone 里那份（`./bin/sync.mjs`；Windows 或 WSL 上文件可能没有
+可执行位，用 `node bin/sync.mjs` 跑）——magpie 只是按位置引用那个文件夹，并不会拷走。
+便携版的目录结构相同，只是根目录是它的 `data` 文件夹；探测不到时用 `--dir <magpie 的
+目录>` 和 `--magpie <magpie 可执行文件的路径>` 指明。`npx magpie-plugin-msmoli` 要等
+包发布到 npm 之后才能用——npm 12 默认禁用 `npx github:…`，别从那条路开始。
 
 - 它只读 magpie 的两个文件；写入交给 magpie 自己的 CLI（`plugin login`、
   `plugin logout`、`provider key`）完成，输出里不会出现令牌，失败信息也一样；

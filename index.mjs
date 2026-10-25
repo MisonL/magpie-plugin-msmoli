@@ -67,11 +67,15 @@ const handleOf = (token) => fnv(token).toString(16)
 // json asks one of ModelScope's web endpoints as the account. Each request is
 // capped at 8s, and at what is left of the hook's own budget when that is
 // less: magpie runs every provider's check-ins under one 2-minute context and
-// asks accounts one at a time, so a hook must not overrun its share.
+// asks accounts one at a time, so a hook must not overrun its share. When the
+// budget is gone the request is not sent at all — a spent Cookie could still
+// be recorded upstream, and the answer would never be reconciled.
 async function json(token, path, deadline = Infinity) {
-  const left = Math.max(1, Math.min(TIMEOUT_MS, deadline - Date.now()))
+  const left = deadline - Date.now()
+  if (left <= 0) throw new Error("预算已用完，本次请求未发出")
+  const budget = Math.min(TIMEOUT_MS, left)
   const ctl = new AbortController()
-  const timer = setTimeout(() => ctl.abort(new Error("timeout")), left)
+  const timer = setTimeout(() => ctl.abort(new Error("timeout")), budget)
   try {
     const res = await fetch(SITE + path, {
       // a redirect that leaves modelscope.cn must not carry the session
@@ -109,8 +113,11 @@ async function readBounded(res) {
   const declared = Number(res.headers?.get?.("content-length") ?? NaN)
   if (Number.isFinite(declared) && declared > MAX_BODY) throw new Error(`响应过大（${declared} 字节）`)
   if (!res.body) {
+    // byteLength, not length: the streaming branch below counts bytes, and
+    // text.length counts UTF-16 units — 256 KiB of Chinese would pass here as
+    // 85K "characters" and let a third of a megabyte past the cap.
     const text = await res.text()
-    if (text.length > MAX_BODY) throw new Error("响应过大")
+    if (new TextEncoder().encode(text).byteLength > MAX_BODY) throw new Error("响应过大")
     return text
   }
   const reader = res.body.getReader()
@@ -258,13 +265,20 @@ function minuteOf(text) {
 // `"08:30-10:00"` are read; an unworkable value (bad clock time, start not
 // before end) is not honoured, the documented default applying instead of a
 // window that would never come due.
-function windowOf(cfg) {
+//
+// Exported for the test that pins the 23:00 cap: where a target lands is a
+// hash of the day, so an end-to-end assertion about it only bites on the days
+// the hash falls past 23:00 — the cap's regression would go green on the rest.
+export function windowOf(cfg) {
   const raw = cfg.checkinWindow
   if (raw === false) return null
   // "off" written as a string is the same intent as false; read as anything
   // else it would silently fall back to the default window instead
   if (typeof raw === "string" && /^(off|false|no)$/i.test(raw.trim())) return null
-  const pair = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(/[-–—~至]/) : WINDOW_DEFAULT
+  // "～" (U+FF5E) is the full-width tilde a Chinese IME produces for the "~"
+  // key; it is a different code point from the ASCII one and was falling
+  // through to the default window instead of being read.
+  const pair = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(/[-–—~～至]/) : WINDOW_DEFAULT
   const start = minuteOf(pair[0])
   let end = minuteOf(pair[1])
   if (start === null || end === null || start >= end) return { start: DEFAULT_START, end: DEFAULT_END }
@@ -331,28 +345,36 @@ function labelOf(auth, token) {
 }
 
 // aliasOf is the name the user gave this account in magpie's own
-// providers.json, "" when none. magpie keeps those names under the account's
-// label of the moment, so a write-back that renames the account would leave
-// the user's name keyed to a label nothing carries any more — it would stop
-// showing, with no sign of why.
+// providers.json — "" when they haven't, undefined when the file could not be
+// read. The distinction matters: an alias is kept under the account's label of
+// the moment, so a write-back that renames the account would leave the user's
+// name keyed to a label nothing carries any more — it would stop showing, with
+// no sign of why. A file that is mid-write or unreadable must therefore count
+// as "don't write", not as "no alias".
 function aliasOf(dir, label) {
   if (!dir || !label) return ""
+  let raw
   try {
-    const raw = JSON.parse(readFileSync(join(dir, "providers.json"), "utf8"))
-    const key = label.trim().toLowerCase()
-    const lists = [raw?.providers]
-    if (Array.isArray(raw?.pluginLeft)) lists.push(...raw.pluginLeft.map((l) => l?.provider))
-    for (const list of lists) {
-      if (!Array.isArray(list)) continue
-      for (const p of list) {
-        if (p?.id !== ID) continue
-        const names = p.accountNames
-        if (!names || typeof names !== "object") continue
-        const mine = names[key]
-        if (typeof mine === "string" && mine) return mine
-      }
+    raw = JSON.parse(readFileSync(join(dir, "providers.json"), "utf8").replace(/^﻿/, ""))
+  } catch (e) {
+    // a file that is missing is a fresh install, where there is no user state
+    // to clobber — treat it as "no alias" and write. A file that is there but
+    // cannot be read is state we must not write over blindly.
+    return e?.code === "ENOENT" ? "" : undefined
+  }
+  const key = label.trim().toLowerCase()
+  const lists = [raw?.providers]
+  if (Array.isArray(raw?.pluginLeft)) lists.push(...raw.pluginLeft.map((l) => l?.provider))
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue
+    for (const p of list) {
+      if (p?.id !== ID) continue
+      const names = p.accountNames
+      if (!names || typeof names !== "object") continue
+      const mine = names[key]
+      if (typeof mine === "string" && mine) return mine
     }
-  } catch {}
+  }
   return ""
 }
 
@@ -376,8 +398,10 @@ async function rememberAccountName(client, token, name, auth, dir) {
   if (!name || !client?.auth?.set) return
   if (named.has(token) || auth?.accountId === name) return
   // an account the user has named keeps that name: writing the nickname over
-  // it would re-key their alias to a label the account no longer has
-  if (aliasOf(dir, labelOf(auth, token))) return
+  // it would re-key their alias to a label the account no longer has. A
+  // providers.json that can't be read says the same thing — don't write over
+  // a state we can't see.
+  if (aliasOf(dir, labelOf(auth, token)) !== "") return
   named.add(token)
   try {
     // auth.set replaces the whole sign-in, so what the host handed us is the
@@ -392,12 +416,19 @@ async function rememberAccountName(client, token, name, auth, dir) {
     named.delete(token)
     // the message can carry whatever the host put in it; scrub the token out
     // of it before it reaches magpie's log
-    const why = text(e?.message ?? e, 200).split(token).join(maskToken(token))
+    const why = text(whyOf(e), 200).split(token).join(maskToken(token))
     client?.app?.log?.({ body: { level: "warn", service: "msmoli", message: `account name not written back: ${why}` } })?.catch?.(() => {})
   }
 }
 
 const signedOut = (e) => Boolean(e?.signIn === "expired" || e?.expired)
+
+// whyOf is the message of a rejection. A rejected non-Error — a bare string, an
+// object without a message, a host's own rejection value — would reach String()
+// as "[object Object]", which tells the user nothing and reads like a bug in the
+// plugin. The empty string lets the caller say something of its own instead.
+const whyOf = (e) =>
+  typeof e?.message === "string" && e.message ? e.message : typeof e === "string" ? e : ""
 
 function fail(status) {
   return Object.assign(new Error(`HTTP ${status}`), { signIn: status === 401 ? "expired" : "" })
@@ -472,7 +503,7 @@ export async function MsmoliPlugin(input) {
           auth = await getAuth()
           token = tokenOf(auth)
         } catch (e) {
-          return { outcome: "failed", message: e?.message ?? String(e), ...(signedOut(e) ? { signIn: "expired" } : {}) }
+          return { outcome: "failed", message: whyOf(e) || "签到失败", ...(signedOut(e) ? { signIn: "expired" } : {}) }
         }
         if (!token) return { outcome: "failed", message: "没有登录信息，请先登录" }
         // the clock the requests run against: a hook that does not finish in
@@ -540,7 +571,7 @@ export async function MsmoliPlugin(input) {
           }
           return { outcome: "inactive", message: "登录已触达，但今天没有到账记录（账号可能不在活动范围）" }
         } catch (e) {
-          return { outcome: "failed", message: e?.message ?? String(e), ...(signedOut(e) ? { signIn: "expired" } : {}) }
+          return { outcome: "failed", message: whyOf(e) || "签到失败", ...(signedOut(e) ? { signIn: "expired" } : {}) }
         }
       },
 
@@ -554,7 +585,7 @@ export async function MsmoliPlugin(input) {
           auth = await getAuth()
           token = tokenOf(auth)
         } catch (e) {
-          return { error: e?.message ?? String(e), signIn: signedOut(e) ? "expired" : "" }
+          return { error: whyOf(e) || "用量查询失败", signIn: signedOut(e) ? "expired" : "" }
         }
         if (!token) return { error: "没有登录信息", signIn: "" }
         const deadline = Date.now() + USAGE_BUDGET_MS
@@ -592,8 +623,11 @@ export async function MsmoliPlugin(input) {
 
           // 不截断到 100：magpie 把 used > 100 读作「超额」
           // （host.js 的 "past 100 when overspent"）。今天没领到任何魔粒
-          // 且余额为零，才算用尽。
-          const used = earned > 0 ? (spent / earned) * 100 : available > 0 ? 0 : 100
+          // 且余额为零，才算用尽。下限夹到 0：账本里的退款是负数的
+          // SPEND_CONFIRM，不夹就会在卡片上出现「今日用 -50 / 领 200」和
+          // 负百分比——宿主自己会夹，这里再兜一次。
+          const usedToday = Math.max(0, spent)
+          const used = earned > 0 ? (usedToday / earned) * 100 : available > 0 ? 0 : 100
 
           // 今天还没领到时，把时段里的目标时刻写在卡片上，别让「领 0」
           // 看起来像是出了问题。
@@ -609,8 +643,8 @@ export async function MsmoliPlugin(input) {
               {
                 name: "魔粒",
                 used,
-                display: `今日用 ${spent} / 领 ${earned} · 余额 ${available}${hint}`,
-                amount: spent,
+                display: `今日用 ${usedToday} / 领 ${earned} · 余额 ${available}${hint}`,
+                amount: usedToday,
                 limit: earned,
                 unit: "魔粒",
                 resetsAt: cnTime(earliest),
@@ -619,7 +653,7 @@ export async function MsmoliPlugin(input) {
             ],
           }
         } catch (e) {
-          return { error: e?.message ?? String(e), signIn: signedOut(e) ? "expired" : "" }
+          return { error: whyOf(e) || "用量查询失败", signIn: signedOut(e) ? "expired" : "" }
         }
       },
     },

@@ -24,6 +24,19 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: node --test
 
+  # Windows is a first-class target (magpie ships a portable Windows build),
+  # and the suite carries Windows-specific expectations — join() built paths,
+  # a symlinked invocation, an appdir under %LOCALAPPDATA%. None of those
+  # assertions were ever executed on Windows until this job existed.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: node --test
+
   bun:
     runs-on: ubuntu-latest
     steps:

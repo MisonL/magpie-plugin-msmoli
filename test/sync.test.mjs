@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import {
   findConfigDir,
   findMagpieBin,
+  isMain,
   main,
   looksLikeMagpie,
   mask,
@@ -15,6 +16,7 @@ import {
   planToPreset,
   pluginAccounts,
   presetCandidates,
+  readJson,
 } from "../bin/sync.mjs"
 
 // 假令牌：形状对，但明显不是真的（README 里的样例也是这个形状）
@@ -250,7 +252,11 @@ test("runs through a symlink, the way npm's .bin and npx invoke it", () => {
   const dir = mkdtempSync(join(tmpdir(), "msmoli-bin-"))
   try {
     const link = join(dir, "magpie-plugin-msmoli")
-    symlinkSync(bin, link)
+    try {
+      symlinkSync(bin, link)
+    } catch {
+      return // Windows without the symlink privilege: nothing to exercise
+    }
     const r = spawnSync(link, ["--help"], { encoding: "utf8", timeout: 30_000 })
     // the shebang is what decides this when exec'd by name; skip where the
     // platform can't run it (no executable bit through the link)
@@ -401,14 +407,34 @@ test("a failed login after a successful logout says how to recover", async () =>
 
 test("a providers.json with a BOM reads as JSON, not as nothing", () => {
   // Windows editors (and magpie's own #1821) write a BOM; Go strips it, so
-  // must the tool, or the preset would read as "未配置"
+  // must the tool, or the preset would read as "未配置". The test goes
+  // through readJson — the tool's own reader — rather than stripping the BOM
+  // itself, which would only prove the test can.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-bom-"))
   try {
     writeFileSync(join(dir, "providers.json"), "﻿" + JSON.stringify({ providers: [presetOf(A)] }))
-    const providers = JSON.parse(
-      readFileSync(join(dir, "providers.json"), "utf8").replace(/^﻿/, ""),
-    ).providers
-    assert.deepEqual(presetCandidates(providers).map((p) => p.id), ["modelscope"])
+    const file = join(dir, "providers.json")
+    const raw = readJson(file)
+    assert.ok(raw && typeof raw === "object", "a BOM must not make the file unreadable")
+    assert.deepEqual(presetCandidates(raw.providers).map((p) => p.id), ["modelscope"])
+
+    // and the whole tool sees it: a BOM'd config is not "未配置"
+    const r = run(["--dir", dir, "--status"])
+    assert.equal(r.status, 0, r.stderr)
+    assert.doesNotMatch(r.stdout, /未配置/, "a BOM must not hide the preset")
+    assert.match(r.stdout, /modelscope/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("readJson tells 'not there' from 'there but unreadable'", () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-readjson-"))
+  try {
+    assert.equal(readJson(join(dir, "nope.json")), undefined, "a missing file is undefined")
+    const broken = join(dir, "broken.json")
+    writeFileSync(broken, "{ not json")
+    assert.equal(readJson(broken), null, "a file that will not parse is null, not undefined")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -618,4 +644,340 @@ test("an id or name with control characters is printed as text, not as terminal 
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+// ---- --dry-run: the whole point is that nothing runs
+
+test("--dry-run prints the command and spawns nothing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-dry-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    let spawned = false
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--dry-run", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        spawned = true
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 0)
+    assert.equal(spawned, false, "--dry-run must not run anything")
+    const text = out.join("\n")
+    assert.match(text, /plugin login msmoli/, "the command it would run is still shown")
+    assert.match(text, /--dry-run：未执行/, "and it says so")
+    assert.ok(!text.includes(A), "even a dry run keeps the token masked")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("--dry-run after a --force plans both steps and runs neither", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-dry2-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    let spawned = false
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--force", "--dry-run", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        spawned = true
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 0)
+    assert.equal(spawned, false)
+    const text = out.join("\n")
+    assert.match(text, /plugin logout msmoli/)
+    assert.match(text, /plugin login msmoli/)
+    assert.match(text, /--dry-run：未执行/)
+    // the folder still holds what it held: a dry run writes nothing
+    assert.match(readFileSync(join(dir, "plugin-auth.json"), "utf8"), /ms-bbbb1111/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---- main-level guards the unit tests on the pure functions cannot reach
+
+test("two candidates stop the run and ask which, rather than picking one", async () => {
+  // the default search matches preset: modelscope, and two providers can
+  // declare it. Picking the first would write the token into whichever
+  // happened to be listed first — possibly the wrong one.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-amb-"))
+  try {
+    writeFileSync(
+      join(dir, "providers.json"),
+      JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", key: A }, { id: "relaychat", preset: "modelscope", key: B }] }),
+    )
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    let spawned = false
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        spawned = true
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1)
+    assert.equal(spawned, false, "an ambiguous preset must not be guessed at")
+    assert.match(out.join("\n"), /候选|--from/)
+
+    // and --from resolves it
+    const out2 = []
+    const code2 = await main({
+      argv: ["--dir", dir, "--to-plugin", "--from", "relaychat", "--magpie", "/nonexistent"],
+      log: (s) => out2.push(s),
+      spawn: (_c, argv) => {
+        if (argv.includes("login")) writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code2, 0, out2.join("\n"))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a magpie that exits 0 without writing is caught by the read-back", async () => {
+  // the CLI can report success and leave the file untouched (a stale daemon,
+  // a no-op shim). The read-back is what tells the difference.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-noop-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      // exits 0 but writes nothing — the login never landed
+      spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+    })
+    assert.equal(code, 1, "a silent no-op must not be reported as done")
+    const text = out.join("\n")
+    assert.match(text, /回读|没找到/)
+    assert.doesNotMatch(text, /✓ 完成/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the preset direction's read-back checks the preset, not the plugin", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-rb-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-preset", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      // writes something else than what was asked for
+      spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+    })
+    const text = out.join("\n")
+    assert.equal(code, 1)
+    assert.match(text, /回读|没找到/)
+
+    // this time the write really lands
+    const out2 = []
+    const code2 = await main({
+      argv: ["--dir", dir, "--to-preset", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out2.push(s),
+      spawn: () => {
+        writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", key: B }] }))
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code2, 0, out2.join("\n"))
+    assert.match(out2.join("\n"), /完成/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---- isMain: the entry has to be recognised by what it is, not its spelling
+
+test("isMain tells the entry file from any other file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-main-"))
+  try {
+    const entry = join(dir, "sync.mjs")
+    writeFileSync(entry, "//\n")
+    const other = join(dir, "other.mjs")
+    writeFileSync(other, "//\n")
+    const self = pathToFileURL(entry).href
+    assert.equal(isMain(entry, self), true)
+    assert.equal(isMain(other, self), false, "a different file is not the entry")
+    assert.equal(isMain("", self), false)
+    assert.equal(isMain(join(dir, "missing.mjs"), self), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("isMain answers true for another spelling of the same file where the volume folds case", () => {
+  // A case-insensitive volume resolves /D/X.mjs and /d/x.mjs to one file while
+  // realpath keeps the caller's spelling. String comparison then says "not
+  // main" and the CLI exits 0 having done nothing. The identity check is the
+  // inode; on a case-sensitive volume the flipped path does not resolve, and
+  // there is nothing to assert.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-maincase-"))
+  try {
+    const entry = join(dir, "SyncCase.mjs")
+    writeFileSync(entry, "//\n")
+    const flipped = join(dir, "SYNCCASE.MJS")
+    let resolves = true
+    try {
+      // no file identity on this volume (ino 0): nothing to compare by
+      if (statSync(flipped).ino === 0) return
+    } catch {
+      resolves = false
+    }
+    if (!resolves) return // case-sensitive volume: no second spelling to check
+    assert.equal(isMain(flipped, pathToFileURL(entry).href), true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---- the smaller findings of the review rounds
+
+test("a wrapper script as --magpie gets a hint that helps, not one that repeats", async () => {
+  // spawnSync cannot hand stdin to a .cmd/.bat (Windows: EINVAL). The old
+  // message said "use --magpie" to a user who had just used --magpie.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-cmd-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "C:\\tools\\magpie.cmd"],
+      log: (s) => out.push(s),
+      spawn: () => ({ error: new Error("spawnSync EINVAL"), status: null, stdout: "", stderr: "" }),
+    })
+    assert.equal(code, 1)
+    const text = out.join("\n")
+    assert.match(text, /magpie\.exe/, "it should point at the real binary")
+    assert.doesNotMatch(text, /用 --magpie 指定完整路径/, "not the advice they already followed")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a missing binary keeps the plain hint", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nohint-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/no/such/magpie"],
+      log: (s) => out.push(s),
+      spawn: () => ({ error: new Error("ENOENT"), status: null, stdout: "", stderr: "" }),
+    })
+    assert.equal(code, 1)
+    assert.match(out.join("\n"), /--magpie/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a macOS install in ~/.local/bin is found too", () => {
+  const seen = []
+  const got = findMagpieBin({
+    os: "darwin",
+    env: {},
+    home: "/h",
+    exists: (p) => {
+      seen.push(p)
+      return p === "/h/.local/bin/magpie"
+    },
+  })
+  assert.equal(got, "/h/.local/bin/magpie")
+  assert.ok(seen.includes("/Applications/magpie.app/Contents/MacOS/magpie"), "the app bundle is still tried first")
+})
+
+test("--status on a runnable plan reports it and stops short of running", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-status-run-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    let spawned = false
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--status", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        spawned = true
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 0)
+    assert.equal(spawned, false, "--status must not run anything")
+    const text = out.join("\n")
+    assert.match(text, /plugin login msmoli/, "the plan is still stated")
+    assert.match(text, /--status：以上是计划，未执行/)
+    assert.doesNotMatch(text, /✓ 完成/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("--status beats --dry-run when both are given, and neither runs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-status-dry-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    let spawned = false
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--status", "--dry-run", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        spawned = true
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 0)
+    assert.equal(spawned, false)
+    assert.match(out.join("\n"), /未执行/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a .portable marker beside the executable is enough, even before data/ fills up", () => {
+  const base = pathToFileURL("/opt/magpie").pathname.replace(/\/$/, "")
+  const marker = join(base, ".portable")
+  const exists = (p) => p === marker
+  assert.equal(
+    findConfigDir({ env: {}, home: "/h", os: "linux", binPath: join(base, "magpie"), exists }),
+    join(base, "data"),
+    "the marker says portable even when data/ has no files yet",
+  )
+})
+
+test("findMagpieBin checks Program Files as well as LocalAppData on Windows", () => {
+  // expected paths are built with join() the way the code builds them, so the
+  // test runs the same on Windows and on a POSIX host
+  const local = "C:\\Users\\u\\AppData\\Local"
+  const pf = "C:\\Program Files"
+  const want = join(pf, "magpie", "magpie.exe")
+  const seen = []
+  const got = findMagpieBin({
+    os: "win32",
+    env: { LOCALAPPDATA: local, ProgramFiles: pf },
+    home: "C:\\Users\\u",
+    exists: (p) => {
+      seen.push(p)
+      return p === want
+    },
+  })
+  assert.equal(got, want)
+  assert.equal(seen[0], join(local, "Programs", "magpie", "magpie.exe"), "LOCALAPPDATA is tried first")
 })

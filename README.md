@@ -66,11 +66,12 @@ node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --t
 ```
 
 Installed from a clone, run the file in the clone — magpie references that
-folder and copies nothing (`./bin/sync.mjs` below). Portable installs keep the
-same layout under their `data` folder; if detection misses, `--dir <magpie's
-folder>` and `--magpie <path to the magpie binary>` say where things are.
-`npx magpie-plugin-msmoli` will work once the package is on npm — npm 12
-blocks `npx github:…` by default, so don't start from that.
+folder and copies nothing (`./bin/sync.mjs` below; on Windows or WSL, where the
+file may not carry an executable bit, run it as `node bin/sync.mjs`). Portable
+installs keep the same layout under their `data` folder; if detection misses,
+`--dir <magpie's folder>` and `--magpie <path to the magpie binary>` say where
+things are. `npx magpie-plugin-msmoli` will work once the package is on npm —
+npm 12 blocks `npx github:…` by default, so don't start from that.
 
 It reads magpie's config but never writes it: the writes are magpie's own
 (`magpie plugin login`, `magpie plugin logout`, `magpie provider key`), and the

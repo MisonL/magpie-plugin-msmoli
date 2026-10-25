@@ -16,10 +16,10 @@
 //   拒绝改动，只有显式 --force 且插件只有一个账号时才替换。
 
 import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { homedir, platform } from "node:os"
 import { dirname, join } from "node:path"
-import { pathToFileURL } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 
 const ID = "msmoli"
 const PRESET = "modelscope"
@@ -74,6 +74,7 @@ export function findMagpieBin({ env = process.env, os = platform(), exists = exi
       "/opt/homebrew/bin/magpie",
       "/usr/local/bin/magpie",
       "/opt/local/bin/magpie",
+      join(home, ".local", "bin", "magpie"),
     )
   } else if (os === "win32") {
     if (env.LOCALAPPDATA) cands.push(join(env.LOCALAPPDATA, "Programs", "magpie", "magpie.exe"))
@@ -111,7 +112,7 @@ export function findConfigDir({ env = process.env, home = homedir(), os = platfo
 // The two are not the same decision: a file that exists and doesn't parse may
 // be mid-write or briefly locked, and reading it as "nobody is signed in"
 // would let a run create a second account over one it could not see.
-function readJson(file, exists = existsSync) {
+export function readJson(file, exists = existsSync) {
   if (!exists(file)) return undefined
   try {
     return JSON.parse(readFileSync(file, "utf8").replace(/^\uFEFF/, ""))
@@ -276,7 +277,12 @@ function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
     const r = spawn(bin, argv, { input: stdin, encoding: "utf8", timeout })
     const out = `${r.stdout ?? ""}${r.stderr ?? ""}`.trim()
     if (r.error) {
-      const e = new Error(`跑不动 ${bin}：${r.error.message}（用 --magpie 指定完整路径）`)
+      // A .cmd/.bat/.ps1 is a shell wrapper, not something spawnSync can hand
+      // a stdin to (Windows answers EINVAL). Saying "use --magpie" to someone
+      // who just used --magpie is no help: point at the .exe instead.
+      const wrapper = /\.(cmd|bat|ps1)$/i.test(bin)
+      const hint = wrapper ? "（这是包装脚本，请指向同目录的 magpie.exe）" : "（用 --magpie 指定完整路径）"
+      const e = new Error(`跑不动 ${bin}：${r.error.message}${hint}`)
       if (i > 0) e.recover = RECOVER
       throw e
     }
@@ -414,11 +420,18 @@ export async function main({
 // 是解析后的真实路径，直接比较字符串会漏掉「作为命令运行」的场景（测试里用
 // node bin/sync.mjs 直跑恰好相等，掩盖了这个 bug）。先把 argv[1] 也 realpath
 // 成真实路径再比。
-function isMain() {
-  const entry = process.argv[1]
+//
+// realpath 不规范化大小写：大小写不敏感的卷（Windows、macOS 默认）上，同一个
+// 文件按不同拼写调用会得到两个不同的字符串。因此相等与否最终按 inode 判定
+// ——那是文件的身份，与拼写无关；也不能靠折叠大小写，那会在大小写敏感卷上
+// 把两个不同的文件认成同一个，让被 import 的模块把 main() 再跑一遍。
+export function isMain(entry = process.argv[1], self = import.meta.url) {
   if (!entry) return false
   try {
-    return pathToFileURL(realpathSync(entry)).href === import.meta.url
+    if (pathToFileURL(realpathSync(entry)).href === self) return true
+    const theirs = statSync(entry)
+    const mine = statSync(fileURLToPath(self))
+    return theirs.ino !== 0 && theirs.ino === mine.ino && theirs.dev === mine.dev
   } catch {
     return false
   }
