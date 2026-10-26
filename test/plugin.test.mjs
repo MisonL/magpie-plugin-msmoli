@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -2108,5 +2108,50 @@ test("a network failure says what happened instead of the bare English", async (
     assert.match(r.message, /网络|代理|重定向/, `should say what it may be, got: ${r.message}`)
   } finally {
     globalThis.fetch = real
+  }
+})
+
+test("a balance with no data at all is a failure, not a card that says 0 left", async () => {
+  // 余额读成 0 是一个确定又错误的结论：卡片的进度条会满格、gateway 会把
+  // 这个账号当用尽。响应里没有 data 是「没读懂」，得重试。
+  await withFetch(
+    { "/openapi/v1/magicubes/balance": { body: { success: true } } },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.match(u.error, /没有 data/, `should refuse the shapeless body: ${u.error}`)
+      assert.ok(!u.windows, "no card is built from a body we did not understand")
+    },
+  )
+})
+
+test("with no directory, the config comes from XDG_CONFIG_HOME, else the home folder", async () => {
+  // the host hands over input.directory, so this path only runs for a plugin
+  // loaded without one (a bare import, a test harness): it must still look in
+  // magpie's own folder rather than the process's working directory.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-xdg-"))
+  const saved = { env: process.env.MAGPIE_MSMOLI_CONFIG, xdg: process.env.XDG_CONFIG_HOME }
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    mkdirSync(join(dir, "magpie"), { recursive: true })
+    writeFileSync(join(dir, "magpie", "msmoli.json"), JSON.stringify({ checkinWindow: ["09:15", "11:45"] }))
+    process.env.XDG_CONFIG_HOME = dir
+    const hooks = await MsmoliPlugin({})
+    const realNow = Date.now
+    Date.now = () => Date.parse("2026-10-25T00:30:00+08:00") // before the window
+    try {
+      const r = await hooks.auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      const m = /^(\d{2}):(\d{2}) 后自动领取/.exec(r.message)
+      assert.ok(m, `should be before a window: ${r.message}`)
+      const at = +m[1] * 60 + +m[2]
+      assert.ok(at >= 9 * 60 + 15 && at < 11 * 60 + 45, `the window should be the one XDG names, got ${m[0]}`)
+    } finally {
+      Date.now = realNow
+    }
+  } finally {
+    if (saved.env === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved.env
+    if (saved.xdg === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = saved.xdg
+    rmSync(dir, { recursive: true, force: true })
   }
 })

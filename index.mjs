@@ -49,7 +49,8 @@ const PAGE_SIZE = 50
 // doing that; a hook cut short answers failed, which the host retries in half
 // an hour, and that retry reads the ledger first — so nothing is lost.
 const CHECKIN_BUDGET_MS = 25 * 1000
-// A usage read is one balance and one ledger read under a 20s budget.
+// A usage read is one balance and one ledger read under an 18s budget, so two
+// 8s requests at the per-request cap still fit.
 const USAGE_BUDGET_MS = 18 * 1000
 
 // tokenOf is the key this sign-in carries, or "" when there is none or it is
@@ -194,12 +195,13 @@ const okOf = (body) => {
 // trusted with control characters: a newline forges a log line, an escape
 // sequence drives the terminal, and a bidi override can turn a name inside
 // out. Visible characters are kept, up to a length that fits a card.
+//
 // The classes, not a hand-listed range: \p{Cc} is C0/C1, \p{Cf} covers the
 // bidi controls, the zero-width joiners, the word joiner and the tag
-// characters (U+E0000\u2013E007F) that can carry hidden data \u2014 the earlier list
-// left U+200B\u2013200D, U+2060\u20132064 and U+061C through, so two accounts could be
-// made to look like the same name. Truncation counts code points, so it can't
-// cut a surrogate pair in half.
+// characters (U+E0000-E007F) that can carry hidden data — the earlier list
+// left U+200B-U+200D, U+2060-U+2064 and U+061C through, so two accounts could
+// be made to look like the same name. Truncation counts code points, so it
+// cannot cut a surrogate pair in half.
 const text = (value, max = 120) => {
   const cleaned = String(value ?? "")
     // eslint-disable-next-line no-control-regex
@@ -691,7 +693,13 @@ export async function MsmoliPlugin(input) {
           if (bal.res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
           if (bal.res.status !== 200 || !bal.parsed) throw new Error(`余额查询失败：响应不是 JSON（HTTP ${bal.res.status}）`)
           if (!okOf(bal.body)) throw new Error(`余额查询失败：${saidOf(bal.body) || `HTTP ${bal.res.status}`}`)
-          const available = num(dataOf(bal.body).available_balance)
+          // data 缺失读成 0 会把「没读懂」翻译成「余额为零」——一个确定又
+          // 错误的结论，卡片会写「0 魔粒可用」。账本那侧的 recordsOf 同理。
+          const balData = bal.body?.data ?? bal.body?.Data
+          if (balData === undefined || balData === null || typeof balData !== "object") {
+            throw new Error("余额查询失败：响应里没有 data")
+          }
+          const available = num(balData.available_balance)
 
           const tx = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
           if (tx.res.status === 401) throw fail(tx.res.status)

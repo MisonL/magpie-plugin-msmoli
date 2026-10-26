@@ -323,8 +323,9 @@ nothing — your name stays, and the nickname is not put over it.
 ## Scope and limits
 
 - One account's own daily grant, idempotent: a check-in reads the ledger, touches
-the sign-in endpoint, and reads the ledger again — three requests, four when the
-grant is late and the ledger is read a second time to confirm. Once a day.
+the sign-in endpoint, and reads the ledger again — three requests. A day already
+claimed (a retry, a later ask) answers `done` in two; a touch the ledger has not
+caught up with reads it once more, four. Once a day.
 Asks that arrive before the window open send nothing at all.
 The usage read makes two requests and never touches the sign-in endpoint, so the
 menu bar's polling cannot turn into check-ins.

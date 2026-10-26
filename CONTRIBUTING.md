@@ -82,6 +82,17 @@ clock, so they don't expire on a given day. The check-in window reads
 points `MAGPIE_MSMOLI_CONFIG` at a temp file so it never reads or writes a
 real one.
 
+Two rules for a test that touches process state:
+
+- **Put the environment back.** `MAGPIE_MSMOLI_CONFIG` wins over
+  `input.directory`, so a test that deletes it to read its own folder and does
+  not restore it leaves every later test on the default 08:30–10:00 window —
+  green in the afternoon, red in the morning. Use `withDirectory`, which
+  restores it in a `finally`.
+- **Skip out loud.** A test that returns early where the platform cannot run it
+  reads as a pass. Call `t.skip(reason)` instead, so the reason shows in the
+  run.
+
 ## Against the real API
 
 If you change the request shapes, check them against a real account — the

@@ -1241,3 +1241,22 @@ test("isMain falls back to the resolved path when the volume reports no identity
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("no config anywhere is told apart from a wrong --dir", () => {
+  // two different refusals: a --dir that holds no magpie files (previous
+  // test) and no folder to look in at all. The second one is the one that
+  // names the places it tried, and it had no test.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nodir-"))
+  try {
+    const r = spawnSync(process.execPath, [bin], {
+      encoding: "utf8",
+      env: { ...process.env, XDG_CONFIG_HOME: dir, HOME: dir },
+      timeout: 30_000,
+    })
+    assert.equal(r.status, 1)
+    assert.match(r.stdout, /没找到 magpie 的配置目录/, r.stdout)
+    assert.match(r.stdout, /--dir/, "should say how to name one")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
