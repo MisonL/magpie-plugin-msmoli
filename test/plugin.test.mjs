@@ -81,6 +81,7 @@ const auth = hooks.auth
 // clock so these tests don't expire.
 const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10)
 const tomorrow = new Date(Date.now() + 32 * 3600e3).toISOString().slice(0, 10)
+const yesterday = new Date(Date.now() + 8 * 3600e3 - 24 * 3600e3).toISOString().slice(0, 10)
 
 // A day of ModelScope's ledger, as /openapi/v1/magicubes/transactions gives it.
 const day = (over = {}) => ({
@@ -2115,6 +2116,43 @@ test("done reports the day's grant from before the trigger, not from a page that
   } finally {
     globalThis.fetch = real
   }
+})
+
+test("a row stamped with a time is still today's row", async () => {
+  // The column answers "2026-10-26" today, but the same API writes other
+  // fields of the same row as "2026-10-26 09:13:40". An exact-string compare
+  // would turn every row into "not today": the ledger reads as empty, the
+  // check-in answers `inactive`, and `inactive` settles the day with "the
+  // account may not be in the campaign" — a false answer that is never asked
+  // again that day.
+  for (const stamp of [`${today} 09:13:40`, `${today}T09:13:40`, `${today} 00:00:00`]) {
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Data: { NickName: "alice" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+          body: { success: true, data: { records: [day({ gmt_created: stamp })] } },
+        },
+      },
+      async () => {
+        const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+        assert.equal(r.outcome, "done", `${stamp} is today's row: ${r.message}`)
+        assert.equal(r.credit, 200)
+      },
+    )
+  }
+  // and a row from another day is still another day's
+  await withFetch(
+    {
+      "/api/v1/users/login/info": { body: { Code: 200, Data: { NickName: "alice" } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records: [day({ gmt_created: `${yesterday} 23:59:59` })] } },
+      },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "inactive", `yesterday's row is not today's: ${r.message}`)
+    },
+  )
 })
 
 test("a day whose grants were reversed does not claim a negative credit", async () => {

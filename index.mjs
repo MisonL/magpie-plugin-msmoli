@@ -251,6 +251,18 @@ function todayCN() {
   return new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10)
 }
 
+// onDay says whether a ledger row was recorded on the Beijing day `day`.
+// ModelScope answers "2026-10-26" today, but the same API answers other
+// fields of the same row in "2026-10-26 09:13:40", and a change to the
+// column's format would turn every row into "not today": the ledger would
+// read as empty, the check-in would answer `inactive`, and `inactive` settles
+// the day with "the account may not be in the campaign". Comparing the date
+// part is right for both spellings and wrong for neither.
+const onDay = (stamp, day) => {
+  const s = String(stamp ?? "")
+  return s.slice(0, 10) === day && /^\d{4}-\d{2}-\d{2}/.test(s)
+}
+
 // cnTime turns ModelScope's "2026-10-22 15:35:35" (Beijing time, no zone) into
 // RFC 3339. Handed to new Date() as is, it would be read in the host's own
 // zone, which is 8 hours off on a machine set anywhere else.
@@ -569,7 +581,7 @@ async function todayEarn(token, deadline) {
   if (res.status !== 200 || !parsed) throw new Error(`账单查询失败：响应不是 JSON（HTTP ${res.status}）`)
   if (!okOf(body)) throw new Error(`账单查询失败：${saidOf(body, token) || `HTTP ${res.status}`}`)
   const day = todayCN()
-  return recordsOf(body).filter((r) => r?.type === "EARN" && r?.gmt_created === day)
+  return recordsOf(body).filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day))
 }
 
 // num reads a number from the server, 0 for anything that isn't a finite
@@ -799,7 +811,7 @@ export async function MsmoliPlugin(input) {
           let spent = 0
           let earliest = ""
           for (const r of recordsOf(tx.body)) {
-            if (r?.gmt_created !== day) continue
+            if (!onDay(r?.gmt_created, day)) continue
             const amount = num(r?.total_amount)
             if (r?.type === "EARN") {
               // 「领」是今天入账的全部，促销一类也算：卡片问的是「今天进来
