@@ -71,9 +71,11 @@ file may not carry an executable bit, run it as `node bin/sync.mjs`). Portable
 installs keep the same layout under their `data` folder; if detection misses,
 `--dir <magpie's config folder>` and `--magpie <path to the magpie binary>` say
 where things are: for a portable install that is its `data` folder, not the
-folder the executable sits in. `npx magpie-plugin-msmoli` will work once the
-package is on npm — npm 12 blocks `npx github:…` by default, so don't start
-from that.
+folder the executable sits in. `--magpie` takes a path, absolute or relative —
+a bare `magpie` is refused, because that one is resolved through `PATH` and the
+first `magpie` on it would be handed the token. `npx magpie-plugin-msmoli` will
+work once the package is on npm — npm 12 blocks `npx github:…` by default, so
+don't start from that.
 
 `--dir` says where to *read*; magpie's CLI has no such flag, so a write always
 lands in the binary's own folder. Given both and they disagree, the tool stops

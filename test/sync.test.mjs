@@ -217,7 +217,9 @@ test("findConfigDir reads XDG_CONFIG_HOME, then ~/.config, and nothing that isn'
 
 test("findConfigDir takes a portable install's data folder beside the executable", () => {
   const base = pathToFileURL("/opt/magpie").pathname.replace(/\/$/, "")
-  const files = new Set([join(base, "data", "providers.json")])
+  // the folder itself counts, as os.Stat(data) does in appdir.Resolve: a
+  // data folder magpie made and has not written into yet is still its own
+  const files = new Set([join(base, "data"), join(base, "data", "providers.json")])
   const exists = (p) => files.has(p)
   assert.equal(findConfigDir({ env: {}, home: "/h", os: "linux", binPath: join(base, "magpie"), exists }), join(base, "data"))
 })
@@ -225,10 +227,182 @@ test("findConfigDir takes a portable install's data folder beside the executable
 test("findConfigDir reads a Mac app's portable folder beside the .app, not inside it", () => {
   const app = "/Applications/magpie.app"
   const dataDir = join("/Applications", "data")
-  const files = new Set([join(dataDir, "providers.json")])
+  const files = new Set([dataDir, join(dataDir, "providers.json")])
   const exists = (p) => files.has(p)
   const got = findConfigDir({ env: {}, home: "/h", os: "darwin", binPath: `${app}/Contents/MacOS/magpie`, exists })
   assert.equal(got, dataDir, "a data folder inside the bundle would break its signature")
+})
+
+test("findConfigDir follows the executable's symlink, as appdir.Resolve does", () => {
+  // /usr/local/bin/magpie and /opt/homebrew/bin/magpie are what findMagpieBin
+  // itself names, and both are usually links into the app. appdir.Resolve
+  // runs filepath.EvalSymlinks on the executable first, so the data folder
+  // magpie uses is the one beside the file it really runs from; looking
+  // beside the link answers "no magpie folder" for a portable install and
+  // the tool then reads ~/.config/magpie, which magpie is not writing.
+  const target = "/Applications/magpie.app/Contents/MacOS/magpie"
+  const link = "/usr/local/bin/magpie"
+  const files = new Set([join("/Applications", "data"), join("/Applications", "data", "providers.json")])
+  const exists = (p) => files.has(p)
+  const got = findConfigDir({ env: {}, home: "/h", os: "darwin", binPath: link, exists, real: (p) => (p === link ? target : p) })
+  assert.equal(got, join("/Applications", "data"))
+})
+
+test("a data folder in a shared folder is not magpie's when the installed folder has magpie's files", () => {
+  // appdir's #989: a "data" folder in /Applications, the home folder,
+  // Downloads, Desktop or Documents is as likely another app's or the user's
+  // own. magpie takes it only when it holds magpie's files and the installed
+  // folder holds none; a tool that takes it anyway reads a folder magpie
+  // never writes, and the write goes to the folder it does.
+  const home = pathToFileURL("/h").pathname.replace(/\/$/, "")
+  const base = join(home, "Downloads")
+  const data = join(base, "data")
+  const installed = join(home, ".config", "magpie")
+  const bin = join(base, "magpie")
+
+  // data holds magpie's files, and so does the installed folder: magpie runs
+  // installed, and the tool must agree
+  const both = new Set([data, join(data, "providers.json"), join(installed, "providers.json")])
+  assert.equal(
+    findConfigDir({ env: {}, home, os: "linux", binPath: bin, exists: (p) => both.has(p) }),
+    installed,
+    "the installed folder wins, as it does in appdir.Resolve",
+  )
+
+  // the same data folder with no installed files is the portable one
+  const onlyData = new Set([data, join(data, "providers.json")])
+  assert.equal(findConfigDir({ env: {}, home, os: "linux", binPath: bin, exists: (p) => onlyData.has(p) }), data)
+
+  // an empty data folder in a shared folder is not magpie's either
+  const empty = new Set([data])
+  assert.equal(findConfigDir({ env: {}, home, os: "linux", binPath: bin, exists: (p) => empty.has(p) }), "")
+})
+
+test("a .portable file makes a shared folder portable, and a directory of that name does not", () => {
+  const home = pathToFileURL("/h").pathname.replace(/\/$/, "")
+  const base = join(home, "Downloads")
+  const marker = join(base, ".portable")
+  const data = join(base, "data")
+  // a stat that knows only what it is told, and throws ENOENT for the rest,
+  // as the real one does for a path that is not there
+  const statOf = (kinds) => (p) => {
+    const kind = kinds[p]
+    if (!kind) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" })
+    return { isFile: () => kind === "file", isDirectory: () => kind === "dir" }
+  }
+  const exists = () => false
+  assert.equal(
+    findConfigDir({
+      env: {},
+      home,
+      os: "linux",
+      binPath: join(base, "magpie"),
+      exists,
+      stat: statOf({ [marker]: "file" }),
+    }),
+    data,
+    "the marker says portable even when data/ has no files yet",
+  )
+  assert.equal(
+    findConfigDir({
+      env: {},
+      home,
+      os: "linux",
+      binPath: join(base, "magpie"),
+      exists,
+      stat: statOf({ [marker]: "dir" }),
+    }),
+    "",
+    "a folder named .portable is not the marker (appdir checks !IsDir)",
+  )
+})
+
+test("a FILE named data is not a portable magpie", () => {
+  // appdir.Resolve asks os.Stat for a directory; a plain file of that name
+  // is not one, and treating it as the config folder makes every read fail
+  // with EISDIR far from the cause. exists() says yes here — only the stat
+  // knows better, which is why Resolve asks it.
+  const base = pathToFileURL("/opt/magpie").pathname.replace(/\/$/, "")
+  const data = join(base, "data")
+  const installed = join("/h", ".config", "magpie")
+  const stat = (p) => {
+    if (p === data) return { isFile: () => true, isDirectory: () => false }
+    throw Object.assign(new Error("ENOENT"), { code: "ENOENT" })
+  }
+  const exists = (p) => p === data || p === join(installed, "providers.json")
+  assert.equal(
+    findConfigDir({ env: {}, home: "/h", os: "linux", binPath: join(base, "magpie"), exists, stat }),
+    installed,
+    "the file named data is not it; the installed folder is",
+  )
+})
+
+test("the portable decision reads appdir's own files, not the tool's", () => {
+  // appdir's hasFiles asks for providers.json, logins.json or settings.json.
+  // plugin-auth.json and plugins.json are what this tool reads, but a data
+  // folder holding only those is not one magpie calls its own — and the
+  // shared-folder rule must ask the same question magpie asks.
+  const home = pathToFileURL("/h").pathname.replace(/\/$/, "")
+  const base = join(home, "Downloads")
+  const data = join(base, "data")
+  const bin = join(base, "magpie")
+  for (const only of ["plugin-auth.json", "plugins.json"]) {
+    const files = new Set([data, join(data, only)])
+    assert.equal(
+      findConfigDir({ env: {}, home, os: "linux", binPath: bin, exists: (p) => files.has(p) }),
+      "",
+      `a data folder holding only ${only} is not magpie's in a shared folder`,
+    )
+  }
+  for (const own of ["providers.json", "logins.json", "settings.json"]) {
+    const files = new Set([data, join(data, own)])
+    assert.equal(
+      findConfigDir({ env: {}, home, os: "linux", binPath: bin, exists: (p) => files.has(p) }),
+      data,
+      `a data folder holding ${own} is`,
+    )
+  }
+})
+
+test("an AppImage's data folder is beside the .AppImage file, not the mount", () => {
+  // appdir.Beside: a magpie run from an AppImage keeps its data beside the
+  // .AppImage the user has, not in the mount it is unpacked into for the run
+  const img = join(pathToFileURL("/opt/apps").pathname.replace(/\/$/, ""), "magpie.AppImage")
+  const mount = "/tmp/.mount_magpieXX"
+  const files = new Set([join("/opt/apps", "data"), join("/opt/apps", "data", "providers.json")])
+  const got = findConfigDir({
+    env: { APPIMAGE: img, APPDIR: mount },
+    home: "/h",
+    os: "linux",
+    binPath: join(mount, "magpie"),
+    exists: (p) => files.has(p),
+  })
+  assert.equal(got, join("/opt/apps", "data"))
+})
+
+test("an AppImage outside its own mount is not taken for one", () => {
+  // appdir's within(): APPIMAGE and APPDIR are inherited by every program the
+  // AppImage starts, so a magpie run from somewhere else must not be moved
+  // beside a .AppImage that is not the one it runs from
+  const img = "/opt/apps/magpie.AppImage"
+  const elsewhere = pathToFileURL("/usr/local").pathname.replace(/\/$/, "")
+  const got = findConfigDir({
+    env: { APPIMAGE: img, APPDIR: "/tmp/.mount_magpieXX" },
+    home: "/h",
+    os: "linux",
+    binPath: join(elsewhere, "magpie"),
+    exists: (p) => p === join(elsewhere, "data"),
+  })
+  assert.equal(got, join(elsewhere, "data"), "the executable's own folder, not the AppImage's")
+  // an APPIMAGE with no APPDIR (or a relative one) is not a mount to test
+  const noDir = findConfigDir({
+    env: { APPIMAGE: img },
+    home: "/h",
+    os: "linux",
+    binPath: join(elsewhere, "magpie"),
+    exists: (p) => p === join(elsewhere, "data"),
+  })
+  assert.equal(noDir, join(elsewhere, "data"))
 })
 
 test("looksLikeMagpie wants one of magpie's files", () => {
@@ -890,7 +1064,7 @@ test("a bare --magpie name is refused instead of looked up on PATH", async () =>
   try {
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
     writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
-    for (const name of ["magpie", "./magpie", "node_modules/.bin/magpie"]) {
+    for (const name of ["magpie", "magpie.exe"]) {
       const out = []
       let spawned = false
       const code = await main({
@@ -904,10 +1078,52 @@ test("a bare --magpie name is refused instead of looked up on PATH", async () =>
       assert.equal(code, 1, `${name} must be refused`)
       assert.equal(spawned, false, `${name} must never reach a spawn`)
       const text = out.join("\n")
-      assert.match(text, /完整路径/, `${name} should say a path is needed: ${text}`)
+      assert.match(text, /裸名/, `${name} should say a bare name is not taken: ${text}`)
       assert.doesNotMatch(text, /magpie-plugin-msmoli: /, "said as a message, not a crash")
     }
   } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a relative --magpie path is a path, not a lookup, and runs", async () => {
+  // "./magpie" and "data/../magpie" are not looked up on PATH by spawnSync (a
+  // name with a separator is resolved against the working folder), and
+  // existsSync resolves them the same way — so the write guard works and
+  // there is no hole to refuse. They are also exactly what a user in a
+  // portable magpie's folder types.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-rel-"))
+  const was = process.cwd()
+  try {
+    writeFileSync(join(dir, "magpie"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+    mkdirSync(join(dir, "data"))
+    writeFileSync(join(dir, "data", "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "data", "plugin-auth.json"), JSON.stringify({}))
+    process.chdir(dir)
+    for (const name of ["./magpie", "data/../magpie"]) {
+      writeFileSync(join(dir, "data", "plugin-auth.json"), JSON.stringify({}))
+      const out = []
+      const spawned = []
+      const code = await main({
+        argv: ["--dir", "data", "--to-plugin", "--magpie", name],
+        env: {},
+        home: dir,
+        log: (s) => out.push(s),
+        // the write magpie would make, so the read-back can confirm it
+        spawn: (_bin, argv) => {
+          spawned.push(argv.join(" "))
+          if (argv[0] === "plugin" && argv[1] === "login") {
+            writeFileSync(join(dir, "data", "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+          }
+          return { status: 0, stdout: "", stderr: "" }
+        },
+      })
+      assert.equal(code, 0, `${name} must run: ${out.join("\n")}`)
+      assert.deepEqual(spawned, ["plugin login msmoli"], `${name} must reach the login it planned`)
+      assert.doesNotMatch(out.join("\n"), /不同的配置目录/, `${name} names the binary's own folder`)
+    }
+  } finally {
+    process.chdir(was)
     rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -1023,17 +1239,6 @@ test("--status beats --dry-run when both are given, and neither runs", async () 
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
-})
-
-test("a .portable marker beside the executable is enough, even before data/ fills up", () => {
-  const base = pathToFileURL("/opt/magpie").pathname.replace(/\/$/, "")
-  const marker = join(base, ".portable")
-  const exists = (p) => p === marker
-  assert.equal(
-    findConfigDir({ env: {}, home: "/h", os: "linux", binPath: join(base, "magpie"), exists }),
-    join(base, "data"),
-    "the marker says portable even when data/ has no files yet",
-  )
 })
 
 test("findMagpieBin checks Program Files as well as LocalAppData on Windows", () => {
@@ -1568,6 +1773,20 @@ test("--to-preset refuses a token the plugin itself could not send", async () =>
   const plan = planToPreset({ preset: presetOf(A), accounts: [{ name: "msmoli", token: bad }], force: true })
   assert.equal(plan.action, "refuse")
   assert.deepEqual(plan.cmds, [])
+})
+
+test("--to-plugin refuses a key the plugin itself could not send", async () => {
+  // The same rule, the other direction: the plugin refuses a key with
+  // anything but visible ASCII in it (tokenOf), so logging one in signs the
+  // account in and leaves every check-in saying "令牌内容无法识别" — a
+  // success the tool reports for a key that cannot work.
+  for (const bad of ["ms-bbbb1111-cccc-2222-ddd d-333344445555", "ms-bbbb1111-cccc-2222-ddd​d-333344445555"]) {
+    const plan = planToPlugin({ preset: presetOf(bad), accounts: [], force: false })
+    assert.equal(plan.action, "refuse", JSON.stringify(bad))
+    assert.deepEqual(plan.cmds, [], "nothing may be logged in")
+  }
+  // and the ordinary key still goes through
+  assert.equal(planToPlugin({ preset: presetOf(A), accounts: [], force: false }).action, "run")
 })
 
 test("--help wins over an argument it does not know", () => {

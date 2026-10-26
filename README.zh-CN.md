@@ -60,7 +60,8 @@ node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --t
 可执行位，用 `node bin/sync.mjs` 跑）——magpie 只是按位置引用那个文件夹，并不会拷走。
 便携版的目录结构相同，只是根目录是它的 `data` 文件夹；探测不到时用 `--dir <magpie 的配置
 目录>`（安装版是 `~/.config/magpie`，便携版是它的 `data` 目录）和 `--magpie <magpie 可执行
-文件的路径>` 指明。`npx magpie-plugin-msmoli` 要等
+文件的路径>` 指明。`--magpie` 要的是一个路径，绝对或相对都行；裸名 `magpie` 会被拒绝——
+那个是按 `PATH` 解析的，PATH 上第一个 magpie 会拿到令牌。`npx magpie-plugin-msmoli` 要等
 包发布到 npm 之后才能用——npm 12 默认禁用 `npx github:…`，别从那条路开始。
 
 `--dir` 只决定**读**哪里；magpie 的 CLI 没有这个参数，写入永远落在可执行文件自己的目录。

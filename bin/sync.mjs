@@ -18,7 +18,7 @@
 import { spawnSync } from "node:child_process"
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { homedir, platform } from "node:os"
-import { dirname, isAbsolute, join } from "node:path"
+import { dirname, isAbsolute, join, sep } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 const ID = "msmoli"
@@ -149,14 +149,104 @@ const rooted = (p, os) =>
   Boolean(p) &&
   (isAbsolute(p) || /^[A-Za-z]:[\\/]/.test(p) || (os === "win32" && (p.startsWith("\\") || p.startsWith("/"))))
 
-export function findConfigDir({ env = process.env, home = homedir(), os = platform(), exists = existsSync, binPath = "" } = {}) {
+// ownFiles is what appdir.go's hasFiles() looks for: the files magpie writes
+// on its own. The portable and shared-folder decisions are made with this
+// set, not with looksLikeMagpie's: magpie must agree with the tool about
+// which folder it is running from, or one reads what the other does not use.
+const OWN_FILES = ["providers.json", "logins.json", "settings.json"]
+const hasFiles = (dir, exists) => OWN_FILES.some((f) => exists(join(dir, f)))
+
+// within says whether path lies in the absolute folder dir (appdir.go's own).
+const within = (path, dir) => {
+  if (!isAbsolute(dir)) return false
+  return path === dir || path.startsWith(dir.endsWith(sep) ? dir : dir + sep)
+}
+
+// beside is appdir.go's Beside(): the folder a portable magpie keeps its
+// data folder in — the executable's own, the one holding the .app on a Mac,
+// the one holding the .AppImage on Linux.
+function beside(exe, env, os) {
+  if (os === "linux" && env.APPIMAGE && within(exe, env.APPDIR ?? "")) return dirname(env.APPIMAGE)
+  const dir = dirname(exe)
+  // …/Magpie.app/Contents/MacOS/magpie. The .app ending is part of the test:
+  // a folder merely shaped X/Contents/MacOS is not a bundle.
+  if (/[\\/]Contents[\\/]MacOS$/.test(dir)) {
+    const app = dirname(dirname(dir))
+    if (/\.app$/i.test(app)) return dirname(app)
+  }
+  return dir
+}
+
+// sharedFolders are the folders every app or download shares (appdir.go's
+// sharedFolder): a data folder there is as likely another app's or the
+// user's own (#989), so it is magpie's only when the installed folder holds
+// none of magpie's files — the folder a user's archiver empties is not the
+// one a magpie that never asked for portable should run from.
+function sharedFolders(home, os) {
+  const dirs = []
+  if (os === "darwin") dirs.push("/Applications")
+  if (home) {
+    dirs.push(home, join(home, "Downloads"), join(home, "Desktop"), join(home, "Documents"))
+    if (os === "darwin") dirs.push(join(home, "Applications"))
+  }
+  return dirs
+}
+
+// installedDir is appdir.go's installed(): where an installed magpie keeps
+// its files, whether or not it has written them yet.
+const installedDir = (env, home, os) =>
+  rooted(env.XDG_CONFIG_HOME, os) ? join(env.XDG_CONFIG_HOME, "magpie") : home ? join(home, ".config", "magpie") : ""
+
+function shared(base, data, { env, home, os, exists }) {
+  const fold = (p) => String(p).replace(/[\\/]+$/, "").toLowerCase()
+  if (!sharedFolders(home, os).some((d) => fold(d) === fold(base))) return false
+  if (!hasFiles(data, exists)) return true
+  const installed = installedDir(env, home, os)
+  return Boolean(installed) && hasFiles(installed, exists)
+}
+
+// dirExists is "there is a folder here". appdir.Resolve asks os.Stat for a
+// directory (a FILE named data is not a portable magpie); the injected
+// `exists` is the fallback for a path this process cannot stat, where the
+// two agree on a real machine (a stat that throws ENOENT is an exists that
+// answers false).
+const dirExists = (p, stat, exists) => {
+  try {
+    return stat(p).isDirectory()
+  } catch {
+    return exists(p)
+  }
+}
+
+export function findConfigDir({
+  env = process.env,
+  home = homedir(),
+  os = platform(),
+  exists = existsSync,
+  binPath = "",
+  real = realpathSync,
+  stat = statSync,
+} = {}) {
   if (binPath) {
-    let base = dirname(binPath)
-    // 一个 Mac app 的「旁边」是 .app 所在的目录；可执行文件在 .app 里面。
-    // 两种分隔符都认：这行在非 Mac 上也能被测试驱动（darwin 路径由测试传入）
-    if (os === "darwin" && /[\\/]Contents[\\/]MacOS$/.test(base)) base = dirname(dirname(dirname(base)))
+    // appdir.Resolve judges the executable as it really is (EvalSymlinks
+    // first): a symlink in /usr/local/bin or /opt/homebrew/bin — both of
+    // which findMagpieBin itself names — must not move the data folder
+    // beside the link, where magpie never looks.
+    let exe = binPath
+    try {
+      exe = real(binPath)
+    } catch {}
+    const base = beside(exe, env, os)
     const data = join(base, "data")
-    if (exists(join(base, ".portable")) || looksLikeMagpie(data, exists)) return data
+    // a FILE named .portable decides first, whatever folder it is in
+    let marker = false
+    try {
+      marker = stat(join(base, ".portable")).isFile()
+    } catch {}
+    if (marker) return data
+    // a data folder there is magpie's unless the shared-folder rule says it
+    // is someone else's; an empty one counts, as it does in Resolve
+    if (dirExists(data, stat, exists) && !shared(base, data, { env, home, os, exists })) return data
   }
   // A rooted XDG_CONFIG_HOME *is* where magpie keeps its files (appdir's
   // installed()), whether or not it has written them yet: falling through to
@@ -265,6 +355,17 @@ export function planToPlugin({ preset, accounts, force }) {
   if (same) {
     lines.push(`✓ 插件已用同一把令牌（${mask(preset.key)}），无需操作。`)
     return { action: "noop", lines, cmds: [] }
+  }
+  // The plugin refuses a key with anything but visible ASCII in it (tokenOf:
+  // it would go out in a Cookie header), so logging one in would report a
+  // success that leaves every check-in saying "令牌内容无法识别".
+  // planToPreset has the same guard for the same reason; this direction was
+  // missing it, and a key with a zero-width character in it — invisible in
+  // every terminal and in this tool's own mask — went through.
+  if (!/^[\x21-\x7e]+$/.test(preset.key)) {
+    lines.push(`✗ 内置预设的 key 含空格、换行或非 ASCII 字符，插件发不出去，不登录。`)
+    lines.push(`  先修好内置那边的 key（magpie provider key ${PRESET} <key>）。`)
+    return { action: "refuse", lines, cmds: [] }
   }
   if (accounts.length === 0) {
     lines.push(`→ 将把内置预设（${show(preset.id)}）的令牌登录给插件：magpie plugin login ${ID}（令牌走 stdin）`)
@@ -444,14 +545,16 @@ export async function main({
   // hostile dependency's `magpie` would receive the token on stdin. The
   // binary must come from a known install location or --magpie.
   //
-  // A bare --magpie was the same hole from the other side: spawnSync resolves
-  // it through PATH, but exists("magpie") does not, so the write guard below
-  // saw "no binary" and skipped itself — and the token went to whatever the
-  // PATH answered. The name has to be a path.
-  if (args.magpie && !rooted(args.magpie, os)) {
-    log(`✗ --magpie 需要一个完整路径，不接受裸名（${show(args.magpie)}）。`)
-    log(`  裸名会按 PATH 解析：PATH 上第一个 magpie 会拿到令牌。用例如 macOS 的`)
-    log(`  /Applications/magpie.app/Contents/MacOS/magpie。`)
+  // A bare name was the same hole from the other side: spawnSync resolves it
+  // through PATH, but exists("magpie") does not, so the write guard below saw
+  // "no binary" and skipped itself — and the token went to whatever the PATH
+  // answered. A name with a path separator in it is not looked up on PATH by
+  // either (spawnSync resolves it against the working folder, as existsSync
+  // does), so "./magpie" and "bin/magpie" are paths a user named, and the
+  // portable magpie's own folder invites exactly that spelling.
+  if (args.magpie && !/[\\/]/.test(args.magpie)) {
+    log(`✗ --magpie 不接受裸名（${show(args.magpie)}）：它会按 PATH 解析，PATH 上第一个 magpie 会拿到令牌。`)
+    log(`  给一个路径，绝对或相对都行：/Applications/magpie.app/Contents/MacOS/magpie 或 ./magpie。`)
     return 1
   }
   const bin = args.magpie || findMagpieBin({ env, os, exists, home })

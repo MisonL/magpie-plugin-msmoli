@@ -70,6 +70,15 @@ Three invariants to keep when touching it:
   those. magpie's CLI has no `--dir`, so a write always lands in the binary's
   own folder: `--dir` and `--magpie` naming different folders is refused
   before anything runs, or the tool would read one magpie and write another.
+  Which folder "the binary's own" is follows magpie's own `appdir.go`
+  (`Resolve`, `Beside`, `shared`, `installed`), not a guess: the executable's
+  symlinks are followed first, a Mac app's folder is the one holding the
+  `.app`, an AppImage's is the one holding the `.AppImage`, and a `data`
+  folder in `/Applications`, the home folder, `Downloads`, `Desktop` or
+  `Documents` is magpie's only when it holds magpie's files and the installed
+  folder holds none (appdir's #989). A divergence here is not cosmetic: the
+  tool reads a folder magpie does not write, and the write lands in the one
+  it does.
 - **The token never appears in output — success or failure.** Long tokens show
   magpie's own mask (first four, `…`, last four); anything under 12 characters
   shows its length instead, since there would be no middle left to hide. The
