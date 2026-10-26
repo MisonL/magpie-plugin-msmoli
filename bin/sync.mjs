@@ -105,6 +105,41 @@ export function looksLikeMagpie(dir, exists = existsSync) {
   return ["providers.json", "plugins.json", "plugin-auth.json"].some((f) => exists(join(dir, f)))
 }
 
+// sameFolder says whether two spellings name one folder. Comparing the strings
+// refuses what a user really types: a shell completes a directory with its
+// trailing slash, "/private/tmp" and "/tmp" are the same folder on a Mac, and
+// "data/." is "data". Refusing those told a user their two arguments disagreed
+// when they did not.
+//
+// Resolved first (realpath follows symlinks and drops "." and ".."), then by
+// inode: the identity of a folder, which spelling cannot change. A volume that
+// reports ino 0 (exFAT, some SMB shares) has no identity to compare, so the
+// resolved strings decide there. A folder that does not exist resolves to ""
+// and is only equal to another such path by its resolved spelling — two
+// nonexistent folders are never taken for one another.
+export function sameFolder(a, b, real = realpathSync, stat = statSync) {
+  const norm = (p) => {
+    const s = String(p ?? "")
+    if (!s) return ""
+    try {
+      return real(s)
+    } catch {
+      return ""
+    }
+  }
+  const ra = norm(a)
+  const rb = norm(b)
+  if (ra && rb && ra === rb) return true
+  if (!ra || !rb) return false
+  try {
+    const sa = stat(ra)
+    const sb = stat(rb)
+    return sa.ino !== 0 && sa.ino === sb.ino && sa.dev === sb.dev
+  } catch {
+    return false
+  }
+}
+
 // rooted is magpie's own test (appdir/env.go): a set-but-relative
 // XDG_CONFIG_HOME is not honoured, it is ignored.
 const rooted = (p, os) =>
@@ -518,8 +553,10 @@ export async function main({
   if (!args.dryRun && args.dir && bin && exists(bin)) {
     const binDir = findConfigDir({ env, home, os, exists, binPath: bin })
     // "" is a mismatch too: the binary has no magpie folder of ours to write
-    // to, so it would make one — and that one is not the folder named.
-    if (binDir !== args.dir) {
+    // to, so it would make one — and that one is not the folder named. Compared
+    // by folder identity, not by string: a shell completes a directory with a
+    // trailing slash, and "/private/tmp/data" and "/tmp/data" are one folder.
+    if (!sameFolder(binDir, args.dir)) {
       log(`✗ --dir 与 --magpie 指向不同的配置目录，而写入只会落在 magpie 自己的那个。`)
       log(`  读的是：${show(args.dir)}`)
       log(`  magpie 会写到：${binDir ? show(binDir) : "它自己的默认目录（这里找不到现成的）"}`)

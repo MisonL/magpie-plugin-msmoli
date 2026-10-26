@@ -78,6 +78,10 @@ from that.
 `--dir` says where to *read*; magpie's CLI has no such flag, so a write always
 lands in the binary's own folder. Given both and they disagree, the tool stops
 before writing anything rather than reading one magpie and writing another.
+"Disagree" means the folders are different places, not that the strings differ:
+a shell completes a directory with a trailing slash, `/private/tmp` and `/tmp`
+are one folder on a Mac, and `data/.` is `data` — each names the binary's own
+folder and is allowed.
 
 It reads magpie's config but never writes it: the writes are magpie's own
 (`magpie plugin login`, `magpie plugin logout`, `magpie provider key`), and the

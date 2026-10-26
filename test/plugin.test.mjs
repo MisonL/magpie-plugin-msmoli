@@ -8,7 +8,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { MsmoliPlugin, windowOf } from "../index.mjs"
+import { MsmoliPlugin, testables } from "../index.mjs"
+
+const { windowOf } = testables
 
 // The check-in window reads its own config file, which the host would keep at
 // ~/.config/magpie/msmoli.json. Tests point it at a temp file so the suite
@@ -1262,6 +1264,34 @@ test("a spent budget sends no request at all", async () => {
 // 目标时刻是「日 + 账号」的哈希，端到端测 LAST 截断只在哈希恰好落进
 // 23:00 以后的那些日子才生效（实测约一半的日期会放过回归）。截断本身是
 // 纯函数，直接断言它。
+test("the module exports no bare function the host would take for a plugin", async () => {
+  // magpie's servers() takes every exported function as a plugin entry when
+  // `default` is a function (which it is here), calls it with the plugin input
+  // and reads hooks off the answer. A helper exported for the tests runs as a
+  // second plugin that way; today it answers an object with no hooks and
+  // nothing happens, but a throw from it is caught by the loader's per-plugin
+  // try/catch and the whole package is reported as failed to load. Helpers
+  // live on `testables`, which the loader skips because it is an object.
+  const mod = await import("../index.mjs")
+  // exactly as servers() builds its list, de-dup included: the named export
+  // `MsmoliPlugin` is the same function `default` is, and the Set keeps it
+  // from running twice
+  const seen = new Set()
+  const entries = []
+  for (const v of Object.values(mod)) {
+    if (seen.has(v)) continue
+    seen.add(v)
+    if (typeof v === "function") entries.push(v)
+  }
+  assert.deepEqual(
+    entries.map((f) => f.name),
+    ["MsmoliPlugin"],
+    `every exported function is run as a plugin entry; found ${entries.map((f) => f.name).join(", ")}`,
+  )
+  // and the one helper the tests need is still reachable
+  assert.equal(typeof testables.windowOf, "function")
+})
+
 test("windowOf caps the end at 23:00, whatever the configured end", () => {
   for (const end of ["23:59", "23:30", "23:01"]) {
     const w = windowOf({ checkinWindow: ["22:00", end] })
@@ -2087,6 +2117,62 @@ test("done reports the day's grant from before the trigger, not from a page that
   }
 })
 
+test("a day whose grants were reversed does not claim a negative credit", async () => {
+  // An EARN row can be a reversal (冲正), and a day netting below zero is a
+  // real state. magpie clamps `credit` itself (host.js's num: Math.max(0, v))
+  // but passes `message` through verbatim (checkin.go renders it under the
+  // card's row), so the card read "今日已领取 -50 魔粒": a claim of a negative
+  // amount is not a thing. The rows are still named; the amount stops at zero.
+  await withFetch(
+    {
+      "/api/v1/users/login/info": { body: { Code: 200, Data: { NickName: "alice" } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: {
+          success: true,
+          data: {
+            records: [
+              day({ rule_key: "daily_active", title: "注册并登录", total_amount: 200 }),
+              day({ rule_key: "daily_active", title: "冲正", total_amount: -250 }),
+            ],
+          },
+        },
+      },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "done")
+      assert.doesNotMatch(r.message, /-\d/, `the card must not say 今日已领取 -50: ${r.message}`)
+      assert.match(r.message, /冲正/, `the reversal is still named: ${r.message}`)
+      assert.equal(r.credit, 0, `a negative claim is not a claim: ${r.message}`)
+    },
+  )
+})
+
+test("a day that nets to a positive grant still reports it", async () => {
+  // the clamp must not swallow a partial reversal: 200 + (-50) is 150
+  await withFetch(
+    {
+      "/api/v1/users/login/info": { body: { Code: 200, Data: { NickName: "alice" } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: {
+          success: true,
+          data: {
+            records: [
+              day({ rule_key: "daily_active", title: "注册并登录", total_amount: 200 }),
+              day({ rule_key: "daily_active", title: "冲正", total_amount: -50 }),
+            ],
+          },
+        },
+      },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "done")
+      assert.equal(r.credit, 150, `the day's net grant: ${r.message}`)
+    },
+  )
+})
+
 test("a spent day with no grant today shows a bar that matches the numbers", async () => {
   // before the day's grant, spending comes out of what is left. used=0 next to
   // "今日用 348.5 / 领 0" says the bar did not move while the text says it did.
@@ -2453,6 +2539,49 @@ test("a balance with no data at all is a failure, not a card that says 0 left", 
       assert.ok(!u.windows, "no card is built from a body we did not understand")
     },
   )
+})
+
+test("a relative XDG_CONFIG_HOME is ignored, as magpie itself ignores it", async () => {
+  // magpie's appdir only honours a rooted XDG_CONFIG_HOME (env.go's rooted()).
+  // Joining a relative one read "./magpie/msmoli.json" against whatever folder
+  // the process happened to start in — a file magpie never keeps. The user's
+  // real window then did nothing, because the plugin read a different file.
+  const cwd = process.cwd()
+  const scratch = mkdtempSync(join(tmpdir(), "msmoli-relxdg-"))
+  const home = mkdtempSync(join(tmpdir(), "msmoli-relhome-"))
+  const saved = { env: process.env.MAGPIE_MSMOLI_CONFIG, xdg: process.env.XDG_CONFIG_HOME, home: process.env.HOME }
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    // a config file that would turn the window off, at the relative path
+    mkdirSync(join(scratch, "relative", "path", "magpie"), { recursive: true })
+    writeFileSync(join(scratch, "relative", "path", "magpie", "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    // and magpie's real folder, with the default window
+    mkdirSync(join(home, ".config", "magpie"), { recursive: true })
+    process.chdir(scratch)
+    process.env.XDG_CONFIG_HOME = join("relative", "path")
+    process.env.HOME = home
+    const hooks = await MsmoliPlugin({})
+    const realNow = Date.now
+    Date.now = () => Date.parse("2026-10-26T02:00:00+08:00") // 02:00, before any window
+    try {
+      const r = await hooks.auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      // the default window's deferral, not the relative file's "off" (which
+      // would have gone on to send a request)
+      assert.match(r.message, /后自动领取/, `a relative XDG must not be joined: ${r.message}`)
+    } finally {
+      Date.now = realNow
+    }
+  } finally {
+    process.chdir(cwd)
+    if (saved.env === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved.env
+    if (saved.xdg === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = saved.xdg
+    if (saved.home === undefined) delete process.env.HOME
+    else process.env.HOME = saved.home
+    rmSync(scratch, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
 })
 
 test("with no directory, the config comes from XDG_CONFIG_HOME, else the home folder", async () => {

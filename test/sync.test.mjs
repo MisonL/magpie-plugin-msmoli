@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
@@ -17,6 +17,7 @@ import {
   pluginAccounts,
   presetCandidates,
   readJson,
+  sameFolder,
 } from "../bin/sync.mjs"
 
 // 假令牌：形状对，但明显不是真的（README 里的样例也是这个形状）
@@ -1380,6 +1381,74 @@ test("a run that writes is stopped when --dir and --magpie disagree", async () =
   } finally {
     rmSync(real, { recursive: true, force: true })
     rmSync(fixture, { recursive: true, force: true })
+  }
+})
+
+test("one folder is one folder, however the shell spelled it", async () => {
+  // A shell completes a directory with its trailing slash, "/private/tmp" and
+  // "/tmp" are one folder on a Mac, and "data/." is "data". Comparing the two
+  // arguments as strings refused all of these, telling a user their arguments
+  // disagreed when they named the same place — and the refusal reads as if
+  // they had made a mistake.
+  const real = mkdtempSync(join(tmpdir(), "msmoli-same-"))
+  const link = `${real}-link`
+  try {
+    // a portable magpie: the binary and the data folder it owns
+    mkdirSync(join(real, "data"))
+    writeFileSync(join(real, "plugin-auth.json"), JSON.stringify({}))
+    writeFileSync(join(real, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(real, "magpie"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+    writeFileSync(join(real, "data", "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(real, "data", "plugin-auth.json"), JSON.stringify({}))
+    symlinkSync(join(real, "data"), link)
+    const bin = join(real, "magpie")
+    // the same folder, four spellings
+    for (const spelling of [join(real, "data"), join(real, "data") + "/", join(real, "data", "."), link]) {
+      const out = []
+      let spawned = false
+      const code = await main({
+        argv: ["--dir", spelling, "--to-plugin", "--magpie", bin],
+        env: {},
+        home: real,
+        log: (s) => out.push(s),
+        spawn: () => {
+          spawned = true
+          return { status: 0, stdout: "", stderr: "" }
+        },
+      })
+      assert.equal(spawned, true, `${spelling} names the binary's own folder and must be allowed`)
+      assert.doesNotMatch(out.join("\n"), /不同的配置目录/, `${spelling} is the same folder: ${out.join("\n")}`)
+    }
+  } finally {
+    rmSync(link, { force: true })
+    rmSync(real, { recursive: true, force: true })
+  }
+})
+
+test("two different folders are still two, and a missing one is not another's", () => {
+  const a = mkdtempSync(join(tmpdir(), "msmoli-a-"))
+  const b = mkdtempSync(join(tmpdir(), "msmoli-b-"))
+  try {
+    assert.equal(sameFolder(a, a), true)
+    assert.equal(sameFolder(a, b), false, "two real folders are not one")
+    // "" is what findConfigDir answers when the binary has no magpie folder
+    assert.equal(sameFolder("", a), false, "a folder magpie has not made is not the one named")
+    assert.equal(sameFolder(a, ""), false)
+    assert.equal(sameFolder("", ""), false, "two unknown folders are never taken for one another")
+    // two folders that do not exist are not the same place either
+    assert.equal(sameFolder(join(a, "nope"), join(b, "nope")), false)
+    assert.equal(sameFolder(join(a, "nope"), join(a, "nope")), false, "nothing to resolve is not a match")
+    // a stat that fails after both sides resolved (a folder removed between
+    // the read and the identity check, a permission wall) is not a match
+    assert.equal(
+      sameFolder(a, b, (p) => p, () => {
+        throw Object.assign(new Error("EACCES"), { code: "EACCES" })
+      }),
+      false,
+    )
+  } finally {
+    rmSync(a, { recursive: true, force: true })
+    rmSync(b, { recursive: true, force: true })
   }
 })
 

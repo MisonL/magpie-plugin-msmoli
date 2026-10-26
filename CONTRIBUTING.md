@@ -39,6 +39,19 @@ nothing carries, and the user's name would vanish from the card. `aliasOf` in
 `index.mjs` does the read; a test pins both halves (named → no write, unnamed →
 the nickname).
 
+## The third
+
+**Export no function except the plugin itself.** magpie's loader takes *every*
+function a module exports as a plugin entry when `default` is a function (which
+it is here): `servers()` in `host.js` walks `Object.values(mod)`, calls each one
+with the plugin input, and reads the hooks off the answer. A helper exported
+for a test therefore runs as a second plugin in every magpie the package is
+installed into. Today it answers an object with no hooks and nothing happens,
+but a throw from it is caught by the loader's per-plugin `try`/`catch`, which
+marks the whole package as failed to load. Pure helpers live on `testables`, an
+object, which the loader skips; `test/plugin.test.mjs` pins that list against
+the same de-dup the loader uses.
+
 ## The sync CLI
 
 `bin/sync.mjs` is the sync CLI the READMEs document (run it straight from

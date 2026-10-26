@@ -13,7 +13,7 @@
 
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { isAbsolute, join } from "node:path"
 
 const SITE = "https://modelscope.cn"
 const LOGIN_INFO = "/api/v1/users/login/info"
@@ -297,9 +297,14 @@ const CONFIG_ENV = "MAGPIE_MSMOLI_CONFIG"
 // ~/.config/magpie here would silently ignore the file on a portable magpie.
 function configPath(dir) {
   if (process.env[CONFIG_ENV]) return process.env[CONFIG_ENV]
-  const base = dir || (process.env.XDG_CONFIG_HOME
-    ? join(process.env.XDG_CONFIG_HOME, "magpie")
-    : join(homedir(), ".config", "magpie"))
+  // A set-but-relative XDG_CONFIG_HOME is ignored by magpie itself (appdir's
+  // rooted() in env.go), so joining it would read a file magpie never keeps:
+  // "./magpie/msmoli.json", resolved against whatever folder magpie happened
+  // to be started in. The user's real window then silently does nothing,
+  // because the plugin read a different file. Only an absolute one counts.
+  const xdg = process.env.XDG_CONFIG_HOME
+  const rooted = Boolean(xdg) && isAbsolute(xdg)
+  const base = dir || (rooted ? join(xdg, "magpie") : join(homedir(), ".config", "magpie"))
   return join(base, "msmoli.json")
 }
 
@@ -333,10 +338,16 @@ function minuteOf(text) {
 // before end) is not honoured, the documented default applying instead of a
 // window that would never come due.
 //
-// Exported for the test that pins the 23:00 cap: where a target lands is a
-// hash of the day, so an end-to-end assertion about it only bites on the days
-// the hash falls past 23:00 — the cap's regression would go green on the rest.
-export function windowOf(cfg) {
+// Kept out of the module's exports on purpose. magpie's plugin loader takes
+// *every* function a module exports as a plugin entry (host.js's servers():
+// with `default` a function, it iterates Object.values(mod)), calls it with
+// the plugin input, and reads the hooks off what comes back. An exported
+// helper is therefore run as a second plugin: today it answers an object with
+// no hooks and nothing happens, but a throw there is caught by the loader's
+// per-plugin try/catch and the whole package is listed as failed to load. It
+// is reachable for tests through `testables` below, which is an object and so
+// not a plugin entry.
+function windowOf(cfg) {
   const raw = cfg.checkinWindow
   if (raw === false) return null
   // "off" written as a string is the same intent as false; read as anything
@@ -699,7 +710,15 @@ export async function MsmoliPlugin(input) {
           if (claimed) {
             const credit = sumOf(beforeDaily)
             const which = beforeDaily.map((r) => cardText(r.title, token, 40)).filter(Boolean).join(" + ")
-            return { outcome: "done", credit, message: `今日已领取 ${credit} 魔粒` + (which ? `（${which}）` : "") }
+            // An EARN row can carry a reversal (冲正), and a day whose grants
+            // were reversed nets below zero. magpie clamps the numeric credit
+            // itself (host.js's num: Math.max(0, v)) but renders `message`
+            // verbatim, so "今日已领取 -50 魔粒" would reach the card: a claim of
+            // a negative amount is not a thing. The rows are still named — the
+            // user can see which ones — but the amount stops at zero, the way
+            // the usage card's limit already does.
+            const shown = Math.max(0, credit)
+            return { outcome: "done", credit: shown, message: `今日已领取 ${shown} 魔粒` + (which ? `（${which}）` : "") }
           }
 
           const gained = (rows) => {
@@ -858,5 +877,11 @@ export async function MsmoliPlugin(input) {
     },
   }
 }
+
+// testables is how the pure helpers the tests pin are reached without
+// exporting them as functions: magpie's loader treats every exported function
+// as a plugin entry (see windowOf above), but an object it skips. The tests
+// are the only reader.
+export const testables = { windowOf }
 
 export default MsmoliPlugin

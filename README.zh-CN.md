@@ -64,7 +64,10 @@ node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --t
 包发布到 npm 之后才能用——npm 12 默认禁用 `npx github:…`，别从那条路开始。
 
 `--dir` 只决定**读**哪里；magpie 的 CLI 没有这个参数，写入永远落在可执行文件自己的目录。
-两个都给了而指向不同的地方时，工具会在写之前停下，而不是读一个 magpie、写进另一个。
+两个都给了而指向**不同的地方**时，工具会在写之前停下，而不是读一个 magpie、写进另一个。
+「不同」指的是文件夹不同，不是两个字符串不同：shell 补全会给目录带上末尾斜杠，macOS 上
+`/private/tmp` 和 `/tmp` 是同一个文件夹，`data/.` 就是 `data`——这些都指向可执行文件自己的
+目录，都会被放行。
 
 - 它只读 magpie 的两个文件；写入交给 magpie 自己的 CLI（`plugin login`、
   `plugin logout`、`provider key`）完成，输出里不会出现令牌，失败信息也一样；
