@@ -743,7 +743,13 @@ export async function MsmoliPlugin(input) {
           if (!okOf(body)) return { outcome: "failed", message: `登录接口失败：${saidOf(body, token) || `HTTP ${res.status}`}` }
 
           const me = dataOf(body)
-          const candidate = text(me.NickName || me.Name || "", 40)
+          // A name is a string. Anything else — a number, an object, a list —
+          // would reach text() as "12345" or "[object Object]" and be written
+          // back as the account's name, and magpie's card would show that
+          // instead of the key's tail. NickName wins when it is a name; Name
+          // is the fallback it always was.
+          const named = (v) => (typeof v === "string" && v.trim() ? v : "")
+          const candidate = text(named(me.NickName) || named(me.Name), 40)
           const name = unusableName(candidate, token) ? "" : candidate
           rememberName(token, name)
           await rememberAccountName(client, token, name, auth, configDir)
@@ -852,16 +858,20 @@ export async function MsmoliPlugin(input) {
           let spent = 0
           let earliest = ""
           for (const r of recordsOf(tx.body)) {
+            // Only the two kinds that go into the card's numbers need an
+            // amount. A row of a kind we do not sum is not counted either
+            // way, and failing the whole card over its amount would turn a
+            // ledger that grew a new kind (an expiry row, say) into "no
+            // numbers at all" — the opposite of what the rule is for.
             if (onDay(r?.gmt_created, day)) {
-              const amount = amountOf(r)
               if (r?.type === "EARN") {
                 // 「领」是今天入账的全部，促销一类也算：卡片问的是「今天进来
                 // 多少、用掉多少」，把促销排除会让余额涨了 500 而卡片写「领 0」。
                 // 签到报的 credit 是另一个问题（这次签到领到多少），只算日常
                 // 额度，两个数不一样是各自的答案，不是同一个数的两种算法。
-                earned += amount
+                earned += amountOf(r)
               } else if (r?.type === "SPEND_CONFIRM") {
-                spent += amount
+                spent += amountOf(r)
               }
             }
             // The countdown ends when the soonest of the day's credits is

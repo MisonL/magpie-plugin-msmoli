@@ -2653,6 +2653,76 @@ test("a ledger amount we cannot read fails the read, it does not become 0", asyn
   )
 })
 
+test("a row of a kind the card does not count does not need an amount", async () => {
+  // The rule is that an amount we cannot read fails the read — for the rows
+  // whose amounts go into the card. A row of another kind (a ledger that
+  // grew an expiry row, say) is counted neither way, and failing the whole
+  // card over its amount would hide numbers that are fine.
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 100 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: {
+          success: true,
+          data: { records: [day({ total_amount: 200 }), { gmt_created: today, type: "EXPIRE" }] },
+        },
+      },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.error, undefined, `an uncounted kind must not fail the card: ${JSON.stringify(u)}`)
+      assert.equal(u.windows[0].limit, 200)
+    },
+  )
+})
+
+test("a nickname that is not a string is not written back", async () => {
+  // text() would make "12345" or "[object Object]" of it, and that string
+  // was written to plugin-auth.json as the account's name: the card then
+  // shows it instead of the key's tail, and an alias keyed by the label
+  // stops matching. A directory with no providers.json is a fresh install,
+  // where the write is allowed — so a missing write is this guard, not the
+  // alias one.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nick-"))
+  try {
+    for (const nick of [{ weird: 1 }, [1, 2], 12345, true]) {
+      const writes = []
+      await withFetch(
+        {
+          "/api/v1/users/login/info": { body: { Code: 200, Data: { NickName: nick } } },
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+            body: { success: true, data: { records: [day()] } },
+          },
+        },
+        async () => {
+          const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (b) => (writes.push(b.body), { data: true }) } } })
+          const r = await p.auth.checkin(async () => ({ type: "api", key: "ms-nickname-only-0001" }))
+          assert.equal(r.outcome, "done", JSON.stringify(nick))
+          assert.deepEqual(writes, [], `nickname ${JSON.stringify(nick)} must not be written back`)
+        },
+      )
+    }
+    // a string still is
+    const writes = []
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Data: { NickName: "alice" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+          body: { success: true, data: { records: [day()] } },
+        },
+      },
+      async () => {
+        const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (b) => (writes.push(b.body), { data: true }) } } })
+        await p.auth.checkin(async () => ({ type: "api", key: "ms-nickname-only-0001" }))
+        assert.equal(writes.length, 1)
+        assert.equal(writes[0].accountId, "alice")
+      },
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("a ledger whose data is a list of rows is refused, not read as empty", async () => {
   // `data: [...]` — the rows without their wrapper — parsed as an object and
   // then found no `records`, so it read as an empty day and the check-in
