@@ -18,7 +18,7 @@
 import { spawnSync } from "node:child_process"
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { homedir, platform } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, isAbsolute, join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 const ID = "msmoli"
@@ -45,13 +45,18 @@ const USAGE = `magpie-plugin-msmoli — 把 magpie 里已有的 ModelScope 令�
 
 function parseArgs(argv) {
   const out = { dir: "", magpie: "", from: "", to: "", force: false, dryRun: false, status: false, help: false }
+  // help wins over everything else on the line: `--help --nope` and
+  // `--nope --help` should show the page, not an error about --nope
+  if (argv.includes("-h") || argv.includes("--help")) return { ...out, help: true }
   // A flag is not a value. `--dir --dry-run` would otherwise take "--dry-run"
   // as the folder and then fail somewhere far from the mistake, and
   // `--dir ""` would read as "not given" and silently fall back to the
   // machine's own magpie — writing a credential to a target nobody named.
   const take = (i) => {
     const v = argv[i]
-    if (v === undefined || v === "" || v.startsWith("--")) throw new Error(`缺少值：${argv[i - 1]} 后面要跟一个参数`)
+    // A single "-h" or "-x" is a flag too: `--dir -h` must not put "-h" in
+    // the folder position and silently look there.
+    if (v === undefined || v === "" || v.startsWith("-")) throw new Error(`缺少值：${argv[i - 1]} 后面要跟一个参数`)
     return v
   }
   for (let i = 0; i < argv.length; i++) {
@@ -68,7 +73,6 @@ function parseArgs(argv) {
     else if (a === "--force") out.force = true
     else if (a === "--dry-run") out.dryRun = true
     else if (a === "--status") out.status = true
-    else if (a === "-h" || a === "--help") out.help = true
     else throw new Error(`不认识的参数：${a}（--help 看用法）`)
   }
   return out
@@ -101,6 +105,12 @@ export function looksLikeMagpie(dir, exists = existsSync) {
   return ["providers.json", "plugins.json", "plugin-auth.json"].some((f) => exists(join(dir, f)))
 }
 
+// rooted is magpie's own test (appdir/env.go): a set-but-relative
+// XDG_CONFIG_HOME is not honoured, it is ignored.
+const rooted = (p, os) =>
+  Boolean(p) &&
+  (isAbsolute(p) || (os === "win32" && (p.startsWith("\\") || p.startsWith("/"))))
+
 export function findConfigDir({ env = process.env, home = homedir(), os = platform(), exists = existsSync, binPath = "" } = {}) {
   if (binPath) {
     let base = dirname(binPath)
@@ -110,9 +120,14 @@ export function findConfigDir({ env = process.env, home = homedir(), os = platfo
     const data = join(base, "data")
     if (exists(join(base, ".portable")) || looksLikeMagpie(data, exists)) return data
   }
-  if (env.XDG_CONFIG_HOME) {
+  // A rooted XDG_CONFIG_HOME *is* where magpie keeps its files (appdir's
+  // installed()), whether or not it has written them yet: falling through to
+  // ~/.config there would read a folder magpie is not using — an old install
+  // left behind when XDG was set — and "read A, write B" is exactly what the
+  // --dir guard above exists to stop.
+  if (rooted(env.XDG_CONFIG_HOME, os)) {
     const d = join(env.XDG_CONFIG_HOME, "magpie")
-    if (looksLikeMagpie(d, exists)) return d
+    return looksLikeMagpie(d, exists) ? d : ""
   }
   const d = join(home, ".config", "magpie")
   return looksLikeMagpie(d, exists) ? d : ""
@@ -164,12 +179,17 @@ export const mask = (t) => {
 // 插件、或用 ms 令牌覆盖掉那个第三方 provider —— 两个方向都静默写错凭据。
 export function presetCandidates(providers, from = "") {
   const list = Array.isArray(providers) ? providers : []
-  const keyed = (p) => typeof p?.key === "string" && p.key
+  const keyed = (p) => typeof p?.key === "string" && p.key.trim()
   const ours = (p) => p?.id === PRESET || p?.preset === PRESET || hostOf(p?.chat) === HOST
-  if (from) return list.filter((p) => keyed(p) && p.id === from && ours(p))
+  // the key is trimmed where it is read: a token pasted with a trailing
+  // newline is the same token, and every comparison and every stdin below
+  // must see that one — the check-in plugin trims it too (tokenOf), so the
+  // two halves of the tool otherwise disagree about the same credential
+  const out = (ps) => ps.map((p) => ({ ...p, key: p.key.trim() }))
+  if (from) return out(list.filter((p) => keyed(p) && p.id === from && ours(p)))
   const byId = list.filter((p) => keyed(p) && (p.id === PRESET || p.preset === PRESET))
-  if (byId.length) return byId
-  return list.filter((p) => keyed(p) && hostOf(p.chat) === HOST)
+  if (byId.length) return out(byId)
+  return out(list.filter((p) => keyed(p) && hostOf(p.chat) === HOST))
 }
 
 // show is what goes to the terminal: a provider id or a file's path comes
@@ -190,10 +210,10 @@ function hostOf(chat) {
 
 // 插件侧的账号：主键 msmoli 与 msmoli#xxxxxx，按令牌区分。
 export function pluginAccounts(auth) {
-  const obj = auth && typeof auth === "object" ? auth : {}
+  const obj = auth && typeof auth === "object" && !Array.isArray(auth) ? auth : {}
   return Object.entries(obj)
     .filter(([k]) => k === ID || k.startsWith(`${ID}#`))
-    .map(([name, v]) => ({ name, token: typeof v?.key === "string" ? v.key : "" }))
+    .map(([name, v]) => ({ name, token: typeof v?.key === "string" ? v.key.trim() : "" }))
 }
 
 // { action: "noop" | "run" | "refuse", lines: string[], cmds: [{ argv, stdin? }] }
@@ -205,7 +225,7 @@ export function planToPlugin({ preset, accounts, force }) {
     return { action: "noop", lines, cmds: [] }
   }
   if (accounts.length === 0) {
-    lines.push(`→ 将把内置预设置（${show(preset.id)}）的令牌登录给插件：magpie plugin login ${ID}（令牌走 stdin）`)
+    lines.push(`→ 将把内置预设（${show(preset.id)}）的令牌登录给插件：magpie plugin login ${ID}（令牌走 stdin）`)
     return { action: "run", lines, cmds: [{ argv: ["plugin", "login", ID], stdin: `${preset.key}\n`, secret: preset.key }] }
   }
   lines.push(`  插件现有：${accounts.map((a) => `${show(a.name)}（${mask(a.token)}）`).join("、")}`)
@@ -254,6 +274,14 @@ export function planToPreset({ preset, accounts, force }) {
   }
   lines.push(`  插件主账号：${ID}（${mask(main.token)}）`)
   lines.push(`  内置预设：${show(preset.id)}，现有 key（${mask(preset.key)}）会被整条替换。`)
+  // The plugin refuses a key with anything but visible ASCII in it (tokenOf,
+  // it would go out in an Authorization header). Writing such a key into the
+  // preset would break chat requests while this tool reported success.
+  if (!/^[\x21-\x7e]+$/.test(main.token)) {
+    lines.push(`✗ 插件里那把令牌含空格、换行或非 ASCII 字符，发不出去，不写进内置预设。`)
+    lines.push(`  先修好插件那边的登录（magpie plugin login ${ID}）。`)
+    return { action: "refuse", lines, cmds: [] }
+  }
   // provider key 的第一个参数是 id：一个以 "-" 开头的 id 会被 magpie 的 CLI
   // 当成 flag（`provider key --help <token>` 只打印帮助、不写 key）。
   if (typeof preset.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(preset.id)) {
@@ -265,7 +293,11 @@ export function planToPreset({ preset, accounts, force }) {
     return { action: "refuse", lines, cmds: [] }
   }
   lines.push(`→ 将执行 magpie provider key ${show(preset.id)}（令牌是该命令的参数，进程列表里短暂可见）。`)
-  return { action: "run", lines, cmds: [{ argv: ["provider", "key", preset.id, main.token], secret: main.token }] }
+  // Both keys are secrets here, not just the new one: the command replaces
+  // the old key, and a host that says what it replaced ("cannot use key
+  // ms-… for modelscope") echoes a real credential of the user's. The
+  // --to-plugin logout step has kept the outgoing token for the same reason.
+  return { action: "run", lines, cmds: [{ argv: ["provider", "key", preset.id, main.token], secret: main.token, also: preset.key }] }
 }
 
 // ---- 执行
@@ -293,24 +325,39 @@ function scrub(out, ...secrets) {
 function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
   for (let i = 0; i < cmds.length; i++) {
     const { argv, stdin, secret } = cmds[i]
-    const secrets = [...new Set(cmds.slice(0, i + 1).map((c) => c.secret).filter(Boolean))]
+    // `also` is a secret this step handles without it being an argument: the
+    // preset key a `provider key` replaces, the token a `logout` signs out.
+    const secrets = [...new Set(cmds.slice(0, i + 1).flatMap((c) => [c.secret, c.also]).filter(Boolean))]
     hidden(argv, secret, log)
     if (dryRun) continue
-    const r = spawn(bin, argv, { input: stdin, encoding: "utf8", timeout })
+    // maxBuffer: magpie's own output is a few lines, but a verbose host must
+    // not turn into an ENOBUFS that reads as "the binary would not run" —
+    // the write may already have landed by then.
+    const r = spawn(bin, argv, { input: stdin, encoding: "utf8", timeout, maxBuffer: 16 * 1024 * 1024 })
     const out = `${r.stdout ?? ""}${r.stderr ?? ""}`.trim()
     if (r.error) {
+      const code = r.error.code ?? ""
       // A .cmd/.bat/.ps1 is a shell wrapper, not something spawnSync can hand
       // a stdin to (Windows answers EINVAL). Saying "use --magpie" to someone
       // who just used --magpie is no help: point at the .exe instead.
       const wrapper = /\.(cmd|bat|ps1)$/i.test(bin)
-      const hint = wrapper ? "（这是包装脚本，请指向同目录的 magpie.exe）" : "（用 --magpie 指定完整路径）"
-      const e = new Error(`跑不动 ${bin}：${r.error.message}${hint}`)
+      const hint =
+        code === "ENOBUFS"
+          ? "（magpie 的输出过大，没能读完；它可能已经执行完，用 --status 看一眼）"
+          : code === "ETIMEDOUT"
+            ? `（magpie 超过 ${Math.round(timeout / 1000)} 秒没有结束）`
+            : wrapper
+              ? "（这是包装脚本，请指向同目录的 magpie.exe）"
+              : "（用 --magpie 指定完整路径）"
+      const e = new Error(`跑不动 ${show(bin)}：${r.error.message}${hint}`)
       if (i > 0) e.recover = RECOVER
       throw e
     }
     if (r.status !== 0) {
+      // a child killed by a signal has status null; "退出码 null" tells nobody anything
+      const why = r.status === null && r.signal ? `被信号 ${r.signal} 终止` : `退出码 ${r.status}`
       const said = scrub(out, secret, ...secrets).split("\n").filter(Boolean).slice(-3).join("\n")
-      const e = new Error(`magpie 命令失败（退出码 ${r.status}）${said ? `：\n${said}` : ""}`)
+      const e = new Error(`magpie 命令失败（${why}）${said ? `：\n${said}` : ""}`)
       // 多步序列（--force 的 logout→login）中途失败：logout 已经发生了，
       // 用户此刻是被登出的状态。说清楚，并告诉他重跑即可续上——
       // 此时插件已无账号，重跑走的是全新登录那条路，不再需要 --force。
@@ -324,10 +371,12 @@ function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
 
 // unreadableAfter is the read-back's own failure: the file is there and does
 // not parse, which is not the same as a write that did not land. Saying
-// "check magpie is running" here sends the user after the wrong thing.
-function unreadableAfter(name, dir, want, log) {
+// "check magpie is running" here sends the user after the wrong thing. The
+// direction matters too: the preset side is checked on the providers page,
+// the plugin side on the plugins page.
+function unreadableAfter(name, dir, want, log, where = "插件列表") {
   log(`? 写入已执行，但回读时 ${show(join(dir, name))} 读不出来，无法确认（${mask(want)}）。`)
-  log(`  先确认 magpie 正常，再看一眼插件列表里那把 key 在不在。`)
+  log(`  先确认 magpie 正常，再看一眼${where}里那把 key 在不在。`)
   return 1
 }
 
@@ -360,7 +409,7 @@ export async function main({
     return 1
   }
   if (!looksLikeMagpie(dir, exists)) {
-    log(`✗ ${dir} 里没有 magpie 的配置文件（providers.json / plugins.json / plugin-auth.json）。`)
+    log(`✗ ${show(dir)} 里没有 magpie 的配置文件（providers.json / plugins.json / plugin-auth.json）。`)
     return 1
   }
   log(`magpie 配置目录：${show(dir)}`)
@@ -376,8 +425,23 @@ export async function main({
   }
   const providers = providersRaw?.providers
   const authRaw = readJson(join(dir, "plugin-auth.json"), exists)
-  if (authRaw === null) {
+  // A file that parses but is not the shape magpie writes (an array, a
+  // string, a bare null) is state we cannot read, not "nobody is signed in":
+  // a login over it would add a second account over one we could not see.
+  const shaped = (v) => v === undefined || (v !== null && typeof v === "object" && !Array.isArray(v))
+  if (authRaw === null || !shaped(authRaw)) {
     log(`✗ ${show(join(dir, "plugin-auth.json"))} 存在但读不出来（可能正在被写或已损坏）。`)
+    log(`  不猜它的内容：先确认 magpie 正常，或备份后重试。`)
+    return 1
+  }
+  if (providersRaw !== undefined && !shaped(providersRaw)) {
+    log(`✗ ${show(join(dir, "providers.json"))} 存在但不是 magpie 写的形状。`)
+    log(`  不猜它的内容：先确认 magpie 正常，或备份后重试。`)
+    return 1
+  }
+  // `providers` present but not a list is the same unreadable state one level in
+  if (providers !== undefined && providers !== null && !Array.isArray(providers)) {
+    log(`✗ ${show(join(dir, "providers.json"))} 的 providers 不是列表。`)
     log(`  不猜它的内容：先确认 magpie 正常，或备份后重试。`)
     return 1
   }
@@ -388,7 +452,15 @@ export async function main({
   log(`  签到插件 msmoli：${accounts.length ? accounts.map((a) => `${show(a.name)}（${mask(a.token)}）`).join("、") : "未登录"}`)
 
   if (cands.length > 1) {
-    log(`✗ 内置侧有 ${cands.length} 个候选（${cands.map((p) => show(p.id)).join("、")}），不确定用哪个。用 --from <id> 指定。`)
+    // --from matches by id, so two providers sharing one id leave it no way
+    // to pick: say that rather than telling the user to use --from again.
+    const ids = new Set(cands.map((p) => p?.id))
+    log(`✗ 内置侧有 ${cands.length} 个候选（${cands.map((p) => show(p.id)).join("、")}），不确定用哪个。`)
+    if (ids.size === 1) {
+      log(`  它们用的是同一个 id（${show(cands[0]?.id)}），--from 也分不开；请在 magpie 里删掉多余的那个 provider。`)
+    } else {
+      log(`  用 --from <id> 指定。`)
+    }
     return 1
   }
   const preset = cands[0] ?? null
@@ -396,8 +468,16 @@ export async function main({
   // 但这里先统一拦住，免得 null 一路传到 plan 里崩栈
   if (!preset) {
     if (args.from) {
-      log(`✗ 内置侧没有 id 为 "${show(args.from)}" 的 provider。`)
-      log(`  用 --status 看现有的，或先 magpie provider add ${show(args.from)} <key>。`)
+      // the provider may well exist and simply not be one of ours: saying
+      // "there is no provider by that id" sends the user to re-add it
+      const any = (Array.isArray(providers) ? providers : []).filter((p) => p?.id === args.from)
+      if (any.length) {
+        log(`✗ "${show(args.from)}" 在，但它不是 ModelScope：chat 不指向 ${HOST}，id/preset 也不是 ${PRESET}。`)
+        log(`  这个工具只同步内置的 ModelScope 预设与插件登录态之间的令牌。`)
+      } else {
+        log(`✗ 内置侧没有 id 为 "${show(args.from)}" 的 provider。`)
+        log(`  用 --status 看现有的，或先 magpie provider add ${show(args.from)} <key>。`)
+      }
     } else {
       log(`✗ 内置侧没有带 key 的 ModelScope 预设。`)
       log(`  先在 magpie 的「供应商」页添加 ModelScope，或 magpie provider add ${PRESET} <key>。`)
@@ -418,6 +498,7 @@ export async function main({
   // 不带 --to-* 时只报计划：裸跑 npx 不该静默写入一个凭据
   if (!args.to) {
     log(`(要执行请显式指定方向：--to-plugin 或 --to-preset)`)
+    if (args.dryRun) log(`(--dry-run：未执行)`)
     return 0
   }
   // --dry-run spawns nothing, so it must not be gated on finding a binary:
@@ -427,6 +508,24 @@ export async function main({
     log(`✗ 没找到 magpie 可执行文件（找过各平台的安装位置）。`)
     log(`  用 --magpie <路径> 指定，例如 macOS 的 /Applications/magpie.app/Contents/MacOS/magpie。`)
     return 1
+  }
+  // --dir says where to read; the write goes wherever the binary's own config
+  // is, and magpie's CLI takes no --dir. Given both, the two must be the same
+  // folder: reading a fixture while writing the real config is how a rehearsal
+  // came to sign a test token into the user's own magpie. Only a run that
+  // writes is stopped here, and only a binary that is there can write —
+  // --status and --dry-run are reads.
+  if (!args.dryRun && args.dir && bin && exists(bin)) {
+    const binDir = findConfigDir({ env, home, os, exists, binPath: bin })
+    // "" is a mismatch too: the binary has no magpie folder of ours to write
+    // to, so it would make one — and that one is not the folder named.
+    if (binDir !== args.dir) {
+      log(`✗ --dir 与 --magpie 指向不同的配置目录，而写入只会落在 magpie 自己的那个。`)
+      log(`  读的是：${show(args.dir)}`)
+      log(`  magpie 会写到：${binDir ? show(binDir) : "它自己的默认目录（这里找不到现成的）"}`)
+      log(`  magpie 的命令行没有 --dir。两处用同一个目录，或去掉 --magpie 让它自动探测。`)
+      return 1
+    }
   }
   try {
     run(plan.cmds, bin, { dryRun: args.dryRun, log, spawn })
@@ -447,7 +546,7 @@ export async function main({
   if (want) {
     if (args.to === "preset") {
       const raw = readJson(join(dir, "providers.json"), exists)
-      if (raw === null) return unreadableAfter("providers.json", dir, want, log)
+      if (raw === null) return unreadableAfter("providers.json", dir, want, log, "供应商列表")
       const after = presetCandidates(raw?.providers, preset.id)
       if (!after.some((p) => p.key === want)) {
         log(`✗ 写入后回读没找到目标 key（${mask(want)}）——检查 magpie 是否在正常运行。`)
@@ -506,10 +605,16 @@ export function isMain(entry = process.argv[1], self = import.meta.url, stat = s
 }
 
 if (isMain()) {
+  // process.exit() while stdout is a pipe drops whatever is still buffered:
+  // a long plan or a big `--status` list would lose its tail — including the
+  // ✓ line — and still exit 0. Setting the exit code lets the loop drain the
+  // writes first. Nothing here keeps the event loop alive on its own.
   main()
-    .then((code) => process.exit(code))
+    .then((code) => {
+      process.exitCode = code
+    })
     .catch((e) => {
       process.stderr.write(`magpie-plugin-msmoli: ${e?.message ?? e}\n`)
-      process.exit(1)
+      process.exitCode = 1
     })
 }

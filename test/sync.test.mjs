@@ -1260,3 +1260,239 @@ test("no config anywhere is told apart from a wrong --dir", () => {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ---- the review's findings, pinned
+
+test("the preset direction keeps the replaced key out of a failure's output", async () => {
+  // `provider key` replaces the preset's key; a host that says what it
+  // replaced ("cannot use key ms-… for modelscope") echoes a real credential.
+  // --to-plugin's logout step has always kept its outgoing token a secret;
+  // the preset direction did not, and one of the two keys is enough to leak.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-oldkey-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-preset", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 9, stdout: "", stderr: `cannot replace key ${A} for modelscope` }),
+    })
+    assert.equal(code, 1)
+    const text = out.join("\n")
+    assert.ok(!text.includes(A), `the replaced key reached the terminal: ${text}`)
+    assert.match(text, /ms-a…5555/, "the masked key stands in for it")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a token pasted with a trailing newline is masked and read back as the same token", async () => {
+  // the check-in plugin trims the key (tokenOf), so a key written with a
+  // newline is the same credential to it. The tool compared and scrubbed the
+  // raw string: the host echoed the trimmed one, scrub missed it, and the
+  // read-back compared the stored trimmed token against the untrimmed want —
+  // a write that landed read as a failure.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-trim-"))
+  const key = `${A}\n`
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", key }] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    assert.equal(presetCandidates(JSON.parse(readFileSync(join(dir, "providers.json"), "utf8")).providers)[0].key, A, "the key is trimmed where it is read")
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        // what magpie does: trim what it read, save it, say so on a failure
+        writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+        return { status: 0, stdout: `signed in as ${A}`, stderr: "" }
+      },
+    })
+    assert.equal(code, 0, `a write that landed must read back: ${out.join("\n")}`)
+    assert.ok(!out.join("\n").includes(A), "the token never reaches the terminal")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a plugin-auth.json of the wrong shape is not 'nobody signed in'", async () => {
+  // an array, a string or a bare null parses fine and says nothing about the
+  // accounts magpie has: login over it would add a second account over one we
+  // could not see. The same goes for providers.json one level in.
+  for (const [file, body] of [
+    ["plugin-auth.json", "[]"],
+    ["plugin-auth.json", '"hello"'],
+    ["providers.json", "[]"],
+    ["providers.json", '{"providers":{}}'],
+  ]) {
+    const dir = mkdtempSync(join(tmpdir(), "msmoli-shape-"))
+    try {
+      writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+      writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+      writeFileSync(join(dir, file), body)
+      const spawned = []
+      const out = []
+      const code = await main({
+        argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+        log: (s) => out.push(s),
+        spawn: (_b, a) => {
+          spawned.push(a.join(" "))
+          return { status: 0, stdout: "", stderr: "" }
+        },
+      })
+      assert.equal(code, 1, `${file} = ${body} must be refused`)
+      assert.deepEqual(spawned, [], `${file} = ${body} must not reach a login`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test("a run that writes is stopped when --dir and --magpie disagree", async () => {
+  // magpie's CLI has no --dir: the write lands in the binary's own config.
+  // Reading a fixture while writing the real magpie is how a rehearsal signed
+  // a test token into the user's own plugin-auth.json.
+  const real = mkdtempSync(join(tmpdir(), "msmoli-binown-"))
+  const fixture = mkdtempSync(join(tmpdir(), "msmoli-fixture-"))
+  try {
+    writeFileSync(join(real, "plugin-auth.json"), JSON.stringify({}))
+    writeFileSync(join(real, "magpie"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+    writeFileSync(join(fixture, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(fixture, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    let spawned = false
+    const code = await main({
+      argv: ["--dir", fixture, "--to-plugin", "--magpie", join(real, "magpie")],
+      env: {},
+      home: real,
+      log: (s) => out.push(s),
+      spawn: () => {
+        spawned = true
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1)
+    assert.equal(spawned, false, "nothing may be written to a folder the user did not name")
+    const text = out.join("\n")
+    assert.match(text, /不同的配置目录/)
+    assert.match(text, /--dir/)
+  } finally {
+    rmSync(real, { recursive: true, force: true })
+    rmSync(fixture, { recursive: true, force: true })
+  }
+})
+
+test("a child killed by a signal is not reported as an exit code of null", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-sig-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: null, signal: "SIGKILL", stdout: "", stderr: "" }),
+    })
+    assert.equal(code, 1)
+    const text = out.join("\n")
+    assert.match(text, /SIGKILL/, `should name the signal: ${text}`)
+    assert.doesNotMatch(text, /退出码 null/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("an output too large for the buffer is not 'the binary would not run'", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-enobufs-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const err = Object.assign(new Error("spawnSync /x ENOBUFS"), { code: "ENOBUFS" })
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ error: err, status: null, stdout: "", stderr: "" }),
+    })
+    assert.equal(code, 1)
+    const text = out.join("\n")
+    assert.match(text, /输出过大/, `should say the output was too large: ${text}`)
+    assert.doesNotMatch(text, /用 --magpie 指定完整路径/, "not advice they already followed")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("--to-preset refuses a token the plugin itself could not send", async () => {
+  // tokenOf refuses a key with a space in it: it would go out in an
+  // Authorization header. Writing it into the preset would break chat while
+  // the tool reported success.
+  const bad = "ms-bbbb1111-cccc-2222-ddd d-333344445555"
+  const plan = planToPreset({ preset: presetOf(A), accounts: [{ name: "msmoli", token: bad }], force: true })
+  assert.equal(plan.action, "refuse")
+  assert.deepEqual(plan.cmds, [])
+})
+
+test("--help wins over an argument it does not know", () => {
+  for (const argv of [["--help", "--nope"], ["--nope", "--help"]]) {
+    const r = spawnSync(process.execPath, [bin, ...argv], { encoding: "utf8", timeout: 30_000 })
+    assert.equal(r.status, 0, `${argv.join(" ")} should print the page`)
+    assert.match(r.stdout, /用法/, `argv ${argv.join(" ")} must show usage`)
+  }
+})
+
+test("a flag is not a value, for single dashes too", () => {
+  // `--dir -x` must not look in a folder named "-x"; -h anywhere means help
+  const r = spawnSync(process.execPath, [bin, "--dir", "-x"], { encoding: "utf8", timeout: 30_000 })
+  assert.notEqual(r.status, 0)
+  assert.match(`${r.stdout}${r.stderr}`, /缺少值/)
+  const h = spawnSync(process.execPath, [bin, "--dir", "-h"], { encoding: "utf8", timeout: 30_000 })
+  assert.equal(h.status, 0)
+  assert.match(h.stdout, /用法/, "-h still means help")
+})
+
+test("a long --status list through a pipe arrives whole, not cut at the buffer", () => {
+  // process.exit() while stdout is a pipe drops what is still buffered: the
+  // tool printed ~130 KB for 4000 accounts and delivered 122993 of 246197
+  // bytes, tail (including the ✓ line) gone, exit 0. The exit code is set
+  // instead, so the writes drain first.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-pipe-"))
+  try {
+    const accounts = {}
+    for (let i = 0; i < 4000; i++) accounts[`msmoli#${i}`] = { type: "api", key: `ms-key-${String(i).padStart(20, "0")}` }
+    // the main account holds the preset's key, so the plan is a noop and the
+    // run exits 0 — the long list is what is under test
+    accounts.msmoli = { type: "api", key: A }
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify(accounts))
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    const r = spawnSync(process.execPath, [bin, "--dir", dir, "--status"], { encoding: "utf8", timeout: 120_000, maxBuffer: 64 * 1024 * 1024 })
+    assert.equal(r.status, 0)
+    // the last account's row is the tail that used to be dropped
+    assert.match(r.stdout, /msmoli#3999/, "the last account's row must arrive")
+    // the tail the old code dropped: the plan's own last line
+    assert.match(r.stdout.trim().split("\n").at(-1), /以上是计划|无需操作|请显式指定方向/, `the report was cut at the pipe buffer: ${r.stdout.length} bytes`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a rooted XDG_CONFIG_HOME is magpie's folder even before magpie writes into it", () => {
+  // magpie keeps its files under $XDG_CONFIG_HOME/magpie whenever that is set
+  // and rooted (appdir's installed()). Falling through to ~/.config when the
+  // XDG folder is empty reads a folder magpie is not using, and the tool then
+  // writes somewhere other than where it read.
+  const xdg = pathToFileURL("/xdg").pathname.replace(/\/$/, "")
+  const homeBase = pathToFileURL("/h").pathname.replace(/\/$/, "")
+  const old = new Set([join(homeBase, ".config", "magpie", "providers.json")])
+  assert.equal(
+    findConfigDir({ env: { XDG_CONFIG_HOME: xdg }, home: homeBase, os: "linux", exists: (p) => old.has(p) }),
+    "",
+    "an old ~/.config must not stand in for the folder magpie uses",
+  )
+  // a relative one is not honoured, exactly as magpie's own rooted() says
+  assert.equal(
+    findConfigDir({ env: { XDG_CONFIG_HOME: "rel" }, home: homeBase, os: "linux", exists: (p) => old.has(p) }),
+    join(homeBase, ".config", "magpie"),
+  )
+})

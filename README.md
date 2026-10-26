@@ -75,6 +75,10 @@ folder the executable sits in. `npx magpie-plugin-msmoli` will work once the
 package is on npm — npm 12 blocks `npx github:…` by default, so don't start
 from that.
 
+`--dir` says where to *read*; magpie's CLI has no such flag, so a write always
+lands in the binary's own folder. Given both and they disagree, the tool stops
+before writing anything rather than reading one magpie and writing another.
+
 It reads magpie's config but never writes it: the writes are magpie's own
 (`magpie plugin login`, `magpie plugin logout`, `magpie provider key`), and the
 token is masked in everything it prints, failures included. When the plugin
@@ -127,7 +131,7 @@ Four outcomes follow:
 | Outcome | Meaning |
 |---|---|
 | `done` | already claimed today, with the day's total |
-| `claimed` | this run claimed it, with the amount |
+| `claimed` | this run claimed it, with the amount — a grant the ledger did not already show, so a row that was there before the touch is never counted as this run's |
 | `inactive` | the sign-in went through but nothing was granted |
 | `failed` | nothing was claimed — including "not yet time", explained below |
 
@@ -330,11 +334,21 @@ Asks that arrive before the window open send nothing at all.
 The usage read makes two requests and never touches the sign-in endpoint, so the
 menu bar's polling cannot turn into check-ins.
 - Every request gives up after 8 seconds, and a response body is read to at most
-256 KiB; neither can hold the host or grow without bound. A whole check-in
-gives up after 25 seconds and a whole usage read after 18, because magpie runs
-every provider's check-ins under one two-minute budget and asks accounts one
-at a time — a hook cut short answers `failed`, which the host retries in half
-an hour, and that retry reads the ledger before claiming, so nothing is lost.
+256 KiB; neither can hold the host or grow without bound. The timeout covers the
+body as well as the request: a proxy that stops mid-reply is cut at the same
+8 seconds, and says so rather than passing the runtime's own word for it
+through (`terminated` on Node, a sentence about `verbose: true` on Bun). A whole
+check-in gives up after 25 seconds and a whole usage read after 18, because
+magpie runs every provider's check-ins under one two-minute budget and asks
+accounts one at a time — a hook cut short answers `failed`, which the host
+retries in half an hour, and that retry reads the ledger before claiming, so
+nothing is lost.
+- **A body it does not understand fails; it never reads as zero.** No `data`, a
+`data` that is a list rather than an object, a balance with no
+`available_balance` or one that is not a number — each is a failure with the
+reason, because "0 魔粒可用" is a definite answer that would be false. The same
+goes for the server's own text: a message or a grant's title that contains the
+token has the token masked before it reaches the card or magpie's log.
 - `MAGPIE_MSMOLI_CONFIG` overrides the config file's path. It exists so the test
   suite never touches a real file; it works in production too.
 - The other 170 魔粒 a day come from liking 10 items (20), posting AIGC works

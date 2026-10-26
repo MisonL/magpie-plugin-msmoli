@@ -54,13 +54,20 @@ Three invariants to keep when touching it:
   goes through magpie's own CLI (`magpie plugin login`, `magpie provider key`),
   which owns the locking, the `.bak` generations and the change events. A tool
   that edits `plugin-auth.json` behind a running magpie races it and misses
-  those.
+  those. magpie's CLI has no `--dir`, so a write always lands in the binary's
+  own folder: `--dir` and `--magpie` naming different folders is refused
+  before anything runs, or the tool would read one magpie and write another.
 - **The token never appears in output — success or failure.** Long tokens show
   magpie's own mask (first four, `…`, last four); anything under 12 characters
   shows its length instead, since there would be no middle left to hide. The
   failure path scrubs a child command's output too: that is the path most
-  likely to echo the key back. `test/sync.test.mjs` asserts no plan line
-  contains a whole token, and that a failing command's stderr doesn't either.
+  likely to echo the key back. Every key a command touches is a secret, not
+  just the one in its arguments — `--to-preset` replaces the preset's key, and
+  a host saying what it replaced names a real credential (`also` on the
+  command). A token is trimmed where it is read, so the mask, the scrub and
+  the read-back all see the same string the plugin will. `test/sync.test.mjs`
+  asserts no plan line contains a whole token, and that a failing command's
+  stderr doesn't either.
 - **It never signs the user into a second account by accident.** The host keys
   accounts by `accountId`, falling back to the token only when neither side has
   one: a plain api sign-in with the same token again is idempotent, but once a
@@ -135,6 +142,13 @@ package's `opencode-plugin` and `magpie-plugin` keywords are what put it there.
   its usage window reads as used up.
 - **`used` is not capped at 100.** magpie reads a value above 100 as overspent,
   which is what it is.
+- **A body we do not understand fails; it never becomes a zero.** No `data`, a
+  `data` that is a list, a balance with no `available_balance` or one that is
+  not a number: each is a failure with its reason. Reading any of them as 0 is
+  a definite answer that would be false, and `inactive` from an empty ledger
+  settles the day. The same rule covers server text: a message or a grant's
+  title is masked before it reaches the card or the log, and a nickname that is
+  the token — or its front, after the cut to 40 — is not written back.
 - **ModelScope's times are parsed as Beijing time.** They carry no zone, and
   `new Date()` would read them in the host's own zone.
 - **Before the check-in window's moment, the hook answers `failed`.** magpie

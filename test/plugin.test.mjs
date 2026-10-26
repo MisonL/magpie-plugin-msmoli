@@ -385,11 +385,23 @@ test("usage without a sign-in says so, as an error and not a rejection", async (
   assert.equal(r.signIn, "", "a plain failure does not mark the sign-in expired")
 })
 
+// withMockTimers guards the three tests that move the clock. t.mock.timers
+// exists from node 18.19 and 20.4; the shipped code does not need it, but a
+// user on an older patch would see these three go red on a tree that works,
+// which reads as a broken plugin. Skipped out loud, the way sync.test.mjs
+// skips a platform without symlinks — the reason shows in the run.
+const withMockTimers = (t) => {
+  if (t.mock?.timers?.enable) return true
+  t.skip("t.mock.timers needs node 18.19+ or 20.4+")
+  return false
+}
+
 test("a whole check-in gives up at its own budget, not per request", { timeout: 8000 }, async (t) => {
   // magpie runs every provider's check-ins under one two-minute context, one
   // account at a time: four 8-second requests inside one hook would take 32s
   // and starve the accounts after it. The hook's own 25s budget is what keeps
   // one slow account from doing that.
+  if (!withMockTimers(t)) return
   const real = globalThis.fetch
   try {
     t.mock.timers.enable({ apis: ["setTimeout"] })
@@ -428,10 +440,11 @@ test("a whole check-in gives up at its own budget, not per request", { timeout: 
 })
 
 test("a request that hangs gives up instead of holding the host", { timeout: 8000 }, async (t) => {
+  if (!withMockTimers(t)) return
   const real = globalThis.fetch
-  // Node 20.4 took the object form ({ apis: […] }); 18 only knows the array
-  // form, and the array form on 20+ mocks setImmediate too, which the wait
-  // below needs. Try the newer shape, fall back for 18.
+  // Node 20.4 took the object form ({ apis: […] }); 18.19 and 20.0–20.3 only
+  // know the array form, and the array form on 20+ mocks setImmediate too,
+  // which the wait below needs. Try the newer shape, fall back for the older.
   try {
     t.mock.timers.enable({ apis: ["setTimeout"] })
   } catch {
@@ -1153,12 +1166,25 @@ test("a nickname that is the token itself is not written back", async () => {
 })
 
 test("a non-finite amount from the server never reaches the card", async () => {
-  // Number("1e400") is Infinity: it must not show as "Infinity 魔粒可用" or
-  // make a window's used/limit non-finite
-  const body = { success: true, data: { records: [day({ total_amount: "1e400" })] } }
+  // Number("1e400") is Infinity: a balance we cannot read is not a balance,
+  // and it must not show as "Infinity 魔粒可用" or "0 魔粒可用" either
   await withFetch(
     {
       "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: "1e400" } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.match(u.error ?? "", /不是数字|没有 available_balance/, `should refuse the balance: ${u.error}`)
+      assert.ok(!u.windows, "no card is built from a balance we did not understand")
+    },
+  )
+  // a ledger row's amount is summed, and an unreadable one must not turn the
+  // card into Infinity/NaN
+  const body = { success: true, data: { records: [day({ total_amount: "1e400" }), spend("1e400")] } }
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
       "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body },
     },
     async () => {
@@ -1262,9 +1288,16 @@ test("windowOf reads the shapes a user writes, and refuses the ones it cannot", 
   for (const off of [false, "off", "OFF", "false", "no"]) {
     assert.equal(windowOf({ checkinWindow: off }), null, `${JSON.stringify(off)} turns the window off`)
   }
-  for (const bad of [["10:00", "08:30"], ["24:00", "25:00"], ["08:60", "10:00"], ["8:30", "10:00"], ["nope", "10:00"], [], null, 7]) {
+  // each of these must come back as the default — and each must *not* be a
+  // window of its own. ["8:30","10:00"] used to sit in this list, but one-digit
+  // hours are read (minuteOf takes \d{1,2}), so it parses to exactly the
+  // default and the assertion could not fail either way.
+  for (const bad of [["10:00", "08:30"], ["24:00", "25:00"], ["08:60", "10:00"], ["nope", "10:00"], [], null, 7]) {
     assert.deepEqual(windowOf({ checkinWindow: bad }), { start: 8 * 60 + 30, end: 10 * 60 }, `${JSON.stringify(bad)} falls back to the default`)
+    assert.notDeepEqual(windowOf({ checkinWindow: bad }), { start: 13 * 60, end: 14 * 60 }, `${JSON.stringify(bad)} is not a window of its own`)
   }
+  // a one-digit hour is a clock time, and reads as one
+  assert.deepEqual(windowOf({ checkinWindow: ["8:30", "10:00"] }), { start: 8 * 60 + 30, end: 10 * 60 })
 })
 
 test("a write-back failure is retried later, and never logs the token", async () => {
@@ -1376,8 +1409,11 @@ test("a nickname that is a prototype key is not written back", async () => {
 })
 
 test("an alias kept on a plugin-left provider still counts as the user's name", async () => {
-  // magpie keeps removed plugins' providers under pluginLeft; an account
-  // installed to the plugin sidebar has its alias there
+  // magpie keeps removed plugins' providers under pluginLeft, each record
+  // {package, provider: {…one Provider…}} (plugin_left.go's LeftRecord) — the
+  // provider is a single object, not a list. Read as a list the record was
+  // skipped and the user's alias went unseen, so the nickname was written
+  // over it.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-left-"))
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const token = "ms-left-0000-0000-0000-000000000015"
@@ -1385,7 +1421,12 @@ test("an alias kept on a plugin-left provider still counts as the user's name", 
     join(dir, "providers.json"),
     JSON.stringify({
       providers: [{ id: "openai" }],
-      pluginLeft: [{ plugin: "msmoli", provider: [{ id: "msmoli", accountNames: { "api key …0015": "主号" } }] }],
+      pluginLeft: [
+        {
+          package: "github:MisonL/magpie-plugin-msmoli",
+          provider: { id: "msmoli", accountNames: { "api key …0015": "主号" } },
+        },
+      ],
     }),
   )
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
@@ -1892,10 +1933,12 @@ test("a host log that throws synchronously does not reject the usage hook", asyn
     status: 200,
     headers: { get: () => null },
     body: null,
-    text: async () =>
-      String(url).includes("login/info")
-        ? JSON.stringify({ Code: 200, Data: { NickName: "Mison" } })
-        : JSON.stringify({ success: true, data: { records: [] } }),
+    text: async () => {
+      const at = String(url)
+      if (at.includes("login/info")) return JSON.stringify({ Code: 200, Data: { NickName: "Mison" } })
+      if (at.includes("balance")) return JSON.stringify({ success: true, data: { available_balance: 5 } })
+      return JSON.stringify({ success: true, data: { records: [] } })
+    },
   })
   try {
     const client = {
@@ -2109,6 +2152,294 @@ test("a network failure says what happened instead of the bare English", async (
   } finally {
     globalThis.fetch = real
   }
+})
+
+test("a body that dies half-read is told in the user's words, not the runtime's", async () => {
+  // The fetch itself answered — headers and a start of a body — so the
+  // request did not fail where the translation lives. A captive-portal proxy
+  // or a server that drops the socket mid-reply raises from the read instead,
+  // and each runtime words that its own way: Node gives "terminated", Bun a
+  // whole sentence about verbose: true and fetch(). Measured against a real
+  // socket on both.
+  const real = globalThis.fetch
+  globalThis.fetch = async () => ({
+    status: 200,
+    headers: { get: () => null },
+    body: {
+      getReader: () => ({
+        read: async () => {
+          throw new TypeError("terminated")
+        },
+        releaseLock() {},
+        cancel: async () => {},
+      }),
+    },
+    text: async () => {
+      throw new TypeError("terminated")
+    },
+  })
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+    assert.doesNotMatch(u.error, /^terminated$/, `the raw runtime string reached the card: ${u.error}`)
+    assert.doesNotMatch(u.error, /verbose: true/, `a runtime's own advice reached the card: ${u.error}`)
+    assert.match(u.error, /网络|代理|重定向/, `should say what it may be, got: ${u.error}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a body that hangs half-read gives up at its own timeout, and says so", { timeout: 8000 }, async (t) => {
+  // the request's timer is armed for the whole call, but the translation that
+  // reads it sat around fetch alone: a reply that stops after the headers is
+  // cut by that same timer, from the read, and would reach the card as the
+  // bare word the abort was given ("timeout").
+  if (!withMockTimers(t)) return
+  const real = globalThis.fetch
+  try {
+    t.mock.timers.enable({ apis: ["setTimeout"] })
+  } catch {
+    t.mock.timers.enable(["setTimeout"])
+  }
+  globalThis.fetch = async (url, init) => ({
+    status: 200,
+    headers: { get: () => null },
+    body: {
+      getReader: () => ({
+        read: () =>
+          new Promise((_, reject) => {
+            init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true })
+          }),
+        releaseLock() {},
+        cancel: async () => {},
+      }),
+    },
+  })
+  try {
+    const pending = auth.usage(async () => ({ type: "api", key: "ms-test" }))
+    // let the request arm its timer before the clock is moved
+    await new Promise((resolve) => setImmediate(resolve))
+    t.mock.timers.tick(8001)
+    const u = await pending
+    assert.match(u.error, /请求超时/, `a hung body should name the timeout, got: ${u.error}`)
+    assert.match(u.error, /8 秒/, `and its length, got: ${u.error}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a server that echoes the token back does not put it on the card", async () => {
+  // the login answer's own message and the ledger's titles go into the
+  // check-in's line verbatim, and plugin-checkin.json keeps that line. A
+  // server (or a proxy in front of it) that echoes the session must not have
+  // it land there whole — the token is masked like every other place it could
+  // appear.
+  const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10)
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      "/api/v1/users/login/info": { body: { success: false, message: `bad session ${token}, sign in again` } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: token }))
+      assert.equal(r.outcome, "failed")
+      assert.ok(!r.message.includes(token), `the login message echoed the token: ${r.message}`)
+      assert.ok(r.message.includes("ms-a…5555"), `the masked token should stand in: ${r.message}`)
+    },
+  )
+  // a ledger row's title is interpolated the same way, on the done and the
+  // claimed paths alike
+  const row = { gmt_created: today, type: "EARN", rule_key: "daily_active", title: token, total_amount: 200 }
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [row] } } },
+      "/api/v1/users/login/info": { body: { success: true, data: { NickName: "Mison" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: token }))
+      assert.equal(r.outcome, "done")
+      assert.ok(!r.message.includes(token), `the row title echoed the token: ${r.message}`)
+      assert.ok(r.message.includes("ms-a…5555"), `the masked token should stand in: ${r.message}`)
+    },
+  )
+})
+
+test("a nickname longer than the cut is not a token's front", async () => {
+  // the nickname is cut to 40 before it is compared with the token, so a
+  // 44-character token returned as the nickname slipped past `name === token`
+  // and its first 40 characters were written to plugin-auth.json as the
+  // account's name
+  const token = "ms-0123456789abcdef0123456789abcdef012345678"
+  assert.ok(token.length > 40)
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-longtok-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const hooks = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { success: true, data: { NickName: token } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await hooks.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(writes.length, 0, `the front of the token was written back: ${JSON.stringify(writes[0]?.body?.accountId)}`)
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a balance field that is missing or not a number is a failure, not 0", async () => {
+  // data present, available_balance absent/null/renamed/formatted: reading it
+  // as 0 is the definite-and-wrong conclusion the data guard above exists to
+  // prevent, one field further in
+  for (const data of [
+    { available: 1234 },
+    { available_balance: null },
+    { available_balance: "1,234" },
+  ]) {
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/balance": { body: { success: true, data } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+        assert.ok(u.error, `a balance we cannot read must fail: ${JSON.stringify(data)}`)
+        assert.ok(!u.windows, "no card is built from a balance we did not understand")
+      },
+    )
+  }
+})
+
+test("a ledger whose data is a list of rows is refused, not read as empty", async () => {
+  // `data: [...]` — the rows without their wrapper — parsed as an object and
+  // then found no `records`, so it read as an empty day and the check-in
+  // answered inactive, which ends the day
+  const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10)
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: [{ gmt_created: today, type: "EARN", rule_key: "daily_active", title: "注册并登录", total_amount: 200 }] },
+      },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "failed", `a list under data must not settle the day: ${r.outcome}`)
+      assert.match(r.message, /账单格式/)
+    },
+  )
+})
+
+test("a grant that was already there is not reported as this run's claim", async () => {
+  // today's aliyun_bindlogin granted by the website, daily_active not yet:
+  // the touch grants nothing new, and the old reading counted the pre-existing
+  // row as claimed — a claim the host then settles the day on
+  const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10)
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: {
+          success: true,
+          data: {
+            records: [{ gmt_created: today, type: "EARN", rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50 }],
+          },
+        },
+      },
+      "/api/v1/users/login/info": { body: { success: true, data: { NickName: "Mison" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "inactive", `nothing new was granted, so nothing was claimed: ${JSON.stringify(r)}`)
+    },
+  )
+})
+
+test("a rule that grows during the touch is this run's claim, with the growth", async () => {
+  // rows are aggregated per (day, type, rule_key): a second grant of a rule
+  // already on today's page grows its amount instead of adding a row. The
+  // claim is that growth, not the row's total — reporting the total would
+  // count credits granted before this run.
+  const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10)
+  let reads = 0
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname + new URL(url).search
+    const reply = (body) => ({ status: 200, headers: { get: () => null }, body: null, text: async () => JSON.stringify(body) })
+    if (path === "/api/v1/users/login/info") return reply({ success: true, data: { NickName: "Mison" } })
+    reads += 1
+    // aliyun_bindlogin, not daily_active: a daily_active already on the page
+    // short-circuits to done before the touch
+    const row = (amount) => ({ gmt_created: today, type: "EARN", rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: amount })
+    return reply({ success: true, data: { records: [reads === 1 ? row(50) : row(100)] } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+    assert.equal(r.outcome, "claimed", `the growth is a claim: ${JSON.stringify(r)}`)
+    assert.equal(r.credit, 50, `the growth, not the row total: ${r.credit}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a negative grant or a negative balance is not written onto the card as one", async () => {
+  // EARN can carry a reversal. Summed as it comes the card reads
+  // "领 -50" and the limit is negative; a negative balance must not turn the
+  // percentage into NaN.
+  const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10)
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 300 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: {
+          success: true,
+          data: { records: [{ gmt_created: today, type: "EARN", rule_key: "daily_active", title: "冲正", total_amount: -50 }] },
+        },
+      },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      const w = u.windows[0]
+      assert.equal(w.limit, 0, `limit must not be negative: ${w.limit}`)
+      assert.ok(!w.display.includes("-"), `the card must not say 领 -50: ${w.display}`)
+    },
+  )
+})
+
+test("a balance with a floating-point tail is rounded like every other sum", async () => {
+  // earned/spent were rounded; the balance was not, and 0.1 + 0.2 came out
+  // as 0.30000000000000004 魔粒可用
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 0.1 + 0.2 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.balance, "0.3 魔粒可用")
+    },
+  )
+})
+
+test("a February that has no 30th is no time at all", async () => {
+  // Date.UTC rolls Feb 30 to March 2. The range check catches month 13 and
+  // 99:99:99, but not a day the month does not have.
+  const body = { success: true, data: { records: [day({ expire_at: "2026-02-30 10:00:00" })] } }
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.windows[0].resetsAt, "", "an impossible date is no date at all")
+    },
+  )
 })
 
 test("a balance with no data at all is a failure, not a card that says 0 left", async () => {

@@ -89,6 +89,26 @@ const handleOf = (token) => fnv(token).toString(16)
 // asks accounts one at a time, so a hook must not overrun its share. When the
 // budget is gone the request is not sent at all — a spent Cookie could still
 // be recorded upstream, and the answer would never be reconciled.
+
+// saidFailure is what a request's failure becomes before it reaches the card.
+// Both halves of the call can fail and neither speaks for itself: fetch's own
+// failures are a bare English "fetch failed" that covers a dead network, a
+// proxy, a captive portal and the redirect this call refuses, and a body that
+// dies after the headers came — the socket dropped, the reply cut short —
+// raises from the read, worded by each runtime its own way ("terminated" on
+// Node, a whole sentence about passing `verbose: true` on Bun; both measured
+// against a real socket). An error of our own — a budget spent, a body over
+// the cap — is already in the user's words and passes through.
+function saidFailure(e, ctl, budget) {
+  if (e === ctl.signal.reason || /timeout/i.test(String(e?.message ?? ""))) {
+    return new Error(`请求超时（${Math.round(budget / 1000)} 秒）`)
+  }
+  if (e?.name === "TypeError" || /fetch failed/i.test(String(e?.message ?? ""))) {
+    return new Error("请求失败：网络不通、被代理拦截，或被重定向到了别的站点")
+  }
+  return e
+}
+
 async function json(token, path, deadline = Infinity) {
   const left = deadline - Date.now()
   if (left <= 0) throw new Error("预算已用完，本次请求未发出")
@@ -96,38 +116,28 @@ async function json(token, path, deadline = Infinity) {
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(new Error("timeout")), budget)
   try {
-    let res
-    try {
-      res = await fetch(SITE + path, {
-        // a redirect that leaves modelscope.cn must not carry the session
-        // cookie off-site; the runtimes happen not to forward it, but say so
-        redirect: "error",
-        headers: {
-          Cookie: "m_session_id=" + token,
-          "User-Agent": UA,
-          Referer: SITE + "/",
-          Accept: "application/json",
-        },
-        signal: ctl.signal,
-      })
-    } catch (e) {
-      // fetch's own failures are a bare English "fetch failed", and that one
-      // string covers a dead network, a proxy, a captive portal and the
-      // redirect this call refuses — the card would show it and nothing else.
-      if (e === ctl.signal.reason || /timeout/i.test(String(e?.message ?? ""))) {
-        throw new Error(`请求超时（${Math.round(budget / 1000)} 秒）`)
-      }
-      if (e?.name === "TypeError" || /fetch failed/i.test(String(e?.message ?? ""))) {
-        throw new Error("请求失败：网络不通、被代理拦截，或被重定向到了别的站点")
-      }
-      throw e
-    }
+    const res = await fetch(SITE + path, {
+      // a redirect that leaves modelscope.cn must not carry the session
+      // cookie off-site; the runtimes happen not to forward it, but say so
+      redirect: "error",
+      headers: {
+        Cookie: "m_session_id=" + token,
+        "User-Agent": UA,
+        Referer: SITE + "/",
+        Accept: "application/json",
+      },
+      signal: ctl.signal,
+    })
+    // The read is inside the same try on purpose: the request answering is not
+    // the same as its body arriving, and the timer above covers both.
     const text = await readBounded(res)
     let body = null
     try {
       body = text ? JSON.parse(text) : {}
     } catch {}
     return { res, body, parsed: body !== null }
+  } catch (e) {
+    throw saidFailure(e, ctl, budget)
   } finally {
     // the answer is here: the timer has nothing left to guard, and one left
     // pending would hold the host's event loop open after the work is done
@@ -211,19 +221,26 @@ const text = (value, max = 120) => {
   return points.length > max ? points.slice(0, max).join("") : cleaned
 }
 
-const saidOf = (body) => text(body?.message ?? body?.Message ?? body?.msg ?? body?.code ?? "")
+// saidOf is a server's own words for a failure, masked and sanitized. The
+// token is split out before the length cut: a server (or a proxy in front of
+// it) that echoes the session back would otherwise put it on the card whole,
+// and a cut token is no longer one to split() on.
+const saidOf = (body, token) => cardText(body?.message ?? body?.Message ?? body?.msg ?? body?.code ?? "", token, 120)
 
 const dataOf = (body) => body?.data ?? body?.Data ?? {}
 
 // recordsOf is the ledger's entries. `records` missing under a data object is
 // an empty ledger (the keys are optional in ModelScope's answers), but a body
-// with no data at all, or a records that is there and is not a list, is a body
-// we do not understand — a proxy's rewrite, a changed API — and must fail:
-// read as empty it would report "claimed 0 today", and the check-in would
-// answer `inactive`, which ends the day.
+// with no data at all, a data that is a list rather than an object (the rows
+// themselves, unlabelled), or a records that is there and is not a list, is a
+// body we do not understand — a proxy's rewrite, a changed API — and must
+// fail: read as empty it would report "claimed 0 today", and the check-in
+// would answer `inactive`, which ends the day.
 const recordsOf = (body) => {
   const data = body?.data ?? body?.Data
-  if (data === undefined || data === null || typeof data !== "object") throw new Error("账单格式不认识：没有 data")
+  if (data === undefined || data === null || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("账单格式不认识：没有 data")
+  }
   const records = data.records
   if (records === undefined || records === null) return []
   if (!Array.isArray(records)) throw new Error("账单格式不认识：records 不是列表")
@@ -242,10 +259,16 @@ function cnTime(value) {
   if (!m) return ""
   const [, y, mo, d, h, mi, s] = m
   // Date.UTC normalizes rather than rejects: month 13 becomes January of the
-  // next year, "99:99:99" rolls over days. The card would then count down to a
-  // moment that looks perfectly reasonable and is not when the grant expires.
+  // next year, Feb 30 becomes March, "99:99:99" rolls over days. The card
+  // would then count down to a moment that looks perfectly reasonable and is
+  // not when the grant expires. Ranges first, then the day is checked by
+  // asking the date that came out: a real calendar day is the one that comes
+  // back. (+8h undoes the Beijing shift below, so the check is on the date
+  // the server wrote, not the UTC one it maps to.)
   if (+mo < 1 || +mo > 12 || +d < 1 || +d > 31 || +h > 23 || +mi > 59 || +s > 59) return ""
   const at = Date.UTC(+y, +mo - 1, +d, +h - 8, +mi, +s)
+  const back = new Date(at + 8 * 3600e3)
+  if (back.getUTCMonth() !== +mo - 1 || back.getUTCDate() !== +d) return ""
   return Number.isFinite(at) ? new Date(at).toISOString() : ""
 }
 
@@ -416,7 +439,13 @@ function aliasOf(dir, label) {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined
   const key = label.trim().toLowerCase()
   const lists = [raw?.providers]
-  if (Array.isArray(raw?.pluginLeft)) lists.push(...raw.pluginLeft.map((l) => l?.provider))
+  // pluginLeft is magpie's own: [{package, provider: {…one Provider…}}]
+  // (plugin_left.go's LeftRecord). Each record carries a single provider, so
+  // it is wrapped back into a list here; reading it as a list already
+  // skipped every record, and an alias kept there went unseen.
+  if (Array.isArray(raw?.pluginLeft)) {
+    for (const l of raw.pluginLeft) if (l?.provider && typeof l.provider === "object") lists.push([l.provider])
+  }
   for (const list of lists) {
     if (!Array.isArray(list)) continue
     for (const p of list) {
@@ -446,16 +475,29 @@ const maskToken = (token) =>
 // masked first, truncated second — the other order cuts a token in half, and
 // half a token is not a token to split() on, so the front of it survives into
 // the log. The nickname write-back's log learned that the hard way.
-const cardText = (value, token) => {
+//
+// It is also the door every server string in a message goes through: the
+// check-in puts the login answer's message and the ledger's titles straight
+// into its line, and a server (or a proxy in front of it) that echoes the
+// session back must not put it on the card whole.
+const cardText = (value, token, max = 200) => {
   const masked = typeof token === "string" && token ? String(value ?? "").split(token).join(maskToken(token)) : String(value ?? "")
-  return text(masked, 200)
+  return text(masked, max)
 }
 
 // unusableName is a nickname that must not be written back: empty, the token
-// itself (the server would be handed it twice), or a key that the host's
-// accountNames lookup would read as inherited rather than as a name.
+// itself or a piece of it (the server would be handed it twice), or a key the
+// host's accountNames lookup would read as inherited rather than as a name.
+// The piece is looked for before the cut to 40: a token longer than 40, cut
+// to 40, is no longer equal to the token, and its front would be written to
+// plugin-auth.json as the account's name. A substring of 20+ characters is
+// the piece; a nickname of a few characters that happens to sit inside a
+// token ("ms", "ab") is a nickname.
 const unusableName = (name, token) =>
-  !name || name === token || ["__proto__", "constructor", "prototype"].includes(name)
+  !name ||
+  name === token ||
+  (typeof token === "string" && ((name.length >= 20 && token.includes(name)) || name.includes(token))) ||
+  ["__proto__", "constructor", "prototype"].includes(name)
 
 async function rememberAccountName(client, token, name, auth, dir) {
   if (!name || !client?.auth?.set) return
@@ -514,7 +556,7 @@ async function todayEarn(token, deadline) {
   // perfectly fine and only the request was refused.
   if (res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
   if (res.status !== 200 || !parsed) throw new Error(`账单查询失败：响应不是 JSON（HTTP ${res.status}）`)
-  if (!okOf(body)) throw new Error(`账单查询失败：${saidOf(body) || `HTTP ${res.status}`}`)
+  if (!okOf(body)) throw new Error(`账单查询失败：${saidOf(body, token) || `HTTP ${res.status}`}`)
   const day = todayCN()
   return recordsOf(body).filter((r) => r?.type === "EARN" && r?.gmt_created === day)
 }
@@ -534,11 +576,6 @@ const num = (v) => {
 const yin = (n) => Math.round(n * 100) / 100
 
 const sumOf = (records) => yin(records.reduce((n, r) => n + num(r?.total_amount), 0))
-
-// amountOf is what a grant gave, as it goes into a message: the raw JSON is
-// whatever the server said, so it is coerced and sanitized like every other
-// remote string rather than interpolated as it came.
-const amountOf = (record) => text(num(record?.total_amount), 20)
 
 export async function MsmoliPlugin(input) {
   // input.directory is magpie's own folder (host.go passes settings.Dir()),
@@ -618,6 +655,28 @@ export async function MsmoliPlugin(input) {
           const before = await todayEarn(token, deadline)
           const beforeDaily = before.filter((r) => DAILY_RULES.includes(r?.rule_key))
           const claimed = before.some((r) => r?.rule_key === "daily_active")
+          // What this run granted is the ledger's growth, not a new key: the
+          // rows are aggregated per (day, type, rule_key, model_tier), so a
+          // second grant of a rule already in today's page grows that row's
+          // amount instead of adding one. An account that already had today's
+          // aliyun_bindlogin (from the website, say) and gains nothing from
+          // the touch must not report "claimed 50" — and one that gains more
+          // of a rule it already had must still report it.
+          const byRule = (rows) => {
+            const m = new Map()
+            for (const r of rows) m.set(r?.rule_key, (m.get(r?.rule_key) ?? 0) + num(r?.total_amount))
+            return m
+          }
+          const beforeByRule = byRule(beforeDaily)
+          const grew = (rows) => {
+            const after = byRule(rows)
+            const out = []
+            for (const [key, sum] of after) {
+              const gain = yin(sum - (beforeByRule.get(key) ?? 0))
+              if (gain > 0) out.push({ key, gain, title: rows.find((r) => r?.rule_key === key)?.title })
+            }
+            return out
+          }
 
           const { res, body, parsed } = await json(token, LOGIN_INFO, deadline)
           if (res.status === 401)
@@ -626,7 +685,7 @@ export async function MsmoliPlugin(input) {
           if (res.status === 403) return { outcome: "failed", message: "被魔搭风控拒绝（HTTP 403），稍后会自动重试" }
           if (res.status !== 200 || !parsed)
             return { outcome: "failed", message: `登录接口失败：响应不是 JSON（HTTP ${res.status}）` }
-          if (!okOf(body)) return { outcome: "failed", message: `登录接口失败：${saidOf(body) || `HTTP ${res.status}`}` }
+          if (!okOf(body)) return { outcome: "failed", message: `登录接口失败：${saidOf(body, token) || `HTTP ${res.status}`}` }
 
           const me = dataOf(body)
           const candidate = text(me.NickName || me.Name || "", 40)
@@ -639,16 +698,20 @@ export async function MsmoliPlugin(input) {
           // 下一页、或当日合计被重算），卡片会显示「今日已领取 0 魔粒」。
           if (claimed) {
             const credit = sumOf(beforeDaily)
-            const which = beforeDaily.map((r) => text(r.title, 40)).filter(Boolean).join(" + ")
+            const which = beforeDaily.map((r) => cardText(r.title, token, 40)).filter(Boolean).join(" + ")
             return { outcome: "done", credit, message: `今日已领取 ${credit} 魔粒` + (which ? `（${which}）` : "") }
           }
 
-          const daily = (await todayEarn(token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key))
-          if (daily.length) {
-            const credit = sumOf(daily)
-            const which = daily.map((r) => `${text(r.title, 40)} +${amountOf(r)}`).join("，")
-            return { outcome: "claimed", credit, message: `领取 ${credit} 魔粒：${which}` }
+          const gained = (rows) => {
+            const grew1 = grew(rows)
+            if (!grew1.length) return null
+            const credit = yin(grew1.reduce((n, g) => n + g.gain, 0))
+            const which = grew1.map((g) => `${cardText(g.title, token, 40)} +${g.gain}`).join("，")
+            return { credit, which }
           }
+
+          const daily = gained((await todayEarn(token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key)))
+          if (daily) return { outcome: "claimed", credit: daily.credit, message: `领取 ${daily.credit} 魔粒：${daily.which}` }
           // 触达了却没有到账记录：可能是账本还没写出来（发放是异步的），
           // 也可能这个账号本来就不在活动范围。再读一次账本确认，别把刚写
           // 出来的发放丢掉。这一次重读买不到「等一会儿」——发放若真是几秒
@@ -656,12 +719,8 @@ export async function MsmoliPlugin(input) {
           // 12 点前，done/inactive 这类还没见到领取的回答会被当作暂定答案
           // 每 30 分钟重问一次（checkin.go 的 provisional，由
           // checkinSureHour 决定），到那时账本已经写出来了。
-          const later = (await todayEarn(token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key))
-          if (later.length) {
-            const credit = sumOf(later)
-            const which = later.map((r) => `${text(r.title, 40)} +${amountOf(r)}`).join("，")
-            return { outcome: "claimed", credit, message: `领取 ${credit} 魔粒：${which}` }
-          }
+          const later = gained((await todayEarn(token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key)))
+          if (later) return { outcome: "claimed", credit: later.credit, message: `领取 ${later.credit} 魔粒：${later.which}` }
           return { outcome: "inactive", message: "登录已触达，但今天没有到账记录（账号可能不在活动范围）" }
         } catch (e) {
           return { outcome: "failed", message: cardText(whyOf(e), token) || "签到失败", ...(signedOut(e) ? { signIn: "expired" } : {}) }
@@ -692,20 +751,29 @@ export async function MsmoliPlugin(input) {
           if (bal.res.status === 401) throw fail(bal.res.status)
           if (bal.res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
           if (bal.res.status !== 200 || !bal.parsed) throw new Error(`余额查询失败：响应不是 JSON（HTTP ${bal.res.status}）`)
-          if (!okOf(bal.body)) throw new Error(`余额查询失败：${saidOf(bal.body) || `HTTP ${bal.res.status}`}`)
+          if (!okOf(bal.body)) throw new Error(`余额查询失败：${saidOf(bal.body, token) || `HTTP ${bal.res.status}`}`)
           // data 缺失读成 0 会把「没读懂」翻译成「余额为零」——一个确定又
           // 错误的结论，卡片会写「0 魔粒可用」。账本那侧的 recordsOf 同理。
+          // 字段这一层也一样：available_balance 缺失、null、或改了名字，
+          // 都不是 0 元的余额。
           const balData = bal.body?.data ?? bal.body?.Data
-          if (balData === undefined || balData === null || typeof balData !== "object") {
+          if (balData === undefined || balData === null || typeof balData !== "object" || Array.isArray(balData)) {
             throw new Error("余额查询失败：响应里没有 data")
           }
-          const available = num(balData.available_balance)
+          const rawAvailable = balData.available_balance
+          if (rawAvailable === undefined || rawAvailable === null || rawAvailable === "") {
+            throw new Error("余额查询失败：响应里没有 available_balance")
+          }
+          // a formatted string ("1,234") is a number we cannot read, not 0
+          const availableN = Number(rawAvailable)
+          if (!Number.isFinite(availableN)) throw new Error("余额查询失败：available_balance 不是数字")
+          const available = yin(availableN)
 
           const tx = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
           if (tx.res.status === 401) throw fail(tx.res.status)
           if (tx.res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
           if (tx.res.status !== 200 || !tx.parsed) throw new Error(`账单查询失败：响应不是 JSON（HTTP ${tx.res.status}）`)
-          if (!okOf(tx.body)) throw new Error(`账单查询失败：${saidOf(tx.body) || `HTTP ${tx.res.status}`}`)
+          if (!okOf(tx.body)) throw new Error(`账单查询失败：${saidOf(tx.body, token) || `HTTP ${tx.res.status}`}`)
 
           const day = todayCN()
           let earned = 0
@@ -735,14 +803,17 @@ export async function MsmoliPlugin(input) {
           // would go into the card as written
           earned = yin(earned)
           spent = yin(spent)
+          // 入账方向也可能出现负数（冲正、回收）。不夹的话卡片会写
+          // 「领 -50」，而 limit 是负的更没意义。用掉的方向同理。
+          const earnedToday = Math.max(0, earned)
           const usedToday = Math.max(0, spent)
           // 没有今天的入账时，百分比的分母换成「今天手里有多少」——用掉的
           // 加上还剩的。分母为 0 时沿用旧口径：余额也空了才算用尽。
           // 否则卡片会出现 used=0、今日用 348.5、领 0 的组合，进度条说没动，
           // 文字说花掉了一堆。
           const used =
-            earned > 0
-              ? Math.round((usedToday / earned) * 10000) / 100
+            earnedToday > 0
+              ? Math.round((usedToday / earnedToday) * 10000) / 100
               : usedToday + available > 0
                 ? Math.round((usedToday / (usedToday + available)) * 10000) / 100
                 : 100
@@ -750,7 +821,7 @@ export async function MsmoliPlugin(input) {
           // 今天还没领到时，把时段里的目标时刻写在卡片上，别让「领 0」
           // 看起来像是出了问题。
           const win = windowOf(configOf(configDir))
-          const ahead = win && earned === 0 ? plan(win, token, day) : null
+          const ahead = win && earnedToday === 0 ? plan(win, token, day) : null
           const hint = ahead && !ahead.due ? ` · ${clock(ahead.target)} 领取` : ""
 
           return {
@@ -761,9 +832,9 @@ export async function MsmoliPlugin(input) {
               {
                 name: "魔粒",
                 used,
-                display: `今日用 ${usedToday} / 领 ${earned} · 余额 ${available}${hint}`,
+                display: `今日用 ${usedToday} / 领 ${earnedToday} · 余额 ${available}${hint}`,
                 amount: usedToday,
-                limit: earned,
+                limit: earnedToday,
                 unit: "魔粒",
                 resetsAt: cnTime(earliest),
                 span: 86400,
