@@ -1384,7 +1384,7 @@ test("a run that writes is stopped when --dir and --magpie disagree", async () =
   }
 })
 
-test("one folder is one folder, however the shell spelled it", async () => {
+test("one folder is one folder, however the shell spelled it", async (t) => {
   // A shell completes a directory with its trailing slash, "/private/tmp" and
   // "/tmp" are one folder on a Mac, and "data/." is "data". Comparing the two
   // arguments as strings refused all of these, telling a user their arguments
@@ -1400,10 +1400,19 @@ test("one folder is one folder, however the shell spelled it", async () => {
     writeFileSync(join(real, "magpie"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
     writeFileSync(join(real, "data", "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
     writeFileSync(join(real, "data", "plugin-auth.json"), JSON.stringify({}))
-    symlinkSync(join(real, "data"), link)
+    const spellings = [join(real, "data"), join(real, "data") + "/", join(real, "data", "."), join(real, "data", "..", "data")]
+    // a symlinked spelling is the fifth, where the machine can make one:
+    // Windows without the symlink privilege cannot, and the four above cover
+    // the same decision without it
+    try {
+      symlinkSync(join(real, "data"), link)
+      spellings.push(link)
+    } catch {
+      t.diagnostic("symlinks are not available here; five spellings become four")
+    }
     const bin = join(real, "magpie")
-    // the same folder, four spellings
-    for (const spelling of [join(real, "data"), join(real, "data") + "/", join(real, "data", "."), link]) {
+    // the same folder, however it is spelled
+    for (const spelling of spellings) {
       const out = []
       let spawned = false
       const code = await main({
