@@ -73,7 +73,7 @@ function parseArgs(argv) {
     else if (a === "--force") out.force = true
     else if (a === "--dry-run") out.dryRun = true
     else if (a === "--status") out.status = true
-    else throw new Error(`不认识的参数：${a}（--help 看用法）`)
+    else throw new Error(`不认识的参数：${show(a)}（--help 看用法）`)
   }
   return out
 }
@@ -141,10 +141,13 @@ export function sameFolder(a, b, real = realpathSync, stat = statSync) {
 }
 
 // rooted is magpie's own test (appdir/env.go): a set-but-relative
-// XDG_CONFIG_HOME is not honoured, it is ignored.
+// XDG_CONFIG_HOME is not honoured, it is ignored. A drive-letter path counts
+// as rooted on every host: on Windows isAbsolute already takes it, and on a
+// POSIX host a "C:\…" argument is still a path someone named, not a name to
+// look up on PATH (the tests drive the Windows cases from any platform).
 const rooted = (p, os) =>
   Boolean(p) &&
-  (isAbsolute(p) || (os === "win32" && (p.startsWith("\\") || p.startsWith("/"))))
+  (isAbsolute(p) || /^[A-Za-z]:[\\/]/.test(p) || (os === "win32" && (p.startsWith("\\") || p.startsWith("/"))))
 
 export function findConfigDir({ env = process.env, home = homedir(), os = platform(), exists = existsSync, binPath = "" } = {}) {
   if (binPath) {
@@ -230,9 +233,13 @@ export function presetCandidates(providers, from = "") {
 // show is what goes to the terminal: a provider id or a file's path comes
 // from a file on this machine, but a poisoned providers.json could put an
 // escape sequence there and clear the screen, retitle the window or forge a
-// line of output. Control characters are shown as spaces; nothing else is
-// touched.
-const show = (s) => String(s ?? "").replace(/[\p{Cc}\p{Cf}]/gu, " ")
+// line of output. Control characters are shown as spaces. A token-shaped run
+// is masked: --from and an unknown flag are printed back verbatim, so a token
+// pasted into the wrong position (`--from ms-…`, or as a bare argument) would
+// otherwise be printed whole, against the one promise this tool makes about a
+// token. It is the same mask a planned command line uses.
+const tokenShaped = /ms-[A-Za-z0-9][A-Za-z0-9-]{10,}/g
+const show = (s) => String(s ?? "").replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(tokenShaped, (m) => mask(m))
 
 function hostOf(chat) {
   if (typeof chat !== "string") return ""
@@ -436,6 +443,17 @@ export async function main({
   // never installed — npx puts the project's node_modules/.bin first, so a
   // hostile dependency's `magpie` would receive the token on stdin. The
   // binary must come from a known install location or --magpie.
+  //
+  // A bare --magpie was the same hole from the other side: spawnSync resolves
+  // it through PATH, but exists("magpie") does not, so the write guard below
+  // saw "no binary" and skipped itself — and the token went to whatever the
+  // PATH answered. The name has to be a path.
+  if (args.magpie && !rooted(args.magpie, os)) {
+    log(`✗ --magpie 需要一个完整路径，不接受裸名（${show(args.magpie)}）。`)
+    log(`  裸名会按 PATH 解析：PATH 上第一个 magpie 会拿到令牌。用例如 macOS 的`)
+    log(`  /Applications/magpie.app/Contents/MacOS/magpie。`)
+    return 1
+  }
   const bin = args.magpie || findMagpieBin({ env, os, exists, home })
   const dir = args.dir || findConfigDir({ env, home, os, exists, binPath: bin })
   if (!dir) {

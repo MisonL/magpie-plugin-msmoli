@@ -101,7 +101,10 @@ const handleOf = (token) => fnv(token).toString(16)
 // the cap — is already in the user's words and passes through.
 function saidFailure(e, ctl, budget) {
   if (e === ctl.signal.reason || /timeout/i.test(String(e?.message ?? ""))) {
-    return new Error(`请求超时（${Math.round(budget / 1000)} 秒）`)
+    // Ceiling, not round: the budget can be down to a few hundred
+    // milliseconds when the hook's own deadline is what cut it short, and
+    // "请求超时（0 秒）" tells the user nothing about which of the two it was.
+    return new Error(`请求超时（${Math.max(1, Math.ceil(budget / 1000))} 秒）`)
   }
   if (e?.name === "TypeError" || /fetch failed/i.test(String(e?.message ?? ""))) {
     return new Error("请求失败：网络不通、被代理拦截，或被重定向到了别的站点")
@@ -267,7 +270,12 @@ const onDay = (stamp, day) => {
 // RFC 3339. Handed to new Date() as is, it would be read in the host's own
 // zone, which is 8 hours off on a machine set anywhere else.
 function cnTime(value) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(String(value ?? ""))
+  // The whole string, with nothing after the seconds. ModelScope writes
+  // "2026-10-26 09:13:40" with no zone, and the shift below is right for
+  // exactly that. A reply that grew a zone ("…T00:00:24Z", "…+00:00") would
+  // match the first 19 characters and then have its zone ignored, moving the
+  // card's countdown a full 8 hours; failing to a "" is the honest answer.
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})\s*$/.exec(String(value ?? ""))
   if (!m) return ""
   const [, y, mo, d, h, mi, s] = m
   // Date.UTC normalizes rather than rejects: month 13 becomes January of the
@@ -336,8 +344,12 @@ function configOf(dir) {
 }
 
 // minuteOf reads "HH:MM" as minutes after midnight, null for anything else.
+// The colon may be full width: U+FF1A is what a Chinese IME produces for that
+// key, so "13：00" is the shape a user in that layout actually types. Read as
+// a bad value it fell back to the default window with no sign, and the claim
+// then went out at a time the user never named.
 function minuteOf(text) {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(String(text ?? "").trim())
+  const m = /^(\d{1,2})\s*[:：]\s*(\d{2})$/.exec(String(text ?? "").trim())
   if (!m) return null
   const h = +m[1]
   const mi = +m[2]
@@ -508,6 +520,15 @@ const cardText = (value, token, max = 200) => {
   return text(masked, max)
 }
 
+// hostText is cardText for the two exits where there is no token to split on:
+// getAuth itself failed, so the plugin never got as far as reading the key.
+// The host's message can still carry one — magpie's own wording for a missing
+// key is "no key <key> for provider" — and these two lines are the only ones
+// that would print it whole. ModelScope's keys all start with "ms-", so a
+// token-shaped run is masked wherever it appears.
+const tokenShaped = /ms-[A-Za-z0-9][A-Za-z0-9-]{10,}/g
+const hostText = (value) => cardText(String(value ?? "").replace(tokenShaped, (m) => maskToken(m)), "")
+
 // unusableName is a nickname that must not be written back: empty, the token
 // itself or a piece of it (the server would be handed it twice), or a key the
 // host's accountNames lookup would read as inherited rather than as a name.
@@ -584,12 +605,23 @@ async function todayEarn(token, deadline) {
   return recordsOf(body).filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day))
 }
 
-// num reads a number from the server, 0 for anything that isn't a finite
-// one: Number("1e400") is Infinity, and an Infinity would reach the card as
-// "Infinity 魔粒可用" and a window's used/limit.
-const num = (v) => {
-  const n = Number(v)
-  return Number.isFinite(n) ? n : 0
+// amountOf is a ledger row's total_amount. A value that is there and is not a
+// number is a body we do not understand, and reads as a failure rather than as
+// 0: the same rule the whole body gets one level up. A localized "1,200", a
+// format change, a null — each would otherwise make a real grant look like
+// "nothing arrived": the check-in would answer `inactive` (which settles the
+// day) and the card would say 领 0 next to a balance that clearly moved.
+// Absent is included: a row with no amount cannot be summed either way.
+const amountOf = (row) => {
+  const raw = row?.total_amount
+  if (raw === undefined || raw === null || raw === "") throw new Error("账单格式不认识：没有 total_amount")
+  // a number or a numeric string, as for the balance: Number(true) is 1 and
+  // Number([]) is 0, both finite, and neither is an amount
+  const kind = typeof raw
+  if (kind !== "number" && kind !== "string") throw new Error("账单格式不认识：total_amount 不是数字")
+  const n = Number(raw)
+  if (!Number.isFinite(n)) throw new Error("账单格式不认识：total_amount 不是数字")
+  return n
 }
 
 // yin is a credit amount as a card says it: at most two decimals, with a
@@ -598,7 +630,7 @@ const num = (v) => {
 // goes straight into the card and into the division below.
 const yin = (n) => Math.round(n * 100) / 100
 
-const sumOf = (records) => yin(records.reduce((n, r) => n + num(r?.total_amount), 0))
+const sumOf = (records) => yin(records.reduce((n, r) => n + amountOf(r), 0))
 
 export async function MsmoliPlugin(input) {
   // input.directory is magpie's own folder (host.go passes settings.Dir()),
@@ -641,7 +673,7 @@ export async function MsmoliPlugin(input) {
           auth = await getAuth()
           token = tokenOf(auth)
         } catch (e) {
-          return { outcome: "failed", message: cardText(whyOf(e), "") || "签到失败", ...(signedOut(e) ? { signIn: "expired" } : {}) }
+          return { outcome: "failed", message: hostText(whyOf(e)) || "签到失败", ...(signedOut(e) ? { signIn: "expired" } : {}) }
         }
         if (!token)
           return {
@@ -687,7 +719,7 @@ export async function MsmoliPlugin(input) {
           // of a rule it already had must still report it.
           const byRule = (rows) => {
             const m = new Map()
-            for (const r of rows) m.set(r?.rule_key, (m.get(r?.rule_key) ?? 0) + num(r?.total_amount))
+            for (const r of rows) m.set(r?.rule_key, (m.get(r?.rule_key) ?? 0) + amountOf(r))
             return m
           }
           const beforeByRule = byRule(beforeDaily)
@@ -768,7 +800,7 @@ export async function MsmoliPlugin(input) {
           auth = await getAuth()
           token = tokenOf(auth)
         } catch (e) {
-          return { error: cardText(whyOf(e), "") || "用量查询失败", signIn: signedOut(e) ? "expired" : "" }
+          return { error: hostText(whyOf(e)) || "用量查询失败", signIn: signedOut(e) ? "expired" : "" }
         }
         if (!token) return { error: unusableKey(auth) ? "令牌内容无法识别，请重新登录" : "没有登录信息", signIn: "" }
         const deadline = Date.now() + USAGE_BUDGET_MS
@@ -795,10 +827,19 @@ export async function MsmoliPlugin(input) {
           if (rawAvailable === undefined || rawAvailable === null || rawAvailable === "") {
             throw new Error("余额查询失败：响应里没有 available_balance")
           }
-          // a formatted string ("1,234") is a number we cannot read, not 0
+          // A number or a numeric string is a balance. Anything else is not:
+          // Number([]) is 0 and Number(true) is 1, both finite, so the plain
+          // isFinite check let an empty list through as "0 魔粒可用" — the
+          // definite wrong answer this guard exists to stop — and a boolean
+          // through as one 魔粒. A formatted string ("1,234") is a number we
+          // cannot read, not 0.
+          const kind = typeof rawAvailable
+          if (kind !== "number" && kind !== "string") throw new Error("余额查询失败：available_balance 不是数字")
           const availableN = Number(rawAvailable)
           if (!Number.isFinite(availableN)) throw new Error("余额查询失败：available_balance 不是数字")
-          const available = yin(availableN)
+          // a balance is not a debt: the server's 冲正 direction can put it
+          // below zero, and "-5 魔粒可用" is not a thing the card can show
+          const available = Math.max(0, yin(availableN))
 
           const tx = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
           if (tx.res.status === 401) throw fail(tx.res.status)
@@ -811,17 +852,28 @@ export async function MsmoliPlugin(input) {
           let spent = 0
           let earliest = ""
           for (const r of recordsOf(tx.body)) {
-            if (!onDay(r?.gmt_created, day)) continue
-            const amount = num(r?.total_amount)
-            if (r?.type === "EARN") {
-              // 「领」是今天入账的全部，促销一类也算：卡片问的是「今天进来
-              // 多少、用掉多少」，把促销排除会让余额涨了 500 而卡片写「领 0」。
-              // 签到报的 credit 是另一个问题（这次签到领到多少），只算日常
-              // 额度，两个数不一样是各自的答案，不是同一个数的两种算法。
-              earned += amount
-              if (DAILY_RULES.includes(r?.rule_key) && r?.expire_at && (!earliest || r.expire_at < earliest)) earliest = r.expire_at
-            } else if (r?.type === "SPEND_CONFIRM") {
-              spent += amount
+            if (onDay(r?.gmt_created, day)) {
+              const amount = amountOf(r)
+              if (r?.type === "EARN") {
+                // 「领」是今天入账的全部，促销一类也算：卡片问的是「今天进来
+                // 多少、用掉多少」，把促销排除会让余额涨了 500 而卡片写「领 0」。
+                // 签到报的 credit 是另一个问题（这次签到领到多少），只算日常
+                // 额度，两个数不一样是各自的答案，不是同一个数的两种算法。
+                earned += amount
+              } else if (r?.type === "SPEND_CONFIRM") {
+                spent += amount
+              }
+            }
+            // The countdown ends when the soonest of the day's credits is
+            // actually lost, so it reads every daily grant that is still
+            // running — including yesterday's, which runs until 24 hours after
+            // it landed and can expire before today's own grant does. Tying it
+            // to today's rows alone pointed the countdown past a batch that
+            // disappears sooner. A grant already expired cannot be "when the
+            // credits run out" either.
+            if (r?.type === "EARN" && DAILY_RULES.includes(r?.rule_key) && r?.expire_at) {
+              const at = cnTime(r.expire_at)
+              if (at && Date.parse(at) > Date.now() && (!earliest || at < earliest)) earliest = at
             }
           }
 
@@ -867,7 +919,7 @@ export async function MsmoliPlugin(input) {
                 amount: usedToday,
                 limit: earnedToday,
                 unit: "魔粒",
-                resetsAt: cnTime(earliest),
+                resetsAt: earliest,
                 span: 86400,
               },
             ],

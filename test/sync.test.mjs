@@ -881,6 +881,64 @@ test("a wrapper script as --magpie gets a hint that helps, not one that repeats"
   }
 })
 
+test("a bare --magpie name is refused instead of looked up on PATH", async () => {
+  // spawnSync resolves a bare name through PATH, but exists("magpie") does
+  // not, so the write guard saw "no binary" and skipped itself — and the
+  // token went to whatever PATH answered first. Reproduced with a fake magpie
+  // ahead on PATH that read the token off stdin whole.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-bare-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    for (const name of ["magpie", "./magpie", "node_modules/.bin/magpie"]) {
+      const out = []
+      let spawned = false
+      const code = await main({
+        argv: ["--dir", dir, "--to-plugin", "--magpie", name],
+        log: (s) => out.push(s),
+        spawn: () => {
+          spawned = true
+          return { status: 0, stdout: "", stderr: "" }
+        },
+      })
+      assert.equal(code, 1, `${name} must be refused`)
+      assert.equal(spawned, false, `${name} must never reach a spawn`)
+      const text = out.join("\n")
+      assert.match(text, /完整路径/, `${name} should say a path is needed: ${text}`)
+      assert.doesNotMatch(text, /magpie-plugin-msmoli: /, "said as a message, not a crash")
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a token pasted into --from, or as a bare argument, is not echoed whole", async () => {
+  // Both sites print the value back verbatim. A token in the wrong position
+  // is still a token, and the tool promises it never appears in the output.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-echo-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    // --from with a key where an id belongs
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--from", A, "--status"],
+      log: (s) => out.push(s),
+    })
+    assert.equal(code, 1)
+    assert.ok(!out.join("\n").includes(A), `the token was echoed: ${out.join("\n")}`)
+    assert.match(out.join("\n"), /ms-a…5555/, "it should be shown masked")
+    // a bare token argument (parsed before main, so through the CLI)
+    const r = run([A])
+    assert.equal(r.status, 1)
+    assert.ok(!r.stderr.includes(A), `the token was echoed: ${r.stderr}`)
+    assert.ok(!r.stdout.includes(A), `the token was echoed: ${r.stdout}`)
+    assert.match(`${r.stdout}${r.stderr}`, /ms-a…5555/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("a missing binary keeps the plain hint", async () => {
   const dir = mkdtempSync(join(tmpdir(), "msmoli-nohint-"))
   try {
