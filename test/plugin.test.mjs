@@ -2470,13 +2470,24 @@ test("a request cut short by the hook's own deadline does not say 0 seconds", as
     },
     async () => {
       const realNow = Date.now
-      // the first read eats almost the whole 18s budget, leaving 300ms
+      // the first read eats almost the whole 18s budget, leaving 300ms.
+      // The clock is pinned to a fixed base, not left tracking real time: a
+      // clock that keeps advancing spends this test's 300ms of margin on
+      // whatever the machine takes between the hook's deadline and the second
+      // request, and a loaded run starts that request with nothing left — it
+      // is never sent, and the hook answers "预算已用完" instead of the
+      // timeout under test (measured on Node 18: 2 failures in 20 runs, at
+      // 350ms and 364ms, the length of the margin). Pinned, the hook's
+      // deadline is base + 18_000 and the second read sees base + 17_700
+      // whatever the scheduler does: exactly 300ms left, every run.
+      const base = realNow()
+      Date.now = () => base
       let first = true
       const real = globalThis.fetch
       globalThis.fetch = async (url, init) => {
         if (first) {
           first = false
-          Date.now = () => realNow() + 17_700
+          Date.now = () => base + 17_700
           return new Response(JSON.stringify({ success: true, data: { available_balance: 5 } }), { status: 200 })
         }
         // the second request's own timer is 300ms; let it fire
