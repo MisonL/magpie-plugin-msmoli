@@ -180,6 +180,16 @@ test("the config hook names the provider and registers no model", async () => {
   assert.equal(config.provider.msmoli.models, undefined)
 })
 
+test("the config hook keeps a provider name the user set", async () => {
+  // magpie keeps a provider's name in providers.json and runs every config
+  // hook on each start: writing ours over it would undo a rename made in its
+  // UI, with no sign of why. Everything else the entry carries stays too.
+  const config = { provider: { msmoli: { name: "我的魔搭", options: { note: "kept" } } } }
+  await hooks.config(config)
+  assert.equal(config.provider.msmoli.name, "我的魔搭")
+  assert.deepEqual(config.provider.msmoli.options, { note: "kept" })
+})
+
 test("checkin claims when the day had no daily_active", async () => {
   const before = { "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } } }
   const after = {

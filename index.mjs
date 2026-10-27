@@ -944,9 +944,13 @@ export async function MsmoliPlugin(input) {
     // API key 版的那个 modelscope 预设。
     async config(config) {
       config.provider ??= {}
+      // 用户自己改过的名字留着：magpie 把 provider 的名字存在 providers.json
+      // 里，而钩子每次启动都跑一遍——强制写回默认值会把 UI 里的改名悄悄撤销，
+      // 与账号昵称那条「用户命名过就不动」是同一条规矩。值不是对象时当作没有。
+      const was = config.provider[ID] && typeof config.provider[ID] === "object" ? config.provider[ID] : {}
       config.provider[ID] = {
-        ...(config.provider[ID] ?? {}),
-        name: "ModelScope 魔粒",
+        ...was,
+        name: typeof was.name === "string" && was.name ? was.name : "ModelScope 魔粒",
       }
     },
   }
