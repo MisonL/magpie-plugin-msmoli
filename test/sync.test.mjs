@@ -1851,3 +1851,86 @@ test("a rooted XDG_CONFIG_HOME is magpie's folder even before magpie writes into
     join(homeBase, ".config", "magpie"),
   )
 })
+
+test("the key-shape refusal names the provider the user has, not the preset's default id", () => {
+  // A vendor found by --from or by its chat host is called "my-ms", not
+  // "modelscope". The refusal used to print `magpie provider key modelscope`,
+  // which on that machine either names nothing or — worse, when both exist —
+  // the wrong provider.
+  const p = planToPlugin({ preset: { id: "my-ms", preset: "modelscope", key: "ms-bad key-1234567890" }, accounts: [], force: false })
+  assert.equal(p.action, "refuse")
+  const text = p.lines.join("\n")
+  assert.match(text, /provider key my-ms /)
+  assert.doesNotMatch(text, /provider key modelscope /)
+})
+
+test("a token pasted into the provider id is masked in the echoed command too", async () => {
+  // providers.json is user-edited; a token dropped into the id field passes
+  // the id-shape check, and the `$ magpie …` echo printed arguments verbatim
+  // while the plan line above it went through show(). That echo was the leak.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-echo-id-"))
+  const id = "ms-abcdefghijklmnop"
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id, preset: "modelscope", key: A }] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-preset", "--force", "--dry-run"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        throw new Error("--dry-run must not spawn")
+      },
+    })
+    const text = out.join("\n")
+    assert.equal(code, 0)
+    assert.ok(!text.includes(id), `the echoed command leaked the token-shaped id:\n${text}`)
+    assert.ok(text.includes(mask(id)), "the echo shows it masked, as the plan line does")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a folder named providers.json is not magpie's file, as appdir's hasFiles says", () => {
+  // appdir.go's hasFiles stats each name and takes only a non-directory. The
+  // tool asked exists(), which answers true for a directory — a data folder
+  // holding a folder called providers.json then looked like magpie's, and the
+  // portable decision went the other way from magpie's own.
+  const home = pathToFileURL("/h").pathname.replace(/\/$/, "")
+  const base = join(home, "Downloads")
+  const data = join(base, "data")
+  const bin = join(base, "magpie")
+  // stat answers only for the fixture; anything else throws, as it does on a
+  // real machine for a path that is not there (the exists() fallback then
+  // answers, and it must not turn the installed folder into magpie's).
+  const dirs = new Set([data, join(data, "providers.json")])
+  const stat = (p) => {
+    if (!dirs.has(p)) throw new Error("ENOENT")
+    return { isDirectory: () => true, isFile: () => false }
+  }
+  assert.equal(
+    findConfigDir({ env: {}, home, os: "linux", binPath: bin, exists: (p) => dirs.has(p), stat }),
+    "",
+    "a directory named providers.json is not a magpie file, so the data folder is not taken",
+  )
+  // and the control: the same name as a regular entry is magpie's file
+  const files = new Set([data, join(data, "providers.json")])
+  const statFile = (p) => {
+    if (p === data) return { isDirectory: () => true, isFile: () => false }
+    if (p === join(data, "providers.json")) return { isDirectory: () => false, isFile: () => true }
+    throw new Error("ENOENT")
+  }
+  assert.equal(
+    findConfigDir({ env: {}, home, os: "linux", binPath: bin, exists: (p) => files.has(p), stat: statFile }),
+    data,
+  )
+})
+
+test("--to-preset is a no-op when a second account already holds the preset's token", () => {
+  // The state a forced replace leaves behind: only msmoli#xxxxxx exists, and
+  // its token is the one the preset already has. --to-plugin answers 无需操作
+  // for the same pair of files; --to-preset used to refuse with "主账号没有
+  // 登录", which reads as "your plugin is signed out".
+  const p = planToPreset({ preset: presetOf(A), accounts: [{ name: "msmoli#abc123", token: A }], force: false })
+  assert.equal(p.action, "noop")
+  assert.match(p.lines.join("\n"), /无需操作/)
+})

@@ -154,7 +154,19 @@ const rooted = (p, os) =>
 // set, not with looksLikeMagpie's: magpie must agree with the tool about
 // which folder it is running from, or one reads what the other does not use.
 const OWN_FILES = ["providers.json", "logins.json", "settings.json"]
-const hasFiles = (dir, exists) => OWN_FILES.some((f) => exists(join(dir, f)))
+// appdir's hasFiles stats each name and refuses a directory: a folder called
+// providers.json is not magpie's file, and counting it as one moves the
+// portable decision — and with it the folder this tool reads — off what
+// magpie itself decides. The injected `exists` is the fallback for a path
+// this process cannot stat, where the two agree on a real machine.
+const hasFiles = (dir, stat, exists) =>
+  OWN_FILES.some((f) => {
+    try {
+      return !stat(join(dir, f)).isDirectory()
+    } catch {
+      return exists(join(dir, f))
+    }
+  })
 
 // within says whether path lies in the absolute folder dir (appdir.go's own).
 const within = (path, dir) => {
@@ -197,12 +209,12 @@ function sharedFolders(home, os) {
 const installedDir = (env, home, os) =>
   rooted(env.XDG_CONFIG_HOME, os) ? join(env.XDG_CONFIG_HOME, "magpie") : home ? join(home, ".config", "magpie") : ""
 
-function shared(base, data, { env, home, os, exists }) {
+function shared(base, data, { env, home, os, exists, stat }) {
   const fold = (p) => String(p).replace(/[\\/]+$/, "").toLowerCase()
   if (!sharedFolders(home, os).some((d) => fold(d) === fold(base))) return false
-  if (!hasFiles(data, exists)) return true
+  if (!hasFiles(data, stat, exists)) return true
   const installed = installedDir(env, home, os)
-  return Boolean(installed) && hasFiles(installed, exists)
+  return Boolean(installed) && hasFiles(installed, stat, exists)
 }
 
 // dirExists is "there is a folder here". appdir.Resolve asks os.Stat for a
@@ -246,7 +258,7 @@ export function findConfigDir({
     if (marker) return data
     // a data folder there is magpie's unless the shared-folder rule says it
     // is someone else's; an empty one counts, as it does in Resolve
-    if (dirExists(data, stat, exists) && !shared(base, data, { env, home, os, exists })) return data
+    if (dirExists(data, stat, exists) && !shared(base, data, { env, home, os, exists, stat })) return data
   }
   // A rooted XDG_CONFIG_HOME *is* where magpie keeps its files (appdir's
   // installed()), whether or not it has written them yet: falling through to
@@ -364,7 +376,11 @@ export function planToPlugin({ preset, accounts, force }) {
   // every terminal and in this tool's own mask — went through.
   if (!/^[\x21-\x7e]+$/.test(preset.key)) {
     lines.push(`✗ 内置预设的 key 含空格、换行或非 ASCII 字符，插件发不出去，不登录。`)
-    lines.push(`  先修好内置那边的 key（magpie provider key ${PRESET} <key>）。`)
+    // the provider the user actually has, not the preset's default id: a
+    // vendor found by --from or by its chat host is named "my-ms", and
+    // telling them to fix "modelscope" sends them to a provider that isn't
+    // there — or, on a machine that has both, to the wrong one.
+    lines.push(`  先修好内置那边的 key（magpie provider key ${show(preset.id)} <key>）。`)
     return { action: "refuse", lines, cmds: [] }
   }
   if (accounts.length === 0) {
@@ -402,6 +418,16 @@ export function planToPreset({ preset, accounts, force }) {
   const lines = []
   const main = accounts.find((a) => a.name === ID)
   if (!main?.token) {
+    // A second account holding the token the preset already has is the state
+    // a forced replace leaves behind (or a re-login after a nickname write).
+    // There is nothing to sync, and "主账号没有登录" would read as "your
+    // plugin is signed out" while --to-plugin answers "无需操作" for the very
+    // same pair of files.
+    const same = preset && accounts.find((a) => a.token && a.token === preset.key)
+    if (same) {
+      lines.push(`✓ 插件的 ${show(same.name)} 已与内置预设用同一把令牌（${mask(same.token)}），无需操作。`)
+      return { action: "noop", lines, cmds: [] }
+    }
     lines.push(`✗ 插件主账号（${ID}）没有登录，没有可同步的令牌。`)
     lines.push(`  先用 magpie plugin login ${ID} 登录，或用 --to-plugin 从内置预设同步。`)
     return { action: "refuse", lines, cmds: [] }
@@ -450,7 +476,11 @@ export function planToPreset({ preset, accounts, force }) {
 const RECOVER = `注意：前面的步骤已经执行，现有登录已被登出。重新运行同一条命令即可继续（此时插件没有账号，会直接登录，无需 --force）。`
 
 function hidden(argv, secret, log) {
-  const shown = secret ? argv.map((a) => (a === secret ? mask(secret) : a)) : argv
+  // show() and not the raw argument: an id read out of providers.json can be
+  // token-shaped (a token pasted into the wrong field), and this line is the
+  // one place a command's arguments are printed whole. The plan line above
+  // already goes through show(); the echo must not be the leak.
+  const shown = argv.map((a) => (secret && a === secret ? mask(secret) : show(a)))
   log(`$ magpie ${shown.join(" ")}`)
 }
 
