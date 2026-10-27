@@ -1546,9 +1546,39 @@ test("a login/info that is not JSON fails the check-in rather than settling the 
     async () => {
       const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
       assert.equal(r.outcome, "failed", "an unreadable login/info must not settle the day")
-      assert.match(r.message, /登录接口/)
+      // The parse branch's own words, not just "登录接口": the next line down
+      // also says "登录接口失败" (with `HTTP 200` for a body that did not
+      // parse, since saidOf of it is empty), so matching the shared prefix
+      // left `if (res.status !== 200 || !parsed)` on index.mjs free to be
+      // turned into `if (false)` with the suite still green.
+      assert.match(r.message, /登录接口失败：响应不是 JSON（HTTP 200）/, `the parse branch's own words: ${r.message}`)
     },
   )
+})
+
+test("a login/info that refuses in its own words, or in none at all", async () => {
+  // The envelope branch (index.mjs): a 200 that parses but says no. Its two
+  // arms answer differently on purpose — the server's message when there is
+  // one, the status when there is not — and both were unpinned: the only
+  // test on this path asserted /登录接口/, which the server's own message
+  // ("登录接口失败：请先绑定手机号") satisfies, so `|| `HTTP ${res.status}``
+  // could be deleted and an empty "登录接口失败：" shipped unnoticed.
+  for (const { bad, want } of [
+    { bad: { body: { success: false, message: "请先绑定手机号" } }, want: /登录接口失败：请先绑定手机号$/ },
+    { bad: { body: { success: false } }, want: /登录接口失败：HTTP 200$/ },
+  ]) {
+    const r = await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+        "/api/v1/users/login/info": bad,
+      },
+      async () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+    )
+    assert.equal(r.outcome, "failed", `${JSON.stringify(bad)} must fail the check-in`)
+    assert.match(r.message, want, `the envelope branch's own words: ${r.message}`)
+    assert.doesNotMatch(r.message, /不是 JSON/, "a body that parsed is not the parse branch")
+    assert.notEqual(r.signIn, "expired", "a refused answer is not a bad token")
+  }
 })
 
 test("the name cache is bounded: the oldest account's name falls out", async () => {
@@ -1893,6 +1923,121 @@ test("a usage read refused by risk control names it, without 'not JSON' in the m
       },
     )
   }
+})
+
+test("a non-200 that answers JSON repeats what it said, not 'not JSON'", async () => {
+  // The status gate said `res.status !== 200 || !parsed` in one line and its
+  // message claimed the body "响应不是 JSON" for both. A 429 or a 500 from the
+  // vendor, or from a proxy that explains itself in JSON, parses perfectly
+  // well: reporting it as a parse failure throws away the server's own words
+  // ("请求过于频繁", "系统繁忙") and sends the reader to look at the network.
+  // Splitting the two conditions is what this pins — the suite was fully
+  // green with the gate widened to `>= 400`, because nothing sent a 2xx other
+  // than 200 and no test ever put JSON in a non-200.
+  const okBalance = { body: { success: true, data: { available_balance: 5 } } }
+  const okLedger = { body: { success: true, data: { records: [] } } }
+  for (const [at, want] of [
+    ["balance", /余额查询失败：请求过于频繁/],
+    ["transactions", /账单查询失败：请求过于频繁/],
+  ]) {
+    const u = await withFetch(
+      {
+        "/openapi/v1/magicubes/balance":
+          at === "balance" ? { status: 429, body: { success: false, message: "请求过于频繁" } } : okBalance,
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50":
+          at === "transactions" ? { status: 429, body: { success: false, message: "请求过于频繁" } } : okLedger,
+      },
+      async () => auth.usage(async () => ({ type: "api", key: "ms-test" })),
+    )
+    assert.ok(u.error, `${at}: a 429 is an error`)
+    assert.match(u.error, want, `${at}: the server's own words: ${u.error}`)
+    assert.doesNotMatch(u.error, /不是 JSON/, `${at}: a body that parsed is not a parse failure`)
+    assert.equal(u.signIn, "", `${at}: a rate limit is not a bad token`)
+  }
+  // and the same at the check-in's own ledger read, which has a copy of the line
+  const r = await withFetch(
+    { "/openapi/v1/magicubes/transactions?page=1&page_size=50": { status: 500, body: { success: false, message: "系统繁忙" } } },
+    async () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+  )
+  assert.equal(r.outcome, "failed")
+  assert.match(r.message, /账单查询失败：系统繁忙/, `check-in: the server's own words: ${r.message}`)
+  assert.doesNotMatch(r.message, /不是 JSON/, "check-in: a body that parsed is not a parse failure")
+})
+
+test("a login/info that answers JSON on a non-200 says what it said", async () => {
+  // same split at the check-in's login step, where a 429 with the vendor's
+  // own words was reported as "响应不是 JSON" and those words thrown away.
+  const r = await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      "/api/v1/users/login/info": { status: 429, body: { success: false, message: "请求过于频繁" } },
+    },
+    async () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+  )
+  assert.equal(r.outcome, "failed", "a 429 must not settle the day")
+  assert.match(r.message, /登录接口失败：请求过于频繁/, `the server's own words: ${r.message}`)
+  assert.doesNotMatch(r.message, /不是 JSON/, "a body that parsed is not a parse failure")
+  assert.notEqual(r.signIn, "expired", "a rate limit is not a bad token")
+})
+
+test("a login/info on a 2xx that is not 200 does not settle the day", async () => {
+  // The gate is `res.status !== 200`, not "no error": a 202 or a 206 is a
+  // proxy or a half-finished answer, not the reply login/info gives. The
+  // fixture carries a *well-formed* success envelope on the odd status, or
+  // the check is masked — an empty body fails `okOf` on its own, so the day
+  // would not settle whichever way the gate is written. With the gate widened
+  // to `>= 400`, and with the status check dropped in favour of `!okOf`
+  // alone, the suite stayed green: the well-formed 202 then walked on into
+  // the inactive path and settled the day as "账号可能不在活动范围" — a
+  // conclusion drawn from an answer the vendor never finished sending.
+  for (const status of [202, 206]) {
+    const r = await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+        "/api/v1/users/login/info": { status, body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      },
+      async () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+    )
+    assert.equal(r.outcome, "failed", `a ${status} must not settle the day`)
+    assert.notEqual(r.outcome, "inactive", `a ${status} is not "not in the campaign"`)
+    assert.match(r.message, /登录接口/, `a ${status} names the step: ${r.message}`)
+  }
+})
+
+test("a 2xx that is not 200 is a refusal on the usage reads too", async () => {
+  // The same widened gate survived on all three usage reads: a 202 carrying a
+  // perfectly well-formed success body was read as a real answer, and the
+  // card showed "领 200" from a request the vendor never completed. A 202
+  // means accepted-and-not-done; only 200 is the answer.
+  const goodLedger = {
+    body: {
+      success: true,
+      data: {
+        records: [day({ rule_key: "daily_active", total_amount: 200, expire_at: "" })],
+      },
+    },
+  }
+  const goodBalance = { body: { success: true, data: { available_balance: 251.5 } } }
+  for (const at of ["balance", "transactions"]) {
+    const u = await withFetch(
+      {
+        "/openapi/v1/magicubes/balance": at === "balance" ? { status: 202, ...goodBalance } : goodBalance,
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": at === "transactions" ? { status: 202, ...goodLedger } : goodLedger,
+      },
+      async () => auth.usage(async () => ({ type: "api", key: "ms-test" })),
+    )
+    assert.ok(u.error, `${at}: a 202 is not an answer`)
+    assert.equal(u.windows, undefined, `${at}: no card from a request still in flight`)
+    assert.match(u.error, /HTTP 202/, `${at}: names the status: ${u.error}`)
+    assert.doesNotMatch(u.error, /不是 JSON/, `${at}: a body that parsed is not a parse failure`)
+  }
+  // and the check-in's ledger read has its own copy of the gate
+  const r = await withFetch(
+    { "/openapi/v1/magicubes/transactions?page=1&page_size=50": { status: 202, ...goodLedger } },
+    async () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+  )
+  assert.equal(r.outcome, "failed", "a 202 must not settle the day")
+  assert.match(r.message, /HTTP 202/, `check-in names the status: ${r.message}`)
 })
 
 test("an envelope that says Code 200 is an answer, not a failure", async () => {

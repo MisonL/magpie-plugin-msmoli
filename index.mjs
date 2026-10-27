@@ -599,8 +599,12 @@ async function todayEarn(token, deadline) {
   // 403 is ModelScope's risk control, not a bad token: the account may be
   // perfectly fine and only the request was refused.
   if (res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
-  if (res.status !== 200 || !parsed) throw new Error(`账单查询失败：响应不是 JSON（HTTP ${res.status}）`)
-  if (!okOf(body)) throw new Error(`账单查询失败：${saidOf(body, token) || `HTTP ${res.status}`}`)
+  // 两件事分开说：body 解析不出来才是「不是 JSON」；解析出来了、状态码不对，
+  // 就是服务端用自己的话说了不行（429 的「请求过于频繁」、500 的「系统繁忙」）。
+  // 合在一起写，一个带 JSON 解释的 429 会被报成「响应不是 JSON」——把人支去
+  // 查代理和网络，而服务端已经说清楚原因了。
+  if (!parsed) throw new Error(`账单查询失败：响应不是 JSON（HTTP ${res.status}）`)
+  if (res.status !== 200 || !okOf(body)) throw new Error(`账单查询失败：${saidOf(body, token) || `HTTP ${res.status}`}`)
   const day = todayCN()
   return recordsOf(body).filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day))
 }
@@ -738,9 +742,12 @@ export async function MsmoliPlugin(input) {
             return { outcome: "failed", message: "令牌失效或不属于国内站（HTTP 401）", signIn: "expired" }
           // 403 是风控，不是令牌坏了：账号可能是好的，只是这次请求被拒
           if (res.status === 403) return { outcome: "failed", message: "被魔搭风控拒绝（HTTP 403），稍后会自动重试" }
-          if (res.status !== 200 || !parsed)
+          // 同 todayEarn：解析失败与「解析成功但服务端说不」是两件事。
+          // 一个带 JSON 解释的 429/500 不是「响应不是 JSON」。
+          if (!parsed)
             return { outcome: "failed", message: `登录接口失败：响应不是 JSON（HTTP ${res.status}）` }
-          if (!okOf(body)) return { outcome: "failed", message: `登录接口失败：${saidOf(body, token) || `HTTP ${res.status}`}` }
+          if (res.status !== 200 || !okOf(body))
+            return { outcome: "failed", message: `登录接口失败：${saidOf(body, token) || `HTTP ${res.status}`}` }
 
           const me = dataOf(body)
           // A name is a string. Anything else — a number, an object, a list —
@@ -819,8 +826,11 @@ export async function MsmoliPlugin(input) {
           const bal = await json(token, BALANCE, deadline)
           if (bal.res.status === 401) throw fail(bal.res.status)
           if (bal.res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
-          if (bal.res.status !== 200 || !bal.parsed) throw new Error(`余额查询失败：响应不是 JSON（HTTP ${bal.res.status}）`)
-          if (!okOf(bal.body)) throw new Error(`余额查询失败：${saidOf(bal.body, token) || `HTTP ${bal.res.status}`}`)
+          // 同 todayEarn：解析失败才叫「不是 JSON」。余额侧多一步 — 解析出来
+          // 的 429/500 带着服务端的原话，那句话比状态码有用。
+          if (!bal.parsed) throw new Error(`余额查询失败：响应不是 JSON（HTTP ${bal.res.status}）`)
+          if (bal.res.status !== 200 || !okOf(bal.body))
+            throw new Error(`余额查询失败：${saidOf(bal.body, token) || `HTTP ${bal.res.status}`}`)
           // data 缺失读成 0 会把「没读懂」翻译成「余额为零」——一个确定又
           // 错误的结论，卡片会写「0 魔粒可用」。账本那侧的 recordsOf 同理。
           // 字段这一层也一样：available_balance 缺失、null、或改了名字，
@@ -850,8 +860,9 @@ export async function MsmoliPlugin(input) {
           const tx = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
           if (tx.res.status === 401) throw fail(tx.res.status)
           if (tx.res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
-          if (tx.res.status !== 200 || !tx.parsed) throw new Error(`账单查询失败：响应不是 JSON（HTTP ${tx.res.status}）`)
-          if (!okOf(tx.body)) throw new Error(`账单查询失败：${saidOf(tx.body, token) || `HTTP ${tx.res.status}`}`)
+          if (!tx.parsed) throw new Error(`账单查询失败：响应不是 JSON（HTTP ${tx.res.status}）`)
+          if (tx.res.status !== 200 || !okOf(tx.body))
+            throw new Error(`账单查询失败：${saidOf(tx.body, token) || `HTTP ${tx.res.status}`}`)
 
           const day = todayCN()
           let earned = 0
