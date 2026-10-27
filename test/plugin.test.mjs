@@ -3041,3 +3041,88 @@ test("a key too short for magpie to hint goes by magpie's label, not one of our 
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("usage names an answer it cannot read, at either step and in its own words", async () => {
+  // The 401 and 403 tests loop over both steps because the balance read runs
+  // first and a fixture that only breaks the ledger never gets past it. The
+  // same trap hid the four check lines this test now walks: before it existed,
+  // `if (false)` on the ledger step's two (index.mjs) left the whole suite
+  // green — those lines never executed at all — and the balance step's and
+  // todayEarn's parse branches stayed green because the next line's fallback
+  // says almost the same thing ("账单查询失败：HTTP 404" vs "…响应不是
+  // JSON（HTTP 404）") and the fixtures only ever matched the status code.
+  //
+  // Each case keeps its own words — the step's name ("余额" / "账单") and either
+  // the parse failure (which names the HTTP status) or the server's own message
+  // — and the assertion cannot pass on the wrong line's fallback. `saidOf` of a
+  // body that did not parse is empty, so the *next* line down prints the status
+  // too: matching only /HTTP 200/ would stay green under `if (false)`. Requiring
+  // "不是 JSON" pins the parse branch; requiring the server's words pins the
+  // envelope branch; a body with no message at all pins the `|| HTTP …` arm.
+  const okBalance = { body: { success: true, data: { available_balance: 5 } } }
+  const okLedger = { body: { success: true, data: { records: [] } } }
+  const cases = [
+    { at: "balance", bad: { raw: "<html>proxy error</html>" }, want: /余额查询失败：响应不是 JSON.*HTTP 200/ },
+    { at: "balance", bad: { body: { success: false, message: "系统繁忙" } }, want: /余额查询失败：系统繁忙/ },
+    { at: "balance", bad: { body: { success: false } }, want: /余额查询失败：HTTP 200/ },
+    { at: "transactions", bad: { raw: "<html>proxy error</html>" }, want: /账单查询失败：响应不是 JSON.*HTTP 200/ },
+    { at: "transactions", bad: { body: { success: false, message: "系统繁忙" } }, want: /账单查询失败：系统繁忙/ },
+    { at: "transactions", bad: { body: { success: false } }, want: /账单查询失败：HTTP 200/ },
+  ]
+  for (const { at, bad, want } of cases) {
+    const u = await withFetch(
+      {
+        "/openapi/v1/magicubes/balance": at === "balance" ? bad : okBalance,
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": at === "transactions" ? bad : okLedger,
+      },
+      async () => auth.usage(async () => ({ type: "api", key: "ms-test" })),
+    )
+    assert.ok(u.error, `${at} with ${JSON.stringify(bad)} must fail`)
+    assert.match(u.error, want, `the failure should be this step's own: ${u.error}`)
+    assert.equal(u.windows, undefined, `no window from a read we could not understand (${at})`)
+  }
+  // The check-in path reads the same ledger through todayEarn, which has its
+  // own copy of the two lines — mutating either of *those* stayed green while
+  // only usage was covered, because usage never calls todayEarn.
+  for (const { bad, want } of [
+    { bad: { raw: "<html>proxy error</html>" }, want: /账单查询失败：响应不是 JSON.*HTTP 200/ },
+    { bad: { body: { success: false, message: "系统繁忙" } }, want: /账单查询失败：系统繁忙/ },
+    { bad: { body: { success: false } }, want: /账单查询失败：HTTP 200/ },
+  ]) {
+    const r = await withFetch({ "/openapi/v1/magicubes/transactions?page=1&page_size=50": bad }, async () =>
+      auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+    )
+    assert.equal(r.outcome, "failed", `check-in with ${JSON.stringify(bad)} must fail`)
+    assert.match(r.message, want, `the failure should be the ledger's own: ${r.message}`)
+    assert.notEqual(r.signIn, "expired", "a bad answer is not a bad token")
+  }
+})
+
+test("a data object without a records key is an empty ledger, not an error", async () => {
+  // recordsOf's decision (index.mjs): the keys are optional in ModelScope's
+  // answers, so a data object with no records is an empty day — while no data
+  // at all, or records of the wrong shape, is a failure. Live evidence today:
+  // even page 99 of a real ledger answers `records: []` with the key present,
+  // so this branch is a mercy for a shape we have not observed, kept because
+  // the alternative (throwing) would settle nothing and error every ask. The
+  // test pins the decision either way a future edit might flip it.
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: {} } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.error, undefined, "an empty ledger is not a failure")
+      assert.match(u.windows[0].display, /今日用 0 \/ 领 0/)
+    },
+  )
+  const r = await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: {} } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    async () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+  )
+  assert.equal(r.outcome, "inactive", "the day is answered on what the empty ledger says")
+})
