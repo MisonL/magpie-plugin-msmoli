@@ -653,11 +653,23 @@ export async function main({
   // 无预设时两条方向都该给指引：--to-preset 也有自己的话术（planToPreset 里），
   // 但这里先统一拦住，免得 null 一路传到 plan 里崩栈
   if (!preset) {
+    const all = Array.isArray(providers) ? providers : []
+    // oursOf/blankKey repeat presetCandidates' own tests. A candidate needs a
+    // key, and a provider that is ours but has none is not "not configured":
+    // telling the user to add it names one they already have, and the --from
+    // message below used to say its chat does not point at ModelScope — about
+    // a provider whose chat points at exactly that host.
+    const oursOf = (p) => p?.id === PRESET || p?.preset === PRESET || hostOf(p?.chat) === HOST
+    const blankKey = (p) => !(typeof p?.key === "string" && p.key.trim())
     if (args.from) {
       // the provider may well exist and simply not be one of ours: saying
       // "there is no provider by that id" sends the user to re-add it
-      const any = (Array.isArray(providers) ? providers : []).filter((p) => p?.id === args.from)
-      if (any.length) {
+      const any = all.filter((p) => p?.id === args.from)
+      const bare = any.filter((p) => oursOf(p) && blankKey(p))
+      if (bare.length) {
+        log(`✗ "${show(args.from)}" 在，但还没有 key，没有可同步的令牌。`)
+        log(`  用 magpie provider key ${show(args.from)} <key> 写入。`)
+      } else if (any.length) {
         log(`✗ "${show(args.from)}" 在，但它不是 ModelScope：chat 不指向 ${HOST}，id/preset 也不是 ${PRESET}。`)
         log(`  这个工具只同步内置的 ModelScope 预设与插件登录态之间的令牌。`)
       } else {
@@ -665,8 +677,14 @@ export async function main({
         log(`  用 --status 看现有的，或先 magpie provider add ${show(args.from)} <key>。`)
       }
     } else {
-      log(`✗ 内置侧没有带 key 的 ModelScope 预设。`)
-      log(`  先在 magpie 的「供应商」页添加 ModelScope，或 magpie provider add ${PRESET} <key>。`)
+      const bare = all.filter((p) => oursOf(p) && blankKey(p))
+      if (bare.length) {
+        log(`✗ 内置侧的 ${show(bare[0].id)} 在，但还没有 key，没有可同步的令牌。`)
+        log(`  用 magpie provider key ${show(bare[0].id)} <key> 写入，或在 magpie 的「供应商」页填上。`)
+      } else {
+        log(`✗ 内置侧没有带 key 的 ModelScope 预设。`)
+        log(`  先在 magpie 的「供应商」页添加 ModelScope，或 magpie provider add ${PRESET} <key>。`)
+      }
     }
     return 1
   }

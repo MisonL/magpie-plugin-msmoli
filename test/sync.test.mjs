@@ -1934,3 +1934,53 @@ test("--to-preset is a no-op when a second account already holds the preset's to
   assert.equal(p.action, "noop")
   assert.match(p.lines.join("\n"), /无需操作/)
 })
+
+test("a provider that is ours but has no key is told to fill it in, not to add it again", async () => {
+  // providers.json keeps providers without keys (magpie writes its own plugin
+  // providers that way). "添加 ModelScope" names one the user already has, and
+  // with --from the old message said the chat host was not ModelScope's —
+  // about a provider whose chat points at exactly that host.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-keyless-"))
+  try {
+    writeFileSync(
+      join(dir, "providers.json"),
+      JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", chat: "https://api-inference.modelscope.cn/v1", key: "" }] }),
+    )
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const run = async (argv) => {
+      const out = []
+      const code = await main({ argv: [...argv, "--dir", dir, "--magpie", "/nonexistent"], log: (s) => out.push(s), spawn: () => {
+        throw new Error("must not run anything without a key")
+      } })
+      return { code, text: out.join("\n") }
+    }
+    const bare = await run(["--to-preset"])
+    assert.equal(bare.code, 1)
+    assert.match(bare.text, /还没有 key/)
+    assert.match(bare.text, /provider key modelscope/)
+    assert.doesNotMatch(bare.text, /供应商」页添加/)
+
+    const byId = await run(["--from", "modelscope", "--to-preset"])
+    assert.equal(byId.code, 1)
+    assert.match(byId.text, /还没有 key/)
+    assert.doesNotMatch(byId.text, /不是 ModelScope/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("--from on a provider that is not ours still says so, not 'no key'", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-notours-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "openai", chat: "https://api.openai.com/v1", key: "" }] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({ argv: ["--from", "openai", "--dir", dir, "--magpie", "/nonexistent"], log: (s) => out.push(s), spawn: () => 0 })
+    assert.equal(code, 1)
+    const text = out.join("\n")
+    assert.match(text, /不是 ModelScope/)
+    assert.doesNotMatch(text, /还没有 key/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
