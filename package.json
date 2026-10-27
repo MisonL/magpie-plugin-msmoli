@@ -41,6 +41,7 @@
   },
   "scripts": {
     "test": "node --test",
+    "test:clock": "node --import ./tools/ticking-clock.mjs --test",
     "prepublishOnly": "node --test"
   }
 }

@@ -63,3 +63,19 @@ jobs:
         with:
           node-version: "24"
       - run: node --test
+
+  # Three countdown tests used to read the clock twice — once for the fixture,
+  # once for the expected value — and each read truncates to whole seconds, so
+  # a second boundary in between made them red about once in a thousand runs.
+  # The fix is to read it once, but nothing caught a regression: a test that
+  # drifts back to two reads passes 999 runs out of 1000. tools/ticking-clock.mjs
+  # advances the clock a second per read *from a test file*, so the old shape
+  # fails every time.
+  clock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      - run: node --import ./tools/ticking-clock.mjs --test

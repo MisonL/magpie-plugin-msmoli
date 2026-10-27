@@ -1802,7 +1802,16 @@ test("usage resets at the earliest grant that is still running", async () => {
   // clock times: a fixture pinned to "today 13:05" reads as already expired
   // whenever the suite runs in the afternoon, and the test then asserts a
   // different answer depending on the hour.
-  const at = (ms) => new Date(Date.now() + 8 * 3600e3 + ms).toISOString().slice(0, 19).replace("T", " ")
+  //
+  // `now` is read once, not by every at(): at() truncates to whole seconds,
+  // so two calls with a second boundary in between produce stamps a second
+  // apart, and the assertion compared the fixture's stamp with a later one.
+  // That is a one-in-a-thousand flake per run — seen once in round 11 under a
+  // mutation and logged as unreproduced. tools/ticking-clock.mjs makes it
+  // deterministic: a clock that advances a second per read turns all three
+  // countdown tests red on the old shape (npm run test:clock).
+  const now = Date.now()
+  const at = (ms) => new Date(now + 8 * 3600e3 + ms).toISOString().slice(0, 19).replace("T", " ")
   await withFetch(
     {
       "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
@@ -1832,7 +1841,9 @@ test("the countdown follows a grant from yesterday that has not run out yet", as
   // daily credits run 24 hours from when they land, so yesterday's grant is
   // still being spent today and can expire before today's own. Reading only
   // today's rows pointed the countdown past a batch that disappears sooner.
-  const at = (ms) => new Date(Date.now() + 8 * 3600e3 + ms).toISOString().slice(0, 19).replace("T", " ")
+  // `now` read once for the reason above.
+  const now = Date.now()
+  const at = (ms) => new Date(now + 8 * 3600e3 + ms).toISOString().slice(0, 19).replace("T", " ")
   await withFetch(
     {
       "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
@@ -1860,8 +1871,9 @@ test("the countdown follows a grant from yesterday that has not run out yet", as
 
 test("a grant that already expired is not the moment the credits run out", async () => {
   // a countdown that has already passed tells the user nothing; the next
-  // expiry is the answer
-  const at = (ms) => new Date(Date.now() + 8 * 3600e3 + ms).toISOString().slice(0, 19).replace("T", " ")
+  // expiry is the answer. `now` read once for the reason above.
+  const now = Date.now()
+  const at = (ms) => new Date(now + 8 * 3600e3 + ms).toISOString().slice(0, 19).replace("T", " ")
   await withFetch(
     {
       "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
