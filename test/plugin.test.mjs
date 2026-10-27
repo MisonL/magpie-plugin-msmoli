@@ -2980,3 +2980,64 @@ test("with no directory, the config comes from XDG_CONFIG_HOME, else the home fo
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("once the claim is due, the card stops pointing at the moment it was due", async () => {
+  // The hint exists for the hours before the window: "领 0" alone reads like
+  // something went wrong. Past the target it is a promise about the past —
+  // the claim has already been asked for — so it has to go. The hash decides
+  // the target, so the clock goes to the window's own end, past any target it
+  // could have picked (the modulo never reaches the end minute).
+  const target = await (async () => {
+    // read the target this account gets, at a clock before the window opens
+    return withWindow(["08:30", "10:00"], `${today} 00:00:00`, () => targetOf(auth.checkin))
+  })()
+  assert.ok(target.minute >= 8 * 60 + 30 && target.minute < 10 * 60, `target inside the window: ${target.text}`)
+  await withWindow(["08:30", "10:00"], `${today} 10:00:00`, async () => {
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 0 } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        const u = await auth.usage(async () => ({ type: "api", key: "ms-due" }))
+        assert.doesNotMatch(u.windows[0].display, /领取/, `past the target, the card must not promise it: ${u.windows[0].display}`)
+      },
+    )
+  })
+})
+
+test("a key too short for magpie to hint goes by magpie's label, not one of our own", async () => {
+  // magpie builds the label "API key …tail" only when the key is 12 characters
+  // or more (host.js's hintOf); anything shorter is shown as plain "API key",
+  // which is the string a user's alias is kept under. Reading a shorter key
+  // with our own tail would look the alias up under a name nothing carries,
+  // find nothing, and write the nickname over the user's own name.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-short-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  writeFileSync(
+    join(dir, "providers.json"),
+    JSON.stringify({ providers: [{ id: "msmoli", accountNames: { "api key": "主号" } }] }),
+  )
+  const token = "ms-short-11"
+  assert.equal(token.length, 11, "a key one character under magpie's hint threshold")
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(writes.length, 0, "the user's alias is keyed to magpie's own label, and must be honoured")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

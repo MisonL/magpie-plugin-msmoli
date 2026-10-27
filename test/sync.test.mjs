@@ -1984,3 +1984,63 @@ test("--from on a provider that is not ours still says so, not 'no key'", async 
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("--from insists on the exact host too, not one that contains it", async () => {
+  // Round six moved the host check to the parsed hostname because includes()
+  // takes "api-inference.modelscope.cn.evil.tld" for ModelScope's own. The
+  // default search path was pinned then; --from runs the same test through a
+  // separate line of the same function and was left unpinned, so a regression
+  // there would pass the suite. Measured: with the substring form, --from
+  // relay --to-preset --force answers `provider key relay <the plugin token>`
+  // — the user's real credential handed to a stranger's provider.
+  const evil = [{ id: "relay", chat: "https://api-inference.modelscope.cn.evil.tld/v1", key: B }]
+  assert.deepEqual(presetCandidates(evil, "relay"), [], "a lookalike host is not ours, with --from or without")
+  const real = [{ id: "relay", chat: "https://api-inference.modelscope.cn/v1", key: B }]
+  assert.deepEqual(presetCandidates(real, "relay").map((p) => p.id), ["relay"])
+  // and the whole run refuses the lookalike instead of writing to it
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-evil-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: evil }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+    const out = []
+    const ran = []
+    const code = await main({
+      argv: ["--from", "relay", "--to-preset", "--force", "--dir", dir, "--magpie", "/nonexistent/magpie"],
+      log: (s) => out.push(s),
+      spawn: (bin, argv) => {
+        ran.push(argv.join(" "))
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1)
+    assert.equal(ran.length, 0, `nothing may be written to a lookalike host: ${ran.join(" / ")}`)
+    assert.ok(!out.join("\n").includes(A), "the plugin's token must not reach the output either")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("two spellings of one folder on a case-folding volume are one folder", () => {
+  // The --dir guard runs on sameFolder. On a case-insensitive volume the shell
+  // can hand back the same folder under two spellings; realpath keeps the
+  // caller's case, so the strings disagree and only the inode settles it. Get
+  // that wrong and the guard stops a sync that was fine — the failure the
+  // comment above promises not to repeat.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-case-"))
+  try {
+    const sub = join(dir, "data")
+    mkdirSync(sub)
+    const flipped = sub.replace(/data$/, "DATA")
+    let folds = true
+    try {
+      if (statSync(flipped).ino !== statSync(sub).ino) folds = false
+    } catch {
+      folds = false
+    }
+    if (!folds) return // case-sensitive volume: no second spelling exists to check
+    assert.equal(sameFolder(sub, flipped), true, "one folder, two spellings")
+    assert.equal(sameFolder(flipped, sub), true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
