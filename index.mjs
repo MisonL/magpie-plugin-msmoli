@@ -242,6 +242,18 @@ const saidOf = (body, token) => cardText(body?.message ?? body?.Message ?? body?
 
 const dataOf = (body) => body?.data ?? body?.Data ?? {}
 
+// dataObjectOf is the strict read of the same field: a body with no data at
+// all, or a data that is not an object (a list of rows, a string, a number)
+// is one we did not understand, not one with nothing in it. typeof null is
+// "object", so the null check is the one the type test alone cannot make.
+// Both readers of the field carry their own words for the failure; the test
+// itself lives here once so the two cannot drift.
+const dataObjectOf = (body, message) => {
+  const data = body?.data ?? body?.Data
+  if (data === undefined || data === null || typeof data !== "object" || Array.isArray(data)) throw new Error(message)
+  return data
+}
+
 // recordsOf is the ledger's entries. `records` missing under a data object is
 // an empty ledger (the keys are optional in ModelScope's answers), but a body
 // with no data at all, a data that is a list rather than an object (the rows
@@ -250,10 +262,7 @@ const dataOf = (body) => body?.data ?? body?.Data ?? {}
 // fail: read as empty it would report "claimed 0 today", and the check-in
 // would answer `inactive`, which ends the day.
 const recordsOf = (body) => {
-  const data = body?.data ?? body?.Data
-  if (data === undefined || data === null || typeof data !== "object" || Array.isArray(data)) {
-    throw new Error("账单格式不认识：没有 data")
-  }
+  const data = dataObjectOf(body, "账单格式不认识：没有 data")
   const records = data.records
   if (records === undefined || records === null) return []
   if (!Array.isArray(records)) throw new Error("账单格式不认识：records 不是列表")
@@ -589,23 +598,48 @@ const signedOut = (e) => Boolean(e?.signIn === "expired" || e?.expired)
 const whyOf = (e) =>
   typeof e?.message === "string" && e.message ? e.message : typeof e === "string" ? e : ""
 
-function fail(status) {
-  return Object.assign(new Error(`HTTP ${status}`), { signIn: status === 401 ? "expired" : "" })
+// EXPIRED is what a 401 says, wherever it is met: the ledger read before the
+// touch, the touch itself, or either of usage's two reads. Three wordings
+// used to exist for one condition ("令牌失效或不属于国内站", the same plus
+// "（HTTP 401）", and a bare "HTTP 401" from the balance/ledger path), and the
+// README's troubleshooting row promises the user will see the status code in
+// it — which only two of the three carried.
+const EXPIRED = "令牌失效或不属于国内站（HTTP 401）"
+
+// deadToken is what every 401 becomes: the token is revoked, and magpie only
+// signs the account out when the hook says so. Both call sites guard
+// `status === 401` before throwing this, so there is no other status to name.
+const deadToken = () => Object.assign(new Error(EXPIRED), { signIn: "expired" })
+
+// RISK is what every 403 says — ModelScope's risk control, not a bad token:
+// the account may be perfectly fine and only the request was refused. The
+// check-in's touch adds the retry it can promise; usage's two reads do not
+// (the host polls on its own schedule, nothing here is retried).
+const RISK = "被魔搭风控拒绝（HTTP 403）"
+
+// gate turns a reply that is not an answer into the error it is, so the four
+// reads that talk to ModelScope (the ledger, the touch, usage's balance and
+// usage's ledger) do not each carry their own copy of the four checks. `what`
+// names the read in the message ("账单查询失败" / "余额查询失败" / "登录接口
+// 失败"); `risk` is the 403 wording, which the touch alone extends with the
+// retry it can promise.
+//
+// The parse check and the status check are separate on purpose: a body that
+// does not parse is not JSON; a body that parses and carries a 429/500 is the
+// server saying why in its own words (「请求过于频繁」「系统繁忙」). Merged,
+// a JSON-carrying 429 was reported as "响应不是 JSON" and sent the user to
+// check their proxy.
+const gate = (res, body, parsed, token, what, risk = RISK) => {
+  if (res.status === 401) throw deadToken()
+  if (res.status === 403) throw new Error(risk)
+  if (!parsed) throw new Error(`${what}：响应不是 JSON（HTTP ${res.status}）`)
+  if (res.status !== 200 || !okOf(body)) throw new Error(`${what}：${saidOf(body, token) || `HTTP ${res.status}`}`)
 }
 
 // todayEarn are today's credit grants, by the day ModelScope records them.
 async function todayEarn(token, deadline) {
   const { res, body, parsed } = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
-  if (res.status === 401) throw Object.assign(new Error("令牌失效或不属于国内站"), { signIn: "expired" })
-  // 403 is ModelScope's risk control, not a bad token: the account may be
-  // perfectly fine and only the request was refused.
-  if (res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
-  // 两件事分开说：body 解析不出来才是「不是 JSON」；解析出来了、状态码不对，
-  // 就是服务端用自己的话说了不行（429 的「请求过于频繁」、500 的「系统繁忙」）。
-  // 合在一起写，一个带 JSON 解释的 429 会被报成「响应不是 JSON」——把人支去
-  // 查代理和网络，而服务端已经说清楚原因了。
-  if (!parsed) throw new Error(`账单查询失败：响应不是 JSON（HTTP ${res.status}）`)
-  if (res.status !== 200 || !okOf(body)) throw new Error(`账单查询失败：${saidOf(body, token) || `HTTP ${res.status}`}`)
+  gate(res, body, parsed, token, "账单查询失败")
   const day = todayCN()
   return recordsOf(body).filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day))
 }
@@ -754,16 +788,8 @@ export async function MsmoliPlugin(input) {
           }
 
           const { res, body, parsed } = await json(token, LOGIN_INFO, deadline)
-          if (res.status === 401)
-            return { outcome: "failed", message: "令牌失效或不属于国内站（HTTP 401）", signIn: "expired" }
           // 403 是风控，不是令牌坏了：账号可能是好的，只是这次请求被拒
-          if (res.status === 403) return { outcome: "failed", message: "被魔搭风控拒绝（HTTP 403），稍后会自动重试" }
-          // 同 todayEarn：解析失败与「解析成功但服务端说不」是两件事。
-          // 一个带 JSON 解释的 429/500 不是「响应不是 JSON」。
-          if (!parsed)
-            return { outcome: "failed", message: `登录接口失败：响应不是 JSON（HTTP ${res.status}）` }
-          if (res.status !== 200 || !okOf(body))
-            return { outcome: "failed", message: `登录接口失败：${saidOf(body, token) || `HTTP ${res.status}`}` }
+          gate(res, body, parsed, token, "登录接口失败", `${RISK}，稍后会自动重试`)
 
           const me = dataOf(body)
           // A name is a string. Anything else — a number, an object, a list —
@@ -840,21 +866,12 @@ export async function MsmoliPlugin(input) {
         try {
           await rememberAccountName(client, token, names.get(token) ?? "", auth, configDir)
           const bal = await json(token, BALANCE, deadline)
-          if (bal.res.status === 401) throw fail(bal.res.status)
-          if (bal.res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
-          // 同 todayEarn：解析失败才叫「不是 JSON」。余额侧多一步 — 解析出来
-          // 的 429/500 带着服务端的原话，那句话比状态码有用。
-          if (!bal.parsed) throw new Error(`余额查询失败：响应不是 JSON（HTTP ${bal.res.status}）`)
-          if (bal.res.status !== 200 || !okOf(bal.body))
-            throw new Error(`余额查询失败：${saidOf(bal.body, token) || `HTTP ${bal.res.status}`}`)
+          gate(bal.res, bal.body, bal.parsed, token, "余额查询失败")
           // data 缺失读成 0 会把「没读懂」翻译成「余额为零」——一个确定又
           // 错误的结论，卡片会写「0 魔粒可用」。账本那侧的 recordsOf 同理。
           // 字段这一层也一样：available_balance 缺失、null、或改了名字，
           // 都不是 0 元的余额。
-          const balData = bal.body?.data ?? bal.body?.Data
-          if (balData === undefined || balData === null || typeof balData !== "object" || Array.isArray(balData)) {
-            throw new Error("余额查询失败：响应里没有 data")
-          }
+          const balData = dataObjectOf(bal.body, "余额查询失败：响应里没有 data")
           const rawAvailable = balData.available_balance
           if (blankOf(rawAvailable)) {
             throw new Error("余额查询失败：响应里没有 available_balance")
@@ -875,11 +892,7 @@ export async function MsmoliPlugin(input) {
           const available = Math.max(0, yin(availableN))
 
           const tx = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
-          if (tx.res.status === 401) throw fail(tx.res.status)
-          if (tx.res.status === 403) throw new Error("被魔搭风控拒绝（HTTP 403）")
-          if (!tx.parsed) throw new Error(`账单查询失败：响应不是 JSON（HTTP ${tx.res.status}）`)
-          if (tx.res.status !== 200 || !okOf(tx.body))
-            throw new Error(`账单查询失败：${saidOf(tx.body, token) || `HTTP ${tx.res.status}`}`)
+          gate(tx.res, tx.body, tx.parsed, token, "账单查询失败")
 
           const day = todayCN()
           let earned = 0

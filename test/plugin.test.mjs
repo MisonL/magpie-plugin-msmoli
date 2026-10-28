@@ -308,7 +308,11 @@ test("a check-in envelope that is not a success fails, not settles", async () =>
 
 test("a check-in 403 is risk control too, and does not sign the account out", async () => {
   // the check-in touches login/info, whose 403 is also risk control: marking
-  // it expired would sign out an account that is perfectly fine
+  // it expired would sign out an account that is perfectly fine. The touch's
+  // wording also carries the retry it can promise (the host asks again in
+  // 30 minutes) — usage's two reads do not, since nothing there is retried
+  // by this hook; that suffix is the one difference between the two 403
+  // messages, and it has its own assertion below.
   await withFetch(
     {
       "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
@@ -318,6 +322,7 @@ test("a check-in 403 is risk control too, and does not sign the account out", as
       const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
       assert.equal(r.outcome, "failed")
       assert.match(r.message, /风控/)
+      assert.match(r.message, /稍后会自动重试/, `the touch names the retry it can promise: ${r.message}`)
       assert.notEqual(r.signIn, "expired", "a 403 is not a bad token")
     },
   )
@@ -1723,7 +1728,10 @@ test("the name cache is bounded: the oldest account's name falls out", async () 
 test("a usage read that meets a dead token marks the sign-in expired, at either step", async () => {
   // usage touches balance first, then the ledger; a 401 at either one means
   // the token is no good, and magpie only signs the account out if the hook
-  // says so
+  // says so. The card's wording is the same at both steps and says the status
+  // code, which is what the README's troubleshooting row promises — the
+  // ledger path used to answer a bare "HTTP 401" while the check-in said
+  // "令牌失效或不属于国内站（HTTP 401）", so the one condition had two texts.
   for (const at of ["balance", "transactions"]) {
     await withFetch(
       {
@@ -1740,6 +1748,8 @@ test("a usage read that meets a dead token marks the sign-in expired, at either 
         const u = await auth.usage(async () => ({ type: "api", key: "ms-bad" }))
         assert.ok(u.error, `${at}: a 401 is an error`)
         assert.equal(u.signIn, "expired", `${at}: a 401 must expire the sign-in`)
+        assert.match(u.error, /401/, `${at}: the card names the status code: ${u.error}`)
+        assert.match(u.error, /令牌失效/, `${at}: and says what it means: ${u.error}`)
       },
     )
   }
