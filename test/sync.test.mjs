@@ -367,9 +367,13 @@ test("the portable decision reads appdir's own files, not the tool's", () => {
 test("an AppImage's data folder is beside the .AppImage file, not the mount", () => {
   // appdir.Beside: a magpie run from an AppImage keeps its data beside the
   // .AppImage the user has, not in the mount it is unpacked into for the run
-  const img = join(pathToFileURL("/opt/apps").pathname.replace(/\/$/, ""), "magpie.AppImage")
-  const mount = "/tmp/.mount_magpieXX"
-  const files = new Set([join("/opt/apps", "data"), join("/opt/apps", "data", "providers.json")])
+  const apps = pathToFileURL("/opt/apps").pathname.replace(/\/$/, "")
+  const img = join(apps, "magpie.AppImage")
+  // the mount is a host folder too, and "/tmp/.mount…" is not the string
+  // join() makes of the same path on Windows: the fixture, the executable's
+  // folder and the expectation all have to be spelled the host's way
+  const mount = join(pathToFileURL("/tmp").pathname.replace(/\/$/, ""), ".mount_magpieXX")
+  const files = new Set([join(apps, "data"), join(apps, "data", "providers.json")])
   const got = findConfigDir({
     env: { APPIMAGE: img, APPDIR: mount },
     home: "/h",
@@ -377,7 +381,7 @@ test("an AppImage's data folder is beside the .AppImage file, not the mount", ()
     binPath: join(mount, "magpie"),
     exists: (p) => files.has(p),
   })
-  assert.equal(got, join("/opt/apps", "data"))
+  assert.equal(got, join(apps, "data"))
 })
 
 test("an AppImage outside its own mount is not taken for one", () => {
@@ -2261,16 +2265,22 @@ test("the shared folders are the platform's own: /Applications only on a Mac", (
   // darwin test puts /Applications and ~/Applications in Linux's list: a
   // portable-looking /Applications/data then stops being magpie's, and on a
   // Mac the same folder starts being treated as shared.
+  // The exists() fixtures and the expectations are built with join(): on
+  // Windows the probe asks for "\\Applications\\data", and a POSIX literal
+  // there would answer "no data folder" — red on a platform this rule does
+  // not differ on. binPath stays the literal "/Applications/magpie" on
+  // purpose: dirname() keeps the leading "/", which is the very spelling the
+  // rule itself compares against, and join() would iron it into "\\".
   const drive = (os) =>
     findConfigDir({
       env: {},
       home: "/h",
       os,
       binPath: "/Applications/magpie",
-      exists: (p) => p === "/Applications/data",
+      exists: (p) => p === join("/Applications", "data"),
       stat: () => ({ isFile: () => false }),
     })
-  assert.equal(drive("linux"), "/Applications/data", "on Linux /Applications is just a folder")
+  assert.equal(drive("linux"), join("/Applications", "data"), "on Linux /Applications is just a folder")
   assert.equal(drive("darwin"), "", "on a Mac /Applications is shared, so an empty data there is not magpie's")
   // ~/Applications is the same rule one level down, and needs its own drive:
   // a portable magpie living there is somebody's home folder on Linux.
@@ -2279,10 +2289,10 @@ test("the shared folders are the platform's own: /Applications only on a Mac", (
       env: {},
       home: "/h",
       os,
-      binPath: "/h/Applications/magpie",
-      exists: (p) => p === "/h/Applications/data",
+      binPath: join("/h", "Applications", "magpie"),
+      exists: (p) => p === join("/h", "Applications", "data"),
       stat: () => ({ isFile: () => false }),
     })
-  assert.equal(underHome("linux"), "/h/Applications/data", "on Linux ~/Applications is just a folder")
+  assert.equal(underHome("linux"), join("/h", "Applications", "data"), "on Linux ~/Applications is just a folder")
   assert.equal(underHome("darwin"), "", "on a Mac ~/Applications is shared too")
 })
