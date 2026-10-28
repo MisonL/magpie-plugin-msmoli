@@ -2747,6 +2747,14 @@ test("a balance field that is missing or not a number is a failure, not 0", asyn
     { available_balance: [] },
     { available_balance: true },
     { available_balance: {} },
+    // Blank, in every spelling. `rawAvailable === ""` was the only one the
+    // guard named, and `Number("   ")` is 0 like `Number("")`, so a field of
+    // spaces answered "0 魔粒可用" — the same definite wrong 0, wearing
+    // whitespace. A tab and a newline are the same field read by an editor
+    // that put nothing in it.
+    { available_balance: "" },
+    { available_balance: "   " },
+    { available_balance: "\t\n" },
   ]) {
     await withFetch(
       {
@@ -2760,13 +2768,28 @@ test("a balance field that is missing or not a number is a failure, not 0", asyn
       },
     )
   }
+  // The other side of blankOf: a number with room around it is still the
+  // number it says. Refusing every string with a space in it would answer
+  // "no card" to a balance magpie can read, and the guard would have traded
+  // one wrong answer for a missing one.
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: " 251.5 " } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.error, undefined, `a padded number is readable: ${u.error}`)
+      assert.equal(u.balance, "251.5 魔粒可用")
+    },
+  )
 })
 
 test("a ledger amount we cannot read fails the read, it does not become 0", async () => {
   // A localized "1,200" (or a format change, or a null) is a body we do not
   // understand. Read as 0 it says "领 0" beside a balance that clearly moved,
   // and the check-in answers `inactive` — which settles the day.
-  const bad = ["1,200", "１２３", null, {}, true]
+  const bad = ["1,200", "１２３", null, {}, true, "", "   ", "\t\n"]
   for (const amount of bad) {
     await withFetch(
       {
@@ -2815,18 +2838,24 @@ test("a ledger amount we cannot read fails the read, it does not become 0", asyn
   } finally {
     globalThis.fetch = real
   }
-  // a numeric string is a number, and is read as one
+  // a numeric string is a number, and is read as one — padded too, because
+  // blankOf only refuses what holds nothing, not what holds a number with
+  // room around it
   await withFetch(
     {
       "/api/v1/users/login/info": { body: { Code: 200, Data: { NickName: "alice" } } },
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 9 } } },
       "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
-        body: { success: true, data: { records: [day({ total_amount: "200" })] } },
+        body: { success: true, data: { records: [day({ total_amount: "200" }), spend(" 50.5 ")] } },
       },
     },
     async () => {
       const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
       assert.equal(r.outcome, "done")
       assert.equal(r.credit, 200)
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.error, undefined, `a padded number is readable: ${u.error}`)
+      assert.equal(u.windows[0].amount, 50.5, "the padded spend is counted")
     },
   )
 })

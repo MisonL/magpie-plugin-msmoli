@@ -609,6 +609,14 @@ async function todayEarn(token, deadline) {
   return recordsOf(body).filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day))
 }
 
+// blankOf is a field that carries no number in it at all: absent, null, or
+// nothing but whitespace. The empty string was already refused at both
+// numeric sites; the spaces were not, and `Number("   ")` is 0 — so a blank
+// amount read as "a grant of nothing" (the check-in answers `inactive`, which
+// settles the day) and a blank balance as "0 魔粒可用". A padded number
+// (" 251.5 ") is not blank: it says what it means.
+const blankOf = (v) => v === undefined || v === null || (typeof v === "string" && !v.trim())
+
 // amountOf is a ledger row's total_amount. A value that is there and is not a
 // number is a body we do not understand, and reads as a failure rather than as
 // 0: the same rule the whole body gets one level up. A localized "1,200", a
@@ -618,7 +626,7 @@ async function todayEarn(token, deadline) {
 // Absent is included: a row with no amount cannot be summed either way.
 const amountOf = (row) => {
   const raw = row?.total_amount
-  if (raw === undefined || raw === null || raw === "") throw new Error("账单格式不认识：没有 total_amount")
+  if (blankOf(raw)) throw new Error("账单格式不认识：没有 total_amount")
   // a number or a numeric string, as for the balance: Number(true) is 1 and
   // Number([]) is 0, both finite, and neither is an amount
   const kind = typeof raw
@@ -840,7 +848,7 @@ export async function MsmoliPlugin(input) {
             throw new Error("余额查询失败：响应里没有 data")
           }
           const rawAvailable = balData.available_balance
-          if (rawAvailable === undefined || rawAvailable === null || rawAvailable === "") {
+          if (blankOf(rawAvailable)) {
             throw new Error("余额查询失败：响应里没有 available_balance")
           }
           // A number or a numeric string is a balance. Anything else is not:
@@ -848,7 +856,8 @@ export async function MsmoliPlugin(input) {
           // isFinite check let an empty list through as "0 魔粒可用" — the
           // definite wrong answer this guard exists to stop — and a boolean
           // through as one 魔粒. A formatted string ("1,234") is a number we
-          // cannot read, not 0.
+          // cannot read, not 0, and blankOf covers the field that holds
+          // nothing but spaces, which `Number` also reads as 0.
           const kind = typeof rawAvailable
           if (kind !== "number" && kind !== "string") throw new Error("余额查询失败：available_balance 不是数字")
           const availableN = Number(rawAvailable)
