@@ -310,6 +310,16 @@ in `providers.json`, a plugin keeps its sign-in in `plugin-auth.json`. Entering
 the same `ms-` token in both is expected. Nothing reads the plugin's usage card
 to decide where chat goes — that is the point of the separate id.
 
+The preset's empty card has one consequence worth knowing. ModelScope's
+inference API has no balance endpoint, so magpie cannot see that the key's 魔粒
+are gone; the gateway learns it from the vendor's own `429 insufficient balance`
+and then rests the key for 30 minutes. Until then each request spends one failed
+try on it first. The balance is on the account, and `modelscope.cn` does answer
+it, so the preset can be told: in its editor, Balance URL
+`https://modelscope.cn/openapi/v1/magicubes/balance` and Balance field
+`data.available_balance` (the same token answers it — `magpie quota modelscope`
+then reads a number instead of `no balance endpoint known for it`).
+
 The one real overlap to know about: **both rows cost nothing extra**, but if you
 remove the plugin's sign-in, chat is unaffected, and if you remove the preset,
 the check-in keeps working. They fail independently.
@@ -373,6 +383,7 @@ token has the token masked before it reaches the card or magpie's log.
 | `failed` with HTTP 403 | ModelScope's risk control refused the request; the token is fine. It retries in 30 minutes |
 | Before the window the card reads failed, with a line naming the claim time: `09:56 后自动领取（magpie 每半小时问一次，无需操作）` | expected — the card leads with when it will claim; see "When it claims" above |
 | Always `inactive` | the sign-in works but nothing shows in today's ledger: the account may not be eligible, or the grant hasn't been written yet (a claim made elsewhere shows as `done`). Before Beijing noon magpie asks again every 30 minutes, so a late grant is picked up; from noon on this answer stands for the day |
+| Chat through the `modelscope` preset answers `429 insufficient balance` in the Routing log | the account's daily 250 魔粒 are spent — a flagship call costs 2, so ~125 calls run the day dry and the vendor refuses the rest. Not this plugin: it registers no models. If you want magpie to *see* the balance on the preset's card too, give the preset the same reading — Balance URL `https://modelscope.cn/openapi/v1/magicubes/balance`, Balance field `data.available_balance` in its editor (the same token answers it; read `1.50` on 2026-10-28). Whether the gateway then holds a drained key before spending a request on it is not verified — the safe path is still the 429's own 30-minute rest |
 | Two accounts of one ModelScope nickname, and only one of them checks in | magpie before 2026-10-20 kept a plugin's check-in per display name rather than per sign-in, so namesakes collapsed into one. Update magpie: the fix landed upstream on 2026-10-20 (magpie-community/plugins#254) |
 | Edits to this plugin do nothing | path plugins are referenced in place; restart magpie |
 | Installed both ways by accident, and `magpie plugin list` says `msmoli` is "served by" one of them | that is magpie keeping two copies of one provider id. Remove one: `magpie plugin rm github:MisonL/magpie-plugin-msmoli` or `magpie plugin rm <path>`. magpie files your alias with the package it was set against, so removing a copy can take the display name with it — it comes back if you add that package again, or you set the alias once more |

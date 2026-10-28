@@ -252,6 +252,15 @@ magpie accounts alias msmoli "API key …a1b2" 主号
 `plugin-auth.json` 存登录态。两边填同一个 `ms-` 令牌是正常的。没有任何逻辑会
 拿插件那张卡去决定聊天走哪里——独立 id 的意义就在这里。
 
+预设那张空卡片有一个后果值得知道：魔搭的推理接口没有余额端点，magpie 看不到
+这把 key 的魔粒已经用完，只能从服务端自己的 `429 insufficient balance` 学到，
+再让这把 key 休息 30 分钟——在那之前每个请求都会先在它身上白试一次。余额其实
+是账号的，`modelscope.cn` 也答得出，所以可以告诉预设：在它的编辑器里把
+Balance URL 填 `https://modelscope.cn/openapi/v1/magicubes/balance`、Balance
+field 填 `data.available_balance`（同一把令牌就答得出来，之后
+`magpie quota modelscope` 读到的是数字，而不是 `no balance endpoint known
+for it`）。
+
 真正要知道的一点：**两行都不产生额外开销**；删掉插件的登录态，聊天照常；
 删掉预设，签到照常。它们各自独立失败。
 
@@ -294,6 +303,7 @@ title 里如果带着令牌，进卡片和 magpie 日志之前会先被掩码。
 | `failed` + HTTP 403 | 魔搭风控拒了这次请求，令牌本身没问题，30 分钟后会重试 |
 | 窗口前卡片写着 failed，附一行「09:56 后自动领取（magpie 每半小时问一次，无需操作）」 | 正常现象——卡片以领取时刻开头，见上面的「什么时候领」 |
 | 一直是 `inactive` | 登录通了但当天账单里没有记录：账号可能不在活动范围，或者发放还没写出来（别处领过的会显示成 `done`）。北京时间 12 点前 magpie 会每 30 分钟再问一次，晚到的发放会被补上；过了 12 点这个回答就代表今天了 |
+| 聊天走 `modelscope` 预设时报 `429 insufficient balance`，路由日志里能看到 | 账号当天的 250 魔粒花光了——旗舰模型一次 2 魔粒，约 125 次就没了，之后服务端拒答。不是本插件的问题：它不注册任何模型。想让 magpie 在预设的卡片上也看到余额，照上面「两条 ModelScope」那节把 Balance URL / Balance field 填上即可；**填了之后网关会不会提前避开空余额的 key，未验证**，能确定的只有 429 之后的 30 分钟休息 |
 | 两个账号用的是同一个魔搭昵称，只有一个在签到 | 2026-10-20 之前的 magpie 把插件的签到按「显示名」记账而不是按登录，同名的账号会被并成一个。升级 magpie 即可：上游在 2026-10-20 修掉了（magpie-community/plugins#254） |
 | 改了插件代码没生效 | 路径式插件按位置引用，改完要重启 magpie |
 | 两种方式都装了一遍，`magpie plugin list` 说 msmoli "served by" 其中一个 | 这是 magpie 在提醒同一个 provider id 有两份。删掉一份：`magpie plugin rm github:MisonL/magpie-plugin-msmoli` 或 `magpie plugin rm <路径>`。magpie 把 alias 挂在当初设它的那个包名下，所以删掉一份可能连带把显示名也收走——重新 add 那个包，或者再设一次 alias 就回来 |
