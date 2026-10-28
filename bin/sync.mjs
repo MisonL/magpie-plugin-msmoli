@@ -319,17 +319,15 @@ export const mask = (t) => {
 // 插件、或用 ms 令牌覆盖掉那个第三方 provider —— 两个方向都静默写错凭据。
 export function presetCandidates(providers, from = "") {
   const list = Array.isArray(providers) ? providers : []
-  const keyed = (p) => typeof p?.key === "string" && p.key.trim()
-  const ours = (p) => p?.id === PRESET || p?.preset === PRESET || hostOf(p?.chat) === HOST
   // the key is trimmed where it is read: a token pasted with a trailing
   // newline is the same token, and every comparison and every stdin below
   // must see that one — the check-in plugin trims it too (tokenOf), so the
   // two halves of the tool otherwise disagree about the same credential
   const out = (ps) => ps.map((p) => ({ ...p, key: p.key.trim() }))
-  if (from) return out(list.filter((p) => keyed(p) && p.id === from && ours(p)))
-  const byId = list.filter((p) => keyed(p) && (p.id === PRESET || p.preset === PRESET))
+  if (from) return out(list.filter((p) => keyedOf(p) && p.id === from && oursOf(p)))
+  const byId = list.filter((p) => keyedOf(p) && (p.id === PRESET || p.preset === PRESET))
   if (byId.length) return out(byId)
-  return out(list.filter((p) => keyed(p) && hostOf(p.chat) === HOST))
+  return out(list.filter((p) => keyedOf(p) && hostOf(p.chat) === HOST))
 }
 
 // show is what goes to the terminal: a provider id or a file's path comes
@@ -343,6 +341,13 @@ export function presetCandidates(providers, from = "") {
 const tokenShaped = /ms-[A-Za-z0-9][A-Za-z0-9-]{10,}/g
 const show = (s) => String(s ?? "").replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(tokenShaped, (m) => mask(m))
 
+// SENDABLE is the plugin's own test (index.mjs's tokenOf): a key with
+// anything but visible ASCII in it goes out in a Cookie/Authorization header
+// and the runtime rejects it. Both directions of this tool write a key the
+// plugin will later send, so both refuse it here — a success this tool
+// reports for a key that cannot work is worse than the refusal.
+const SENDABLE = /^[\x21-\x7e]+$/
+
 function hostOf(chat) {
   if (typeof chat !== "string") return ""
   try {
@@ -351,6 +356,15 @@ function hostOf(chat) {
     return ""
   }
 }
+
+// oursOf and keyedOf are the two tests "a provider we could sync" is made of,
+// and they are asked in two places: presetCandidates' search, and main's
+// no-preset advice (which names the provider the user already has instead of
+// telling them to add one). Two copies of the rule would drift — the advice
+// naming a provider the search does not consider is exactly the bug that
+// pair was written to fix — so there is one copy.
+const oursOf = (p) => p?.id === PRESET || p?.preset === PRESET || hostOf(p?.chat) === HOST
+const keyedOf = (p) => typeof p?.key === "string" && Boolean(p.key.trim())
 
 // 插件侧的账号：主键 msmoli 与 msmoli#xxxxxx，按令牌区分。
 export function pluginAccounts(auth) {
@@ -374,7 +388,7 @@ export function planToPlugin({ preset, accounts, force }) {
   // planToPreset has the same guard for the same reason; this direction was
   // missing it, and a key with a zero-width character in it — invisible in
   // every terminal and in this tool's own mask — went through.
-  if (!/^[\x21-\x7e]+$/.test(preset.key)) {
+  if (!SENDABLE.test(preset.key)) {
     lines.push(`✗ 内置预设的 key 含空格、换行或非 ASCII 字符，插件发不出去，不登录。`)
     // the provider the user actually has, not the preset's default id: a
     // vendor found by --from or by its chat host is named "my-ms", and
@@ -446,7 +460,7 @@ export function planToPreset({ preset, accounts, force }) {
   // The plugin refuses a key with anything but visible ASCII in it (tokenOf,
   // it would go out in an Authorization header). Writing such a key into the
   // preset would break chat requests while this tool reported success.
-  if (!/^[\x21-\x7e]+$/.test(main.token)) {
+  if (!SENDABLE.test(main.token)) {
     lines.push(`✗ 插件里那把令牌含空格、换行或非 ASCII 字符，发不出去，不写进内置预设。`)
     lines.push(`  先修好插件那边的登录（magpie plugin login ${ID}）。`)
     return { action: "refuse", lines, cmds: [] }
@@ -654,18 +668,15 @@ export async function main({
   // 但这里先统一拦住，免得 null 一路传到 plan 里崩栈
   if (!preset) {
     const all = Array.isArray(providers) ? providers : []
-    // oursOf/blankKey repeat presetCandidates' own tests. A candidate needs a
-    // key, and a provider that is ours but has none is not "not configured":
-    // telling the user to add it names one they already have, and the --from
-    // message below used to say its chat does not point at ModelScope — about
-    // a provider whose chat points at exactly that host.
-    const oursOf = (p) => p?.id === PRESET || p?.preset === PRESET || hostOf(p?.chat) === HOST
-    const blankKey = (p) => !(typeof p?.key === "string" && p.key.trim())
+    // A candidate needs a key, and a provider that is ours but has none is not
+    // "not configured": telling the user to add it names one they already
+    // have, and the --from message below used to say its chat does not point
+    // at ModelScope — about a provider whose chat points at exactly that host.
     if (args.from) {
       // the provider may well exist and simply not be one of ours: saying
       // "there is no provider by that id" sends the user to re-add it
       const any = all.filter((p) => p?.id === args.from)
-      const bare = any.filter((p) => oursOf(p) && blankKey(p))
+      const bare = any.filter((p) => oursOf(p) && !keyedOf(p))
       if (bare.length) {
         log(`✗ "${show(args.from)}" 在，但还没有 key，没有可同步的令牌。`)
         log(`  用 magpie provider key ${show(args.from)} <key> 写入。`)
@@ -677,7 +688,7 @@ export async function main({
         log(`  用 --status 看现有的，或先 magpie provider add ${show(args.from)} <key>。`)
       }
     } else {
-      const bare = all.filter((p) => oursOf(p) && blankKey(p))
+      const bare = all.filter((p) => oursOf(p) && !keyedOf(p))
       if (bare.length) {
         log(`✗ 内置侧的 ${show(bare[0].id)} 在，但还没有 key，没有可同步的令牌。`)
         log(`  用 magpie provider key ${show(bare[0].id)} <key> 写入，或在 magpie 的「供应商」页填上。`)

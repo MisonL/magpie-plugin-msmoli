@@ -53,19 +53,25 @@ const CHECKIN_BUDGET_MS = 25 * 1000
 // 8s requests at the per-request cap still fit.
 const USAGE_BUDGET_MS = 18 * 1000
 
+// SENDABLE is what a key may consist of and still go out: visible ASCII and
+// nothing else. A key outside it would put the whole value into a fetch error
+// message ("…is an invalid header value"), which magpie logs and shows. One
+// rule, one place — tokenOf and unusableKey must agree on it, or a key one of
+// them accepts and the other refuses has no single answer to give the user.
+const SENDABLE = /^[\x21-\x7e]+$/
+const rawKey = (auth) => (auth?.type === "api" ? String(auth.key ?? "").trim() : "")
+
 // tokenOf is the key this sign-in carries, or "" when there is none or it is
 // not one we can send. The two are told apart by the caller so a key that is
 // there and unusable does not read as "you never signed in".
 const unusableKey = (auth) => {
-  const key = auth?.type === "api" ? String(auth.key ?? "").trim() : ""
-  return Boolean(key) && !/^[\x21-\x7e]+$/.test(key)
+  const key = rawKey(auth)
+  return Boolean(key) && !SENDABLE.test(key)
 }
 const tokenOf = (auth) => {
-  const token = auth?.type === "api" ? String(auth.key ?? "").trim() : ""
-  // A token with anything but visible ASCII in it would put the whole value
-  // into a fetch error message ("…is an invalid header value"), which magpie
-  // logs and shows. Refused here, before it can be echoed anywhere.
-  return token && /^[\x21-\x7e]+$/.test(token) ? token : ""
+  const token = rawKey(auth)
+  // Refused here, before it can be echoed anywhere.
+  return token && SENDABLE.test(token) ? token : ""
 }
 
 // handleOf is a short, non-reversible stand-in for the token: the check-in
@@ -220,6 +226,10 @@ const text = (value, max = 120) => {
     // eslint-disable-next-line no-control-regex
     .replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, " ")
     .trim()
+  // A UTF-16 unit is one code point or half of a surrogate pair, never the
+  // reverse, so a string no longer than max in units is no longer than max
+  // in code points either: the array and the join are only needed to cut.
+  if (cleaned.length <= max) return cleaned
   const points = Array.from(cleaned)
   return points.length > max ? points.slice(0, max).join("") : cleaned
 }

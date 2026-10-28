@@ -2752,6 +2752,46 @@ test("a key that is there but cannot be sent is not reported as a missing sign-i
   assert.match(none.message, /没有登录信息/)
 })
 
+test("the one unusable-key test covers a space, not just a newline", async () => {
+  // The rule is "visible ASCII and nothing else" (0x21-0x7e). A newline is
+  // below the range, but so is the space — and a key with a space in it is
+  // what a paste from a wrapped terminal actually produces. Widened to
+  // [\x20-\x7e] the guard passes it through, the Cookie header carries it,
+  // and fetch answers with its own English about an invalid header value.
+  const withSpace = async () => ({ type: "api", key: "ms-aaaa1111 bbbb-2222" })
+  const r = await auth.checkin(withSpace)
+  assert.equal(r.outcome, "failed")
+  assert.match(r.message, /无法识别/, `a space is not sendable either: ${r.message}`)
+  const u = await auth.usage(withSpace)
+  assert.match(u.error, /无法识别/, `usage should name it too: ${u.error}`)
+})
+
+test("a key pasted with whitespace around it is the same key", async () => {
+  // The other side of the same rule: a token copied by hand or out of a
+  // wrapped terminal often arrives with a newline or spaces around it. The
+  // plugin trims before testing and before sending (rawKey), and so does the
+  // sync tool (presetCandidates), so the two halves agree about the same
+  // credential. Without the trim the key fails the visible-ASCII test and the
+  // user is told their key is unusable — for a key that works everywhere else.
+  const padded = " \tms-test-0000000000\n"
+  const seen = []
+  const real = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    seen.push(init?.headers?.Cookie ?? "")
+    return reply({ body: { success: true, data: { records: [] } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: padded }))
+    assert.notEqual(r.outcome, "failed", `a padded key is a usable key: ${r.message}`)
+    assert.ok(seen.length > 0, "the request must have gone out")
+    for (const cookie of seen) {
+      assert.equal(cookie, "m_session_id=ms-test-0000000000", `the Cookie carries the trimmed key: ${cookie}`)
+    }
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("a network failure says what happened instead of the bare English", async () => {
   const real = globalThis.fetch
   globalThis.fetch = async () => {
