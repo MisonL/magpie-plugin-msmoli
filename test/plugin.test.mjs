@@ -1343,6 +1343,80 @@ test("windowOf reads the shapes a user writes, and refuses the ones it cannot", 
   assert.deepEqual(windowOf({ checkinWindow: ["09：15", "11：45"] }), { start: 9 * 60 + 15, end: 11 * 60 + 45 })
 })
 
+test("a window whose ends meet is not a window of width zero", () => {
+  // Both "start before end" guards are `>=`, and equality is the whole of
+  // what that buys: plan() takes `hash % (end - start)`, so a window of width
+  // zero is a modulo by zero. The target comes out NaN, `minuteCN() >= NaN`
+  // is false forever, and the account never claims that day — while the card
+  // reads "NaN:NaN 后自动领取". Widening either guard to `>` survives every
+  // other test in this file, so the equality case needs its own.
+  const dflt = { start: 8 * 60 + 30, end: 10 * 60 }
+  assert.deepEqual(windowOf({ checkinWindow: ["09:00", "09:00"] }), dflt, "equal ends are not a window")
+  assert.deepEqual(windowOf({ checkinWindow: "09:00-09:00" }), dflt, "the same, written as one string")
+  // the second guard's equality, reached through the 23:00 cap: 23:30 caps
+  // its end onto its own start
+  assert.deepEqual(windowOf({ checkinWindow: ["23:00", "23:30"] }), dflt, "a cap that lands on the start is not a window")
+})
+
+test("a one-minute window pins the target to that minute", async () => {
+  // With the window one minute wide the hash has nothing to choose, so the
+  // target is the start whatever the day and the account. That is the only
+  // way to read the target back exactly: every other window is a range, and
+  // a wrong minute arithmetic still lands inside a wide one. It pins plan()
+  // and the clock() the card prints together.
+  await withWindow(["09:28", "09:29"], `${today} 07:00:00`, async () => {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-pin" }))
+    assert.match(r.message, /^09:28 后自动领取/, `the card must name the target minute: ${r.message}`)
+  })
+})
+
+test("the target minute itself is due, not one minute short", async () => {
+  // plan() is `minuteCN() >= target`. Written `>`, an ask landing on the
+  // target's own minute answers "09:28 后自动领取" while the clock reads
+  // 09:28 — the card contradicting itself — and the claim slips to the next
+  // ask, half an hour later. The host asks on its own schedule, so an ask
+  // landing exactly on the target is one in thirty.
+  const t = await withWindow(["08:30", "10:00"], `${today} 07:00:00`, () => targetOf(auth.checkin))
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+    },
+    async () => {
+      await withWindow(["08:30", "10:00"], `${today} ${t.text}:00`, async () => {
+        const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+        assert.doesNotMatch(r.message, /后自动领取/, `at ${t.text} sharp the plugin must claim, not defer: ${r.message}`)
+      })
+    },
+  )
+})
+
+test("the Beijing day is +8 hours, at the hour it matters", async () => {
+  // 23:30 Beijing is 15:30 UTC. A shift one hour off (or the host's own zone)
+  // reads that as the next day, and two things break at once: todayCN() stops
+  // matching a ledger row stamped today — the card would say 领 0 next to a
+  // balance that had just moved, and the check-in would answer `inactive`,
+  // which settles the day — and minuteCN() falls back to 00:30, so a window
+  // that should be long due answers "后自动领取" again. Every other test
+  // computes its fixtures with the same +8, so they move with the constant;
+  // this one pins it to a known instant instead.
+  await withWindow(["22:00", "23:30"], `${today} 23:30:00`, async () => {
+    const [r, u] = await withFetch(
+      {
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 181.5 } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+      },
+      async () => [
+        await auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+        await auth.usage(async () => ({ type: "api", key: "ms-test" })),
+      ],
+    )
+    assert.doesNotMatch(r.message, /后自动领取/, `23:30 Beijing is past a 22:00-23:30 target: ${r.message}`)
+    assert.match(u.windows[0].display, /领 200/, `a row stamped today must count at 23:30 Beijing: ${u.windows[0].display}`)
+  })
+})
+
 test("a write-back failure is retried later, and never logs the token", async () => {
   // the host can refuse the write (a locked file, a daemon restarting). The
   // name has to be tried again on the next ask, and the log line must not
@@ -1491,6 +1565,32 @@ test("an alias kept on a plugin-left provider still counts as the user's name", 
     if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
     else process.env.MAGPIE_MSMOLI_CONFIG = saved
   }
+})
+
+test("the countdown reads the daily grants only, not every EARN row", async () => {
+  // A promo credit (infocomplement_*) carries its own expiry and can be gone
+  // before the daily batch is. resetsAt is the daily batches' soonest loss —
+  // the comment on that loop says so — so a promo must not move it: the card
+  // would point its ↻ at a grant that is not the one the user claims every
+  // day. Both `&&`s of that condition can be widened to `||` without any
+  // other test noticing, so the row has to be here.
+  const promo = day({
+    rule_key: "infocomplement_profile_experience",
+    title: "资料完善",
+    total_amount: 50,
+    expire_at: `${tomorrow} 00:00:24`,
+  })
+  const daily = day({ expire_at: `${tomorrow} 09:46:41` })
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 200 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [promo, daily] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.windows[0].resetsAt, `${tomorrow}T01:46:41.000Z`, `the daily grant is the countdown, not the promo: ${u.windows[0].resetsAt}`)
+    },
+  )
 })
 
 test("an expiry the plugin cannot parse resets nothing, rather than 1970", async () => {
@@ -2372,6 +2472,12 @@ test("a time that is not a time is refused instead of rolled over", async () => 
     [`${nextYear}-10-05 25:13:40`, "hour 25"],
     [`${nextYear}-10-05 09:99:40`, "minute 99"],
     [`${nextYear}-10-05 09:13:99`, "second 99"],
+    // the boundary itself, not one past it: 60 is the first value the limit
+    // refuses, and `> 59` widened to `> 60` leaves 99 refused and 60 accepted.
+    // A minute of 60 rolls into the next hour on the same day, so the
+    // round-trip check below cannot see it either.
+    [`${nextYear}-10-05 09:60:40`, "minute 60"],
+    [`${nextYear}-10-05 09:13:60`, "second 60"],
   ]) {
     await withFetch(
       {
@@ -2400,6 +2506,22 @@ test("a time that is not a time is refused instead of rolled over", async () => 
       assert.equal(u.windows[0].resetsAt, `${nextYear}-10-05T01:13:40.000Z`, "the control stamp is a time")
     },
   )
+  // a late-evening stamp, for the round-trip check's own +8: taken with 9
+  // hours the check asks for 00:30 of the next day, and a real 23:30 expiry —
+  // the shape the ledger writes every day — would come back as "not a time"
+  // and drop off the countdown.
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records: [day({ expire_at: `${nextYear}-10-05 23:30:00` })] } },
+      },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.windows[0].resetsAt, `${nextYear}-10-05T15:30:00.000Z`, "a 23:30 expiry is a time")
+    },
+  )
 })
 
 test("a ledger with no data at all is a failure, not an empty day", async () => {
@@ -2411,6 +2533,39 @@ test("a ledger with no data at all is a failure, not an empty day", async () => 
       const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
       assert.equal(r.outcome, "failed", `a shapeless body must not settle the day: ${r.outcome}`)
       assert.match(r.message, /账单格式/)
+    },
+  )
+})
+
+test("a Data that is null is a body we do not understand, not an internal error", async () => {
+  // `body.data ?? body.Data` hands a capitalised Data through when the
+  // lowercase one is absent, so a Data that is null reaches the guard as
+  // null — and typeof null is "object", the one value the type check alone
+  // cannot catch. Left to fall through, `data.records` throws a TypeError
+  // whose text ("Cannot read properties of null") is what the card would
+  // show: the user is told about a JavaScript fault instead of an answer
+  // the plugin could not read. Both readers of `data` get the same shape.
+  const fine = { body: { success: true, data: { available_balance: 5 } } }
+  const fineTx = { body: { success: true, data: { records: [] } } }
+  const nullData = { body: { success: true, Data: null } }
+  await withFetch(
+    { "/openapi/v1/magicubes/balance": fine, "/openapi/v1/magicubes/transactions?page=1&page_size=50": nullData },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "failed", `a null ledger must not settle the day: ${r.outcome}`)
+      assert.match(r.message, /账单格式/, `the card should say what we could not read: ${r.message}`)
+      assert.doesNotMatch(r.message, /Cannot read propert/, "an internal error must not reach the card")
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.match(u.error, /账单格式/, `usage reads the same ledger: ${u.error}`)
+      assert.doesNotMatch(u.error, /Cannot read propert/, "an internal error must not reach the card")
+    },
+  )
+  await withFetch(
+    { "/openapi/v1/magicubes/balance": nullData, "/openapi/v1/magicubes/transactions?page=1&page_size=50": fineTx },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.match(u.error, /没有 data/, `the balance's own guard answers too: ${u.error}`)
+      assert.doesNotMatch(u.error, /Cannot read propert/, "an internal error must not reach the card")
     },
   )
 })
@@ -3291,6 +3446,116 @@ test("a key too short for magpie to hint goes by magpie's label, not one of our 
         assert.equal(writes.length, 0, "the user's alias is keyed to magpie's own label, and must be honoured")
       },
     )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("an empty accountId is no accountId, and the key's own label is used", async () => {
+  // labelOf takes the accountId only when it is a string that carries
+  // something: `typeof x === "string" && x` widened to `||` makes "" a label
+  // of its own. An empty label is not a name an alias could ever be kept
+  // under, so aliasOf answers "could not look" instead of "no alias" and the
+  // nickname is never written — on a fresh install the card would show the
+  // key's tail for good instead of the account's own name.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-emptyid-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    const token = "ms-emptyid-0000-0000-0000-000000000019"
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: token, accountId: "" }))
+        assert.equal(writes.length, 1, "an empty accountId is no accountId, so the nickname is written")
+        assert.equal(writes[0].body.accountId, "Mison")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("an accountNames that is not a map does not take the check-in down with it", async () => {
+  // magpie's providers.json is written by another program, and a map with
+  // nothing in it can arrive as null (Go marshals a nil map that way). The
+  // guard that skips such an entry is `!names || typeof names !== "object"`;
+  // narrowed to `&&` it stops guarding null — typeof null is "object" — and
+  // `names[key]` then throws out of the check-in, which answers failed and
+  // retries forever over a name it was never going to write.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nullnames-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "msmoli", accountNames: null }] }))
+  const token = "ms-null-0000-0000-0000-000000000017"
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        const r = await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(r.outcome, "inactive", `a null accountNames is no names, not a broken file: ${r.message}`)
+        assert.equal(writes.length, 1, "with no names to honour, the nickname is written")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a nickname a token could hold is refused at 20 characters, and a longer one is not", async () => {
+  // unusableName refuses a name of 20+ characters that sits inside the token:
+  // a piece that long is the token being echoed, not a person's name. Both
+  // halves of that rule are load-bearing and neither was asserted — `>= 20`
+  // widened to `>= 21` writes a 20-character slice of the token into
+  // plugin-auth.json, and `&&` widened to `||` refuses every nickname of 20+
+  // characters, however unrelated. The threshold is the token's own front:
+  // whatever its length, a piece of it must be refused at 20 and a name the
+  // token does not contain must go through.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-longname-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const token = "ms-0123456789abcdef0123456789abcdef012345678"
+  const piece = token.slice(0, 20)
+  const stranger = "MisonLiangWithALongName"
+  assert.equal(piece.length, 20, "exactly the threshold")
+  assert.ok(stranger.length > 20 && !token.includes(stranger), "a long name the token does not hold")
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    for (const [nick, want, why] of [
+      [piece, 0, "a 20-character slice of the token is the token"],
+      [stranger, 1, "a long name the token does not hold is a name"],
+    ]) {
+      const writes = []
+      const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+      await withFetch(
+        {
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+        },
+        async () => {
+          await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+          assert.equal(writes.length, want, why)
+        },
+      )
+    }
   } finally {
     if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
     else process.env.MAGPIE_MSMOLI_CONFIG = saved
