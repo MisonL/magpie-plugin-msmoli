@@ -2105,6 +2105,31 @@ test("a grant title that would be cut mid-pair keeps its whole characters", asyn
   }
 })
 
+test("a server string that would fill the card is cut, not passed through", async () => {
+  // text() caps every string that reaches the card, magpie's log and
+  // plugin-checkin.json. The cap itself was never asserted: the emoji test
+  // above depends on the cut at 40 but still passes with truncation removed
+  // entirely, so nothing noticed a few hundred characters of a server's
+  // title landing whole in the line the host stores.
+  const title = "长".repeat(500)
+  let reads = 0
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname + new URL(url).search
+    if (path === "/api/v1/users/login/info") return reply({ body: { Code: 200, Data: { NickName: "alice" } } })
+    reads += 1
+    return reply({ body: { success: true, data: { records: reads === 1 ? [] : [day({ title })] } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+    assert.equal(r.outcome, "claimed")
+    const points = Array.from(r.message).length
+    assert.ok(points < 100, `the title reached the card whole: ${points} code points`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("a second check-in in the same process does not write the name again", async () => {
   // `named` is the once-per-token guard. The earlier test's second ask carried
   // accountId the host had already saved, so the "already named" condition
@@ -2318,16 +2343,52 @@ test("a time that is not a time is refused instead of rolled over", async () => 
   // Date.UTC normalizes: month 13 is January next year, "99:99:99" rolls two
   // days on. The card would count down to a moment that reads fine and is not
   // when the grant expires.
+  //
+  // Each part is tried on its own. The single composite fixture this test
+  // used to carry ("2026-13-45 99:99:99") is refused by the month check
+  // whatever happens to the rest, so deleting the minute and second limits
+  // kept the suite green — and those two are the only parts the round-trip
+  // check below cannot see: 09:99:99 rolls to 10:41 on the *same* Beijing
+  // calendar day, so the date that comes back matches. Month, day and hour
+  // all roll the date and are caught twice over; minute and second are the
+  // load-bearing half of that line.
+  //
+  // The stamps sit a year out, as in the February test: rolled onto a moment
+  // in the past, the "still running" filter would drop them and the test
+  // would pass even if cnTime accepted the date.
+  const nextYear = new Date(Date.now() + 8 * 3600e3 + 365 * 86400e3).getUTCFullYear()
+  for (const [stamp, why] of [
+    [`${nextYear}-13-05 09:13:40`, "month 13"],
+    [`${nextYear}-10-45 09:13:40`, "day 45"],
+    [`${nextYear}-10-05 25:13:40`, "hour 25"],
+    [`${nextYear}-10-05 09:99:40`, "minute 99"],
+    [`${nextYear}-10-05 09:13:99`, "second 99"],
+  ]) {
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+          body: { success: true, data: { records: [day({ expire_at: stamp })] } },
+        },
+      },
+      async () => {
+        const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+        assert.equal(u.windows[0].resetsAt, "", `${why} is no time at all: ${JSON.stringify(u.windows[0])}`)
+      },
+    )
+  }
+  // and the control: the same stamp with every part in range is a time, so
+  // the loop above is not passing because the fixture stopped reaching cnTime
   await withFetch(
     {
       "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
       "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
-        body: { success: true, data: { records: [day({ expire_at: "2026-13-45 99:99:99" })] } },
+        body: { success: true, data: { records: [day({ expire_at: `${nextYear}-10-05 09:13:40` })] } },
       },
     },
     async () => {
       const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
-      assert.equal(u.windows[0].resetsAt, "", "an impossible time is no time at all")
+      assert.equal(u.windows[0].resetsAt, `${nextYear}-10-05T01:13:40.000Z`, "the control stamp is a time")
     },
   )
 })
