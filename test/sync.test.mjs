@@ -2044,3 +2044,245 @@ test("two spellings of one folder on a case-folding volume are one folder", () =
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ---- 第 18 轮：宽变异扫描在 bin/sync.mjs 上留下 27 个存活位点，以下钉住其中
+// 确认真实差异的那些（等价变异的判定见各条注释）
+
+test("a token-shaped run is masked whatever its first character and length", async () => {
+  // show() masks token-shaped runs so a key pasted where an id belongs never
+  // reaches the terminal whole. The pattern's first character class has to
+  // take a digit: every real ModelScope token is ms-<hex>, and a third of them
+  // start with 2-9. Narrowing the class to [A-Za-z0-10] left `ms-5df…`
+  // printed in full in the message that says there is no such id. The 10
+  // is the shortest tail a token can have; 11 lets a 13-character one through.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-maskshape-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    // a 2-9 opening digit (every real token is ms-<hex>, so a third of them
+    // start this way) and a short 13-character one
+    for (const tok of ["ms-5abc1234-dead-beef-0000-123456789abc", "ms-a1234567890"]) {
+      const out = []
+      await main({ argv: ["--dir", dir, "--from", tok, "--status", "--magpie", "/nonexistent"], log: (s) => out.push(s) })
+      const text = out.join("\n")
+      assert.ok(!text.includes(tok), `the token was echoed whole: ${text}`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a provider id with digits 2-9 is a legal id", () => {
+  // The id-shape check is what keeps `provider key --help <token>` from being
+  // read as a flag. Narrowed to [A-Za-z0-10] it refuses `5relay` — a name
+  // magpie itself accepts — and the refusal text tells the user their id is
+  // not a shape anyone uses.
+  for (const id of ["relay2", "5relay", "a8", "my-ms_3"]) {
+    const r = planToPreset({ preset: { id, key: B }, accounts: [{ name: "msmoli", token: A }], force: true })
+    assert.equal(r.action, "run", `${id} must be a legal provider id: ${r.lines.join(" / ")}`)
+  }
+  // and the flag-shaped control is still refused
+  const bad = planToPreset({ preset: { id: "--help", key: B }, accounts: [{ name: "msmoli", token: A }], force: true })
+  assert.equal(bad.action, "refuse", "a leading dash is still a flag, not an id")
+})
+
+test("a second account holding a different token is not 'the same token'", () => {
+  // planToPreset's no-op branch is for the state a forced replace leaves: some
+  // account already holds the preset's token. Written `a.token || a.token ===
+  // preset.key`, any account with any token answers yes, and the tool reports
+  // 无需操作 naming an account whose token is not the preset's — while the
+  // user's actual plugin sign-in is missing.
+  const p = planToPreset({
+    preset: { id: "modelscope", preset: "modelscope", key: A },
+    accounts: [{ name: "msmoli#abc123", token: B }],
+    force: false,
+  })
+  assert.equal(p.action, "refuse", `a different token is not a match: ${p.lines.join(" / ")}`)
+  assert.match(p.lines.join("\n"), /没有登录/)
+})
+
+test("a providers.json of the wrong shape is refused as unreadable, not read as 'no preset'", async () => {
+  // The two shape guards are what keep the tool from planning on state it
+  // cannot see. Fallen through, a top-level array or a providers that is not
+  // a list reads as "there is no ModelScope preset" — and the advice becomes
+  // "add one", over a file that is there and damaged.
+  for (const [content, want] of [
+    ["[1,2,3]", /形状/],
+    [JSON.stringify({ providers: { a: 1 } }), /不是列表/],
+  ]) {
+    const dir = mkdtempSync(join(tmpdir(), "msmoli-shape-"))
+    try {
+      writeFileSync(join(dir, "providers.json"), content)
+      const out = []
+      const code = await main({ argv: ["--dir", dir, "--status", "--magpie", "/nonexistent"], log: (s) => out.push(s) })
+      assert.equal(code, 1)
+      const text = out.join("\n")
+      assert.match(text, want, `${content}: ${text}`)
+      assert.doesNotMatch(text, /没有带 key 的 ModelScope 预设/, "unreadable is not 'not configured'")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test("two candidates whose ids differ are told to use --from; the same id is named as the reason", async () => {
+  // The advice flips with `ids.size === 1`. Inverted, the tool tells a user
+  // whose two providers are called differently that --from cannot separate
+  // them, and sends them to delete a provider that is not a duplicate.
+  const cases = [
+    {
+      providers: [
+        { id: "modelscope", preset: "modelscope", key: A },
+        { id: "my-ms", preset: "modelscope", key: B },
+      ],
+      wantFrom: true,
+    },
+    {
+      providers: [
+        { id: "modelscope", preset: "modelscope", key: A },
+        { id: "modelscope", chat: "https://api-inference.modelscope.cn/v1", key: B },
+      ],
+      wantFrom: false,
+    },
+  ]
+  for (const c of cases) {
+    const dir = mkdtempSync(join(tmpdir(), "msmoli-ids-"))
+    try {
+      writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: c.providers }))
+      const out = []
+      const code = await main({ argv: ["--dir", dir, "--status", "--magpie", "/nonexistent"], log: (s) => out.push(s) })
+      assert.equal(code, 1)
+      const text = out.join("\n")
+      assert.match(text, /候选/)
+      if (c.wantFrom) {
+        assert.match(text, /--from/, "different ids are what --from is for")
+        assert.doesNotMatch(text, /同一个 id/, "they are not the same id")
+      } else {
+        assert.match(text, /同一个 id/, "same id is why --from cannot help")
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test("a provider that is ours by id alone is still ours, and one that is not ours is never named", async () => {
+  // oursOf is an OR of three signs (id, preset, chat host). Read as `&&` on
+  // any pair, a provider the user added as id=modelscope stops being ours and
+  // the tool tells them to add ModelScope over the one they have. And `bare`'s
+  // `oursOf && blankKey` read as `||` names any keyless provider — an OpenAI
+  // one — as "内置侧的 openai 在，但还没有 key".
+  const ours = mkdtempSync(join(tmpdir(), "msmoli-ours-"))
+  const notOurs = mkdtempSync(join(tmpdir(), "msmoli-notours2-"))
+  try {
+    writeFileSync(join(ours, "providers.json"), JSON.stringify({ providers: [{ id: "modelscope", chat: "https://example.com/v1", key: "" }] }))
+    const a = []
+    await main({ argv: ["--dir", ours, "--status", "--magpie", "/nonexistent"], log: (s) => a.push(s) })
+    assert.match(a.join("\n"), /还没有 key/, `an id-only match is still ours: ${a.join("\n")}`)
+
+    writeFileSync(join(notOurs, "providers.json"), JSON.stringify({ providers: [{ id: "openai", chat: "https://api.openai.com/v1", key: "" }] }))
+    const b = []
+    await main({ argv: ["--dir", notOurs, "--status", "--magpie", "/nonexistent"], log: (s) => b.push(s) })
+    const text = b.join("\n")
+    assert.match(text, /没有带 key 的 ModelScope 预设/, `a stranger's keyless provider is not ours: ${text}`)
+    assert.doesNotMatch(text, /openai 在，但还没有 key/, "the tool must not name a provider that is not ModelScope's")
+  } finally {
+    rmSync(ours, { recursive: true, force: true })
+    rmSync(notOurs, { recursive: true, force: true })
+  }
+})
+
+test("a key that is not a string does not take the check-in down with it", async () => {
+  // providers.json is user-edited and magpie writes numbers as numbers. The
+  // blankKey guard is `typeof key === "string" && key.trim()`; `!==` there
+  // calls .trim() on the number and the run dies with
+  // "p.key.trim is not a function".
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-numkey-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "my-ms", chat: "https://api-inference.modelscope.cn/v1", key: 123 }] }))
+    const out = []
+    const code = await main({ argv: ["--dir", dir, "--status", "--magpie", "/nonexistent"], log: (s) => out.push(s) })
+    const text = out.join("\n")
+    assert.doesNotMatch(text, /is not a function/, "an internal error reached the user")
+    assert.equal(code, 1)
+    assert.match(text, /还没有 key/, `a numeric key is no key: ${text}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a --to-plugin --force that lands one account is a success, not a second account", async () => {
+  // The read-back counts accounts only when the plan had more than one step
+  // *and* the file now holds more than one — both, because either alone is
+  // normal. Read as `||`, every successful forced sync reports "回读发现插件
+  // 现在有 1 个账号" and exits 1.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-readback-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", key: B }] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: (bin, argv) => {
+        if (argv[0] === "plugin" && argv[1] === "logout") writeFileSync(join(dir, "plugin-auth.json"), "{}")
+        if (argv[0] === "plugin" && argv[1] === "login") writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 0, `a one-account result is the normal one: ${out.join("\n")}`)
+    assert.doesNotMatch(out.join("\n"), /个账号/, "one account is not a second account")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a rooted XDG path is rooted on every spelling: drive-letter on POSIX, UNC on Windows", () => {
+  // rooted() takes a drive-letter path on every host and a \\ or / prefixed
+  // one on Windows. Both are inherited from appdir's installed(): falling
+  // through to ~/.config when XDG points elsewhere reads a folder magpie is
+  // not using. Neither spelling was pinned — the existing test drives only
+  // /xdg and "rel".
+  const want = (base) => join(base, "magpie")
+  const on = (xdg, os, base) =>
+    findConfigDir({ env: { XDG_CONFIG_HOME: xdg }, home: os === "win32" ? "C:\\u" : "/h", os, exists: (p) => p === join(base, "providers.json") })
+  // C:\ on a POSIX host is still a path someone named, not a name to look up
+  assert.equal(on("C:\\x", "linux", want("C:\\x")), want("C:\\x"), "a drive-letter XDG is rooted on POSIX")
+  // UNC and slash-rooted on Windows
+  assert.equal(on("\\\\srv\\share", "win32", want("\\\\srv\\share")), want("\\\\srv\\share"), "a UNC XDG is rooted on Windows")
+  assert.equal(on("/srv/xdg", "win32", want("/srv/xdg")), want("/srv/xdg"), "a slash-rooted XDG is rooted on Windows")
+  // and a relative one is not rooted anywhere
+  assert.equal(on("rel", "win32", join("C:\\u", ".config", "magpie")), join("C:\\u", ".config", "magpie"), "a relative XDG is ignored on Windows too")
+})
+
+test("the shared folders are the platform's own: /Applications only on a Mac", () => {
+  // sharedFolders decides whether a data folder beside the executable is
+  // magpie's portable folder or every-app-for-itself territory. Fliping the
+  // darwin test puts /Applications and ~/Applications in Linux's list: a
+  // portable-looking /Applications/data then stops being magpie's, and on a
+  // Mac the same folder starts being treated as shared.
+  const drive = (os) =>
+    findConfigDir({
+      env: {},
+      home: "/h",
+      os,
+      binPath: "/Applications/magpie",
+      exists: (p) => p === "/Applications/data",
+      stat: () => ({ isFile: () => false }),
+    })
+  assert.equal(drive("linux"), "/Applications/data", "on Linux /Applications is just a folder")
+  assert.equal(drive("darwin"), "", "on a Mac /Applications is shared, so an empty data there is not magpie's")
+  // ~/Applications is the same rule one level down, and needs its own drive:
+  // a portable magpie living there is somebody's home folder on Linux.
+  const underHome = (os) =>
+    findConfigDir({
+      env: {},
+      home: "/h",
+      os,
+      binPath: "/h/Applications/magpie",
+      exists: (p) => p === "/h/Applications/data",
+      stat: () => ({ isFile: () => false }),
+    })
+  assert.equal(underHome("linux"), "/h/Applications/data", "on Linux ~/Applications is just a folder")
+  assert.equal(underHome("darwin"), "", "on a Mac ~/Applications is shared too")
+})
