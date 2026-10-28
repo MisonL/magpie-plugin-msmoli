@@ -337,6 +337,7 @@ test("a check-in 403 is risk control too, and does not sign the account out", as
       const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
       assert.equal(r.outcome, "failed")
       assert.match(r.message, /风控/)
+      assert.match(r.message, /HTTP 403/, `the card names the status code: ${r.message}`)
       assert.match(r.message, /稍后会自动重试/, `the touch names the retry it can promise: ${r.message}`)
       assert.notEqual(r.signIn, "expired", "a 403 is not a bad token")
     },
@@ -371,6 +372,11 @@ test("usage reads the balance and the day's ledger, and never the sign-in endpoi
       assert.equal(w.limit, 250)
       // 330 spent of 250 granted: over 100 means overspent, not capped
       assert.ok(w.used > 100, `used should exceed 100, got ${w.used}`)
+      // and the exact number is the ratio to two decimals — 33000/250, the
+      // scale written `* 10001` reads 132.01 next to the same 330 and 250
+      assert.equal(w.used, Math.round((330 / 250) * 10000) / 100)
+      // the window runs a day; span written 86401 drifts a second a day
+      assert.equal(w.span, 86400, "the window's span is the day it runs")
       assert.match(w.display, /余额 1\.5/)
       assert.equal(fetch.calls.some((c) => c.includes("login/info")), false)
     },
@@ -654,7 +660,8 @@ test("a 403 is risk control, not a token that expired", async () => {
       async () => {
         const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
         assert.ok(u.error, `usage should report the refusal at ${at}`)
-        assert.match(u.error, /风控|403/, `${at}: the message should name the refusal`)
+        assert.match(u.error, /风控/, `${at}: the message should name the refusal`)
+        assert.match(u.error, /HTTP 403/, `${at}: and the status code the README promises: ${u.error}`)
         assert.equal(u.signIn, "", `${at}: a 403 must not mark the sign-in expired`)
       },
     )
@@ -705,6 +712,42 @@ test("the cap counts bytes, whichever way the body arrives", async () => {
       assert.match(u.error ?? "", /过大/, "300KB of text must not pass a 256KiB cap")
     },
   )
+})
+
+test("the body cap is 256 KiB: one byte over is refused, the cap itself is not", async () => {
+  // The README states the number ("read to at most 256 KiB"), so the boundary
+  // is a promise, not an implementation detail. A cap written 257 KiB lets a
+  // 256 KiB + 1 body through; one written `>=` refuses the cap itself. Both
+  // are one-character edits no other test distinguishes — 300KB fixtures pass
+  // under every one of them.
+  const CAP = 256 * 1024
+  const real = globalThis.fetch
+  // the declared-length branch, then the streaming one with no length to
+  // check first — the same boundary, one byte apart, on each
+  for (const streamed of [false, true]) {
+    for (const [bytes, refused] of [
+      [CAP, false],
+      [CAP + 1, true],
+    ]) {
+      globalThis.fetch = async (url) => {
+        if (!String(url).includes("balance")) return reply({ body: { success: true, data: { records: [] } } })
+        if (streamed) return reply({ noLength: true, bytes: new Uint8Array(bytes) })
+        return {
+          status: 200,
+          headers: { get: (n) => (n.toLowerCase() === "content-length" ? String(bytes) : null) },
+          body: null,
+          text: async () => "x".repeat(bytes),
+        }
+      }
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      const why = `${streamed ? "streamed " : ""}${bytes} bytes`
+      if (refused) assert.match(u.error ?? "", /过大/, `${why} is over the cap: ${u.error}`)
+      // the body is not JSON, so it fails either way — what matters is which
+      // way: a size refusal names the size, the parse failure does not
+      else assert.doesNotMatch(u.error ?? "", /过大/, `${why} is the cap itself, not over it: ${u.error}`)
+    }
+  }
+  globalThis.fetch = real
 })
 
 // ── 签到时段 ──────────────────────────────────────────────────────────────
@@ -1301,9 +1344,36 @@ test("a non-Error rejection says something, not [object Object]", async () => {
 
 test("a spent budget sends no request at all", async () => {
   // a request that is not sent cannot be recorded upstream; one sent with no
-  // budget left is answered after the hook the host already gave up on. Here
-  // the balance read takes longer than the whole budget, so the ledger read
-  // must not go out.
+  // budget left is answered after the hook the host already gave up on. Both
+  // the whole budget gone and exactly zero left must send nothing: `left <= 0`
+  // written `< 0` sends the ledger read with a 0 ms budget, and a budget of
+  // 19 seconds (or 18.018) leaves 1 s (18 ms) for a read that then goes out.
+  for (const spent of [18_000, 60_000]) {
+    const realFetch = globalThis.fetch
+    const realNow = Date.now
+    let clock = Date.parse(`${today} 10:30:00`.replace(" ", "T") + "+08:00")
+    Date.now = () => clock
+    const asked = []
+    globalThis.fetch = async (url) => {
+      asked.push(new URL(url).pathname)
+      clock += spent // this one answer outlasts the hook's whole budget
+      return reply({ body: { success: true, data: { available_balance: 300 } } })
+    }
+    try {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.ok(u.error, `usage must fail rather than answer (spent ${spent} ms)`)
+    } finally {
+      globalThis.fetch = realFetch
+      Date.now = realNow
+    }
+    assert.deepEqual(asked, ["/openapi/v1/magicubes/balance"], `no request may go out with the budget gone (spent ${spent} ms)`)
+  }
+})
+
+test("a check-in whose first read spends the whole budget sends no touch", async () => {
+  // the check-in's own 25-second budget, to the millisecond: the ledger read
+  // is answered at exactly deadline, so the touch has nothing left. A budget
+  // of 26 seconds leaves 1 s and the touch goes out; 25.025 leaves 25 ms.
   const realFetch = globalThis.fetch
   const realNow = Date.now
   let clock = Date.parse(`${today} 10:30:00`.replace(" ", "T") + "+08:00")
@@ -1311,17 +1381,18 @@ test("a spent budget sends no request at all", async () => {
   const asked = []
   globalThis.fetch = async (url) => {
     asked.push(new URL(url).pathname)
-    clock += 60_000 // this one answer outlasts the hook's whole budget
-    return reply({ body: { success: true, data: { available_balance: 300 } } })
+    clock += 25_000 // this one answer spends the whole check-in budget
+    return reply({ body: { success: true, data: { records: [] } } })
   }
   try {
-    const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
-    assert.ok(u.error, "usage must fail rather than answer")
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+    assert.equal(r.outcome, "failed", "a check-in that never reached the touch has failed")
+    assert.match(r.message, /预算已用完/, `the card should say the budget ran out: ${r.message}`)
   } finally {
     globalThis.fetch = realFetch
     Date.now = realNow
   }
-  assert.deepEqual(asked, ["/openapi/v1/magicubes/balance"], "no request may go out with the budget gone")
+  assert.deepEqual(asked, ["/openapi/v1/magicubes/transactions"], "the touch must not go out with the budget gone")
 })
 
 // ── 时段解析：直接读 windowOf，别依赖当天的哈希落点 ────────────────────────
@@ -1366,6 +1437,11 @@ test("windowOf caps the end at 23:00, whatever the configured end", () => {
   // an ordinary window is left alone
   assert.deepEqual(windowOf({ checkinWindow: ["08:30", "10:00"] }), { start: 8 * 60 + 30, end: 10 * 60 })
   assert.deepEqual(windowOf({ checkinWindow: ["22:00", "23:00"] }), { start: 22 * 60, end: 23 * 60 })
+  // and the default itself is the documented 08:30-10:00, not merely
+  // somewhere near it: the window a config-less install gets is the one the
+  // README names, and its end written one minute late is invisible to every
+  // test that only says "inside the window"
+  assert.deepEqual(windowOf({}), { start: 8 * 60 + 30, end: 10 * 60 }, "no setting at all is the documented default")
 })
 
 test("windowOf reads the shapes a user writes, and refuses the ones it cannot", () => {
@@ -1386,7 +1462,12 @@ test("windowOf reads the shapes a user writes, and refuses the ones it cannot", 
   // window of its own. ["8:30","10:00"] used to sit in this list, but one-digit
   // hours are read (minuteOf takes \d{1,2}), so it parses to exactly the
   // default and the assertion could not fail either way.
-  for (const bad of [["10:00", "08:30"], ["24:00", "25:00"], ["08:60", "10:00"], ["nope", "10:00"], [], null, 7]) {
+  // ["09:00","24:30"]: the end's hour is out of range but the start's is not,
+  // so an hour bound widened from `> 23` to `> 24` honours 24:30 as a real
+  // end (capped to 23:00) instead of falling back — a window the user never
+  // named. The ["24:00","25:00"] pair above cannot see it: both ends fail,
+  // and the fallback is reached through the other one.
+  for (const bad of [["10:00", "08:30"], ["24:00", "25:00"], ["09:00", "24:30"], ["009:30", "10:00"], ["08:60", "10:00"], ["nope", "10:00"], [], null, 7]) {
     assert.deepEqual(windowOf({ checkinWindow: bad }), { start: 8 * 60 + 30, end: 10 * 60 }, `${JSON.stringify(bad)} falls back to the default`)
     assert.notDeepEqual(windowOf({ checkinWindow: bad }), { start: 13 * 60, end: 14 * 60 }, `${JSON.stringify(bad)} is not a window of its own`)
   }
@@ -1442,6 +1523,27 @@ test("the target minute itself is due, not one minute short", async () => {
       await withWindow(["08:30", "10:00"], `${today} ${t.text}:00`, async () => {
         const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
         assert.doesNotMatch(r.message, /后自动领取/, `at ${t.text} sharp the plugin must claim, not defer: ${r.message}`)
+      })
+    },
+  )
+})
+
+test("a minute before the target it still waits, not claims early", async () => {
+  // plan() compares minuteCN() — the Beijing clock as minutes after midnight —
+  // with the target. The hour term read as `* 61` adds a minute for every
+  // hour of the day: at 09:27 a 09:28 target already reads as due, and the
+  // claim goes out a minute early (later in the day, half an hour early).
+  // The one-minute window pins the target to 09:28, so the clock is the only
+  // variable left in the comparison.
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+    },
+    async () => {
+      await withWindow(["09:28", "09:29"], `${today} 09:27:00`, async () => {
+        const r = await auth.checkin(async () => ({ type: "api", key: "ms-pin" }))
+        assert.match(r.message, /^09:28 后自动领取/, `one minute early must still wait: ${r.message}`)
       })
     },
   )
@@ -1915,7 +2017,12 @@ test("a providers.json that cannot be read is not written over", async () => {
   // account (leave it), and a file that is there but unreadable is state we
   // cannot see — writing the nickname would re-key an alias we could not
   // read, dropping the user's name from the card with no sign of why.
-  for (const [i, broken] of ["{ not json", "", "null", "[1,2,3"].entries()) {
+  // "5", "true" and "[1,2,3]" are the other half of the same rule: they parse
+  // as valid JSON and are still not a providers.json. A shape guard written
+  // `raw === null || typeof raw !== "object" || Array.isArray(raw)` with its
+  // middle arm joined by `&&` lets every one of them through, and the
+  // nickname is written over state the user could not have meant to lose.
+  for (const [i, broken] of ["{ not json", "", "null", "[1,2,3", "5", "true", "[1,2,3]"].entries()) {
     const dir = mkdtempSync(join(tmpdir(), "msmoli-badalias-"))
     writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
     writeFileSync(join(dir, "providers.json"), broken)
@@ -2424,6 +2531,34 @@ test("a host error that carries the token is masked on the two getAuth exits too
   }
 })
 
+test("a token-shaped run is masked whatever its first character and length", async () => {
+  // hostText's tokenShaped has to accept a digit right after "ms-": every real
+  // ModelScope token is ms-<hex>, so a third of them open with 2-9. Narrowed
+  // to [A-Za-z0-10] the run stops matching and the whole key is printed by the
+  // two exits that have no token to split on. The 10 is the shortest tail the
+  // pattern takes; 11 lets a 14-character key through, which maskToken would
+  // still have shown by its ends. sync.mjs's show() has the same test; this
+  // side had none.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-hostsahpe-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  try {
+    const p = await MsmoliPlugin({ directory: dir, client: {} })
+    for (const tok of ["ms-5abc1234-dead-beef-0000-123456789abc", "ms-a1234567890"]) {
+      const fail = async () => {
+        throw new Error(`no key ${tok} for provider`)
+      }
+      const u = await p.auth.usage(fail)
+      const c = await p.auth.checkin(fail)
+      for (const [what, said] of [["usage", u.error], ["checkin", c.message]]) {
+        assert.ok(!said.includes(tok), `${what}: the token reached the card whole: ${JSON.stringify(said)}`)
+        assert.match(said, /…/, `${what}: it should be shown masked: ${JSON.stringify(said)}`)
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("an error from the host reaches the card scrubbed, like the log's does", async () => {
   // magpie's own CLI scrubs tokens out of "no key ms-… for provider", so the
   // host demonstrably does put them in error text. The four card exits used to
@@ -2484,6 +2619,49 @@ test("a host log that throws synchronously does not reject the usage hook", asyn
     assert.ok(u.windows?.[0], "the card is still filled in")
   } finally {
     globalThis.fetch = real
+  }
+})
+
+test("a host log whose promise rejects leaves no unhandled rejection behind", async () => {
+  // The write-back's log is best-effort: a host's log returning a promise that
+  // rejects must be swallowed, or Node prints an unhandled rejection and — on
+  // a host that treats one as fatal — the whole check-in dies after its work
+  // is done. `typeof r.catch === "function"` flipped to !== attaches nothing
+  // and does exactly that; no other test observes the difference, because the
+  // card and the state are unchanged either way.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-logreject-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const token = "ms-nametest-0000-0000-0000-000000000077"
+  const unhandled = []
+  const onUnhandled = (e) => unhandled.push(e)
+  process.on("unhandledRejection", onUnhandled)
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => ({
+    status: 200,
+    headers: { get: () => null },
+    body: null,
+    text: async () =>
+      String(url).includes("login/info")
+        ? JSON.stringify({ Code: 200, Data: { NickName: "Mison" } })
+        : JSON.stringify({ success: true, data: { records: [] } }),
+  })
+  try {
+    const hooks = await MsmoliPlugin({
+      directory: dir,
+      client: {
+        auth: { set: async () => { throw new Error("write refused") } },
+        app: { log: () => Promise.reject(new Error("log channel down")) },
+      },
+    })
+    await hooks.auth.checkin(async () => ({ type: "api", key: token }))
+    // the rejection settles a few microtasks after the hook returns
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setTimeout(r, 10))
+    assert.deepEqual(unhandled.map((e) => e?.message), [], "a best-effort log must not reject unhandled")
+  } finally {
+    process.off("unhandledRejection", onUnhandled)
+    globalThis.fetch = real
+    rmSync(dir, { recursive: true, force: true })
   }
 })
 
@@ -2894,6 +3072,33 @@ test("a key pasted with whitespace around it is the same key", async () => {
   }
 })
 
+test("every request is made as the browser the README says it is", async () => {
+  // README: "a browser UA and a Referer are enough". The plugin's sign-in is
+  // the site's own web session, and the endpoints were measured answering
+  // exactly this shape; a bare fetch UA is the one thing known to get a
+  // different answer. Nothing asserted either header — dropping one, or
+  // writing "Mozilla/6.0" (a prefix no browser has ever sent), was invisible
+  // to the suite.
+  const seen = []
+  const real = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    seen.push(init?.headers ?? {})
+    return reply({ body: { success: true, data: { records: [] } } })
+  }
+  try {
+    await auth.checkin(async () => ({ type: "api", key: "ms-test-0000000000" }))
+    assert.ok(seen.length > 0, "a request must have gone out")
+    for (const headers of seen) {
+      assert.match(headers["User-Agent"] ?? "", /^Mozilla\/5\.0 .*Chrome\//, `not a browser UA: ${JSON.stringify(headers["User-Agent"])}`)
+      assert.match(headers["User-Agent"] ?? "", /Safari\/537\.36$/, `a Chrome UA ends the way Chrome's does: ${JSON.stringify(headers["User-Agent"])}`)
+      assert.equal(headers.Referer, "https://modelscope.cn/", "the Referer is the site root")
+      assert.equal(headers.Accept, "application/json")
+    }
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("a network failure says what happened instead of the bare English", async () => {
   const real = globalThis.fetch
   globalThis.fetch = async () => {
@@ -2987,50 +3192,65 @@ test("a request cut short by the hook's own deadline does not say 0 seconds", as
   // request can have a few hundred milliseconds. Rounded, that printed
   // "请求超时（0 秒）", which says neither which limit was hit nor anything
   // the user could act on.
-  await withFetch(
-    {
-      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
-      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
-    },
-    async () => {
-      const realNow = Date.now
-      // the first read eats almost the whole 18s budget, leaving 300ms.
-      // The clock is pinned to a fixed base, not left tracking real time: a
-      // clock that keeps advancing spends this test's 300ms of margin on
-      // whatever the machine takes between the hook's deadline and the second
-      // request, and a loaded run starts that request with nothing left — it
-      // is never sent, and the hook answers "预算已用完" instead of the
-      // timeout under test (measured on Node 18: 2 failures in 20 runs, at
-      // 350ms and 364ms, the length of the margin). Pinned, the hook's
-      // deadline is base + 18_000 and the second read sees base + 17_700
-      // whatever the scheduler does: exactly 300ms left, every run.
-      const base = realNow()
-      Date.now = () => base
-      let first = true
-      const real = globalThis.fetch
-      globalThis.fetch = async (url, init) => {
-        if (first) {
-          first = false
-          Date.now = () => base + 17_700
-          return new Response(JSON.stringify({ success: true, data: { available_balance: 5 } }), { status: 200 })
+  //
+  // The number is the ceiling of the budget in seconds — 300ms is "1 秒",
+  // 1001ms is "2 秒". A divisor written 1001 instead of 1000 rounds the same
+  // 1001ms down to "1 秒" and every other boundary with it; 300ms alone cannot
+  // see that, because both divisors call it one second.
+  for (const [left, said] of [
+    [300, "1 秒"],
+    [1001, "2 秒"],
+    [2002, "3 秒"],
+  ]) {
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        const realNow = Date.now
+        // the first read eats almost the whole 18s budget, leaving `left` ms.
+        // The clock is pinned to a fixed base, not left tracking real time: a
+        // clock that keeps advancing spends this test's margin on whatever the
+        // machine takes between the hook's deadline and the second request, and
+        // a loaded run starts that request with nothing left — it is never
+        // sent, and the hook answers "预算已用完" instead of the timeout under
+        // test (measured on Node 18: 2 failures in 20 runs, at 350ms and
+        // 364ms, the length of the margin). Pinned, the hook's deadline is
+        // base + 18_000 and the second read sees base + 18_000 - left whatever
+        // the scheduler does: exactly `left` ms, every run.
+        const base = realNow()
+        Date.now = () => base
+        let first = true
+        const real = globalThis.fetch
+        globalThis.fetch = async (url, init) => {
+          if (first) {
+            first = false
+            Date.now = () => base + 18_000 - left
+            return new Response(JSON.stringify({ success: true, data: { available_balance: 5 } }), { status: 200 })
+          }
+          // the second request's own timer is `left` ms; let it fire
+          await new Promise((_, reject) => {
+            init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true })
+            setTimeout(() => init.signal.dispatchEvent?.(new Event("abort")), 0)
+          })
+          return new Response("{}", { status: 200 })
         }
-        // the second request's own timer is 300ms; let it fire
-        await new Promise((_, reject) => {
-          init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true })
-          setTimeout(() => init.signal.dispatchEvent?.(new Event("abort")), 0)
-        })
-        return new Response("{}", { status: 200 })
-      }
-      try {
-        const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
-        assert.match(u.error ?? "", /请求超时/, `should name the timeout: ${u.error}`)
-        assert.doesNotMatch(u.error ?? "", /0 秒/, `a zero-second timeout says nothing: ${u.error}`)
-      } finally {
-        globalThis.fetch = real
-        Date.now = realNow
-      }
-    },
-  )
+        try {
+          const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+          assert.match(u.error ?? "", /请求超时/, `should name the timeout: ${u.error}`)
+          assert.doesNotMatch(u.error ?? "", /0 秒/, `a zero-second timeout says nothing: ${u.error}`)
+          assert.ok(
+            (u.error ?? "").includes(`请求超时（${said}）`),
+            `${left}ms is ${said}, the ceiling of the budget: ${u.error}`,
+          )
+        } finally {
+          globalThis.fetch = real
+          Date.now = realNow
+        }
+      },
+    )
+  }
 })
 
 test("a server that echoes the token back does not put it on the card", async () => {
@@ -3103,25 +3323,31 @@ test("a nickname longer than the cut is not a token's front", async () => {
 test("a balance field that is missing or not a number is a failure, not 0", async () => {
   // data present, available_balance absent/null/renamed/formatted: reading it
   // as 0 is the definite-and-wrong conclusion the data guard above exists to
-  // prevent, one field further in
-  for (const data of [
-    { available: 1234 },
-    { available_balance: null },
-    { available_balance: "1,234" },
-    // Number([]) is 0 and Number(true) is 1: both finite, both a definite
-    // answer that is wrong. The empty list is the "0 魔粒可用" this guard is
-    // for; the boolean is one 魔粒 nobody granted.
-    { available_balance: [] },
-    { available_balance: true },
-    { available_balance: {} },
+  // prevent, one field further in.
+  //
+  // The two wordings are two different causes, and the README names both: the
+  // field is not there (absent, null, blank) versus the field is there and is
+  // not a number. `v === undefined || v === null` closed to `&&` is never
+  // true, so a null or an absent field drops to the second wording — a
+  // failure that sends the user looking for a value that was never sent.
+  for (const [data, why] of [
+    [{ available: 1234 }, "absent"],
+    [{ available_balance: null }, "null"],
     // Blank, in every spelling. `rawAvailable === ""` was the only one the
     // guard named, and `Number("   ")` is 0 like `Number("")`, so a field of
     // spaces answered "0 魔粒可用" — the same definite wrong 0, wearing
     // whitespace. A tab and a newline are the same field read by an editor
     // that put nothing in it.
-    { available_balance: "" },
-    { available_balance: "   " },
-    { available_balance: "\t\n" },
+    [{ available_balance: "" }, "empty"],
+    [{ available_balance: "   " }, "spaces"],
+    [{ available_balance: "\t\n" }, "tab and newline"],
+    // Number([]) is 0 and Number(true) is 1: both finite, both a definite
+    // answer that is wrong. The empty list is the "0 魔粒可用" this guard is
+    // for; the boolean is one 魔粒 nobody granted.
+    [{ available_balance: "1,234" }, "not a number"],
+    [{ available_balance: [] }, "not a number"],
+    [{ available_balance: true }, "not a number"],
+    [{ available_balance: {} }, "not a number"],
   ]) {
     await withFetch(
       {
@@ -3131,6 +3357,8 @@ test("a balance field that is missing or not a number is a failure, not 0", asyn
       async () => {
         const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
         assert.ok(u.error, `a balance we cannot read must fail: ${JSON.stringify(data)}`)
+        if (why === "not a number") assert.match(u.error, /不是数字/, `${JSON.stringify(data)} is there and is not: ${u.error}`)
+        else assert.match(u.error, /没有 available_balance/, `${why}: the field is not there, and the message should say so: ${u.error}`)
         assert.ok(!u.windows, "no card is built from a balance we did not understand")
       },
     )
@@ -3613,6 +3841,57 @@ test("a token under magpie's hint length is masked whole, never by its ends", as
       assert.ok(!r.message.includes(token), `the short key reached the card: ${r.message}`)
       assert.ok(!r.message.includes("ms-s"), `its ends are most of it: ${r.message}`)
       assert.ok(r.message.includes("…"), `the whole key is the mask: ${r.message}`)
+    },
+  )
+})
+
+test("a key of exactly magpie's hint length is labelled and masked by its tail", async () => {
+  // The other side of the two tests above, and the boundary itself: 12 is the
+  // first length magpie's hintOf gives a tail to (host.js), so it is the first
+  // length labelOf may call "API key …tail" and the first maskToken may show
+  // by its ends. A threshold written `> 12` — or 13 — moves both one key too
+  // far: the alias kept under magpie's own label is looked up under the bare
+  // "API key", nothing is found, and the nickname is written over the user's
+  // name; the echo of the same key is printed whole, since maskToken falls
+  // back to the bare "…" only below its threshold.
+  const token = "ms-abcdefghi"
+  assert.equal(token.length, 12, "the first length magpie hints at")
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-hint12-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  writeFileSync(
+    join(dir, "providers.json"),
+    JSON.stringify({ providers: [{ id: "msmoli", accountNames: { "api key …fghi": "主号" } }] }),
+  )
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(writes.length, 0, "an alias under magpie's own label must be honoured at the threshold too")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      "/api/v1/users/login/info": { body: { success: false, message: `bad session ${token}, sign in again` } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: token }))
+      assert.equal(r.outcome, "failed")
+      assert.ok(!r.message.includes(token), `the key reached the card whole: ${r.message}`)
+      assert.match(r.message, /ms-a…fghi/, `its ends are the mask at this length: ${r.message}`)
     },
   )
 })
