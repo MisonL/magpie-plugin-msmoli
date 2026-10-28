@@ -199,8 +199,11 @@ package's `opencode-plugin` and `magpie-plugin` keywords are what put it there.
   price of the only deferral an outcome offers.
 - **The pre-window message leads with the claim time.** The host renders the
   message verbatim under the red dot, so it is the only text the user sees for
-  those hours; `${clock(target)} 后自动领取（约 …后，无需操作）` puts the
-  answer before the reason. The config path stays out — it repeated on every
-  ask and ended up in users' screenshots — and lives in the README instead.
+  those hours; `${clock(target)} 后自动领取（magpie 每半小时问一次，无需操作）`
+  puts the answer before the reason. The config path stays out — it repeated
+  on every ask and ended up in users' screenshots — and lives in the README
+  instead. Nothing in it is relative: the card keeps the line until the next
+  ask, half an hour later, so a countdown ("约 8 分钟后") is wrong for most of
+  the time it is on screen.
   `test/plugin.test.mjs` reads the target back out of that line, so changing
   its shape means updating `targetFrom`.

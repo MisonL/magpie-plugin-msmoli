@@ -210,7 +210,9 @@ How long that is depends on when magpie next asks, not on the target alone.
 Measured on a real day: the target was 09:01, magpie asked at 09:00:57 (three
 seconds early, so `failed`), and the claim landed on the next ask at 09:31 —
 about 9.5 hours from midnight, rather than the 8.5 the window's 08:30 start
-alone suggests.
+alone suggests. That is also why the card names the cadence instead of a
+countdown: the host keeps the line until its next ask, half an hour later, so
+"约 8 分钟后" would be wrong for most of the time it is on screen.
 
 ### Upstream
 
@@ -369,7 +371,7 @@ token has the token masked before it reaches the card or magpie's log.
 | No 魔粒 window on the card, or no check-in | restart magpie (the plugin host caches) |
 | `failed` with HTTP 401 | the token was revoked — make a new one and sign in again |
 | `failed` with HTTP 403 | ModelScope's risk control refused the request; the token is fine. It retries in 30 minutes |
-| Before the window the card reads failed, with a line naming the claim time: `09:56 后自动领取（约 1 小时 33 分钟后，无需操作）` | expected — the card leads with when it will claim; see "When it claims" above |
+| Before the window the card reads failed, with a line naming the claim time: `09:56 后自动领取（magpie 每半小时问一次，无需操作）` | expected — the card leads with when it will claim; see "When it claims" above |
 | Always `inactive` | the sign-in works but nothing shows in today's ledger: the account may not be eligible, or the grant hasn't been written yet (a claim made elsewhere shows as `done`). Before Beijing noon magpie asks again every 30 minutes, so a late grant is picked up; from noon on this answer stands for the day |
 | Two accounts of one ModelScope nickname, and only one of them checks in | magpie before 2026-10-20 kept a plugin's check-in per display name rather than per sign-in, so namesakes collapsed into one. Update magpie: the fix landed upstream on 2026-10-20 (magpie-community/plugins#254) |
 | Edits to this plugin do nothing | path plugins are referenced in place; restart magpie |

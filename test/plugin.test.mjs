@@ -1507,14 +1507,23 @@ test("an expiry the plugin cannot parse resets nothing, rather than 1970", async
   )
 })
 
-test("the pre-window wait is worded like a person would say it", async () => {
-  // "596 分钟后" reads like a dump; the card shows "9 小时 56 分钟". The
-  // target is a hash, but any target in the default window is at least an
-  // hour away from 07:00, so the hour form is what has to appear.
+test("the pre-window line outlives the card's 30-minute cache", async () => {
+  // magpie renders a check-in answer verbatim until its next ask, half an
+  // hour later. A relative "约 8 分钟后" is false for most of that time;
+  // seen on a real card at 09:47, still promising the 09:28 claim was eight
+  // minutes away while the day's credits had already landed. Both facts in
+  // the line are absolute — the target and the host's own cadence. The
+  // cadence also explains why the claim is not at the target sharp: a plugin
+  // has no timer, so it runs on the host's next ask.
   await withWindow(["08:30", "10:00"], `${today} 07:00:00`, async () => {
     const r = await auth.checkin(async () => ({ type: "api", key: "ms-words" }))
-    assert.match(r.message, /约 (\d+ 小时( \d+ 分钟)?|\d+ 分钟)后/)
-    assert.doesNotMatch(r.message, /约 \d{3,} 分钟后/, "three-digit minutes must not appear")
+    assert.doesNotMatch(
+      r.message,
+      /约\s*\d/,
+      `a relative wait goes stale while the card shows it: ${r.message}`,
+    )
+    assert.match(r.message, /^(\d{2}):(\d{2}) 后自动领取/)
+    assert.match(r.message, /每半小时问一次/, `the line should say when the host asks again: ${r.message}`)
   })
 })
 
