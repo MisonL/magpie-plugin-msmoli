@@ -190,6 +190,21 @@ test("the config hook keeps a provider name the user set", async () => {
   assert.deepEqual(config.provider.msmoli.options, { note: "kept" })
 })
 
+test("a provider entry that is not an object is no entry, and a name that is not a name is the default", async () => {
+  // providers.json is another program's file and can arrive half-written or
+  // hand-edited: the entry a string, the name blank or a number. Both guards
+  // are `&&` — read as `||`, spreading a string writes its characters back
+  // as index keys, and "" or 42 becomes the provider's only visible label.
+  const past = { provider: { msmoli: "旧条目" } }
+  await hooks.config(past)
+  assert.deepEqual(past.provider.msmoli, { name: "ModelScope 魔粒" }, "a string is not an entry to spread")
+  for (const name of ["", 42]) {
+    const config = { provider: { msmoli: { name } } }
+    await hooks.config(config)
+    assert.equal(config.provider.msmoli.name, "ModelScope 魔粒", `${JSON.stringify(name)} is not a name to keep`)
+  }
+})
+
 test("checkin claims when the day had no daily_active", async () => {
   const before = { "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } } }
   const after = {
@@ -1049,6 +1064,42 @@ test("the name read at check-in is written back so the card can show it", async 
   }
 })
 
+test("a sign-in that is not an object is not spread into the write-back", async () => {
+  // auth.set replaces the whole sign-in, so the host's own fields are kept —
+  // but only when what the host handed over is an object. `typeof` is what
+  // draws that line: a callable carrying auth fields is not a sign-in, and
+  // spreading one would copy whatever it carries onto the account's sign-in.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-fnauth-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    const token = "ms-fn-0000-0000-0000-000000000026"
+    const handOver = () => {}
+    handOver.type = "api"
+    handOver.key = token
+    handOver.stray = "not a field of the sign-in"
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => handOver)
+        assert.equal(writes.length, 1, "the nickname is still written back")
+        assert.equal(writes[0].body.accountId, "Mison")
+        assert.equal(writes[0].body.stray, undefined, "a callable is not a sign-in to spread")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("an account the user already named is not renamed under them", async () => {
   // magpie keeps an alias under the account's label of the moment. Writing the
   // nickname over an account whose label the user has aliased would leave the
@@ -1569,6 +1620,44 @@ test("an alias kept on a plugin-left provider still counts as the user's name", 
   } finally {
     if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
     else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a pluginLeft entry that is not a record is skipped, not tripped over", async () => {
+  // providers.json is magpie's own, but it is also user state that can be mid-
+  // write or hand-edited: the file's reader already treats anything it cannot
+  // understand as "don't write". A null entry is exactly that — and the record
+  // walk must not let one take the whole check-in down with it.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-leftjunk-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const token = "ms-left-0000-0000-0000-000000000025"
+  writeFileSync(
+    join(dir, "providers.json"),
+    JSON.stringify({
+      providers: [{ id: "msmoli" }],
+      pluginLeft: [null, "junk", { package: "p" }, { package: "p", provider: null }],
+    }),
+  )
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        const r = await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.notEqual(r.outcome, "failed", `a junk pluginLeft entry is not a failed check-in: ${r.message}`)
+        assert.equal(writes.length, 1, "the nickname is still written back")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
   }
 })
 
@@ -2289,7 +2378,10 @@ test("a second check-in in the same process does not write the name again", asyn
 test("a check-in whose sign-in hand-over rejects with a non-Error says nothing odd", async () => {
   // the host can reject with a bare object. whyOf is what keeps that from
   // reaching the card as "[object Object]" — only the usage path was pinned.
-  for (const thrown of [{ code: 42 }, "gone"]) {
+  // A message that is not a string at all is the same bug one step over:
+  // `typeof e?.message === "string" || e.message` returns an object message
+  // unchanged, and String() then prints it as exactly that.
+  for (const thrown of [{ code: 42 }, "gone", { message: {} }, { message: 42 }]) {
     const r = await auth.checkin(async () => {
       throw thrown
     })
@@ -3503,6 +3595,28 @@ test("a key too short for magpie to hint goes by magpie's label, not one of our 
   }
 })
 
+test("a token under magpie's hint length is masked whole, never by its ends", async () => {
+  // maskToken shows the first and last four characters — that is a hint, and
+  // only from 12 characters up, the same threshold as magpie's own hintOf
+  // (host.js). An 11-character key shown by its ends is eight of its eleven
+  // characters on the card and in magpie's log, which is not a mask at all.
+  const token = "ms-short-11"
+  assert.equal(token.length, 11, "one character under magpie's hint threshold")
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      "/api/v1/users/login/info": { body: { success: false, message: `bad session ${token}, sign in again` } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: token }))
+      assert.equal(r.outcome, "failed")
+      assert.ok(!r.message.includes(token), `the short key reached the card: ${r.message}`)
+      assert.ok(!r.message.includes("ms-s"), `its ends are most of it: ${r.message}`)
+      assert.ok(r.message.includes("…"), `the whole key is the mask: ${r.message}`)
+    },
+  )
+})
+
 test("an empty accountId is no accountId, and the key's own label is used", async () => {
   // labelOf takes the accountId only when it is a string that carries
   // something: `typeof x === "string" && x` widened to `||` makes "" a label
@@ -3527,6 +3641,105 @@ test("an empty accountId is no accountId, and the key's own label is used", asyn
         await withClient.auth.checkin(async () => ({ type: "api", key: token, accountId: "" }))
         assert.equal(writes.length, 1, "an empty accountId is no accountId, so the nickname is written")
         assert.equal(writes[0].body.accountId, "Mison")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("an accountId on the sign-in is the label its alias is kept under", async () => {
+  // labelOf takes the accountId when the sign-in already carries one: magpie
+  // shows the account by that name, so that is the string a rename in its UI
+  // is kept under. Read as `!==` ("a non-string is the label"), the branch
+  // never runs for a real accountId, the lookup goes to the key's tail
+  // instead, misses the alias, and the nickname is written over it.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-accid-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  writeFileSync(
+    join(dir, "providers.json"),
+    JSON.stringify({ providers: [{ id: "msmoli", accountNames: { oldname: "主号" } }] }),
+  )
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    const token = "ms-accid-0000-0000-0000-000000000023"
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: token, accountId: "OldName" }))
+        assert.equal(writes.length, 0, "the alias lives under the accountId magpie shows, and must be honoured")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("with no directory there is nowhere to look, so the nickname is not written", async () => {
+  // aliasOf's `!dir` half: the host's folder is the only place a user's
+  // aliases are known to live. Without one, `!dir && !label` stops guarding
+  // (a label always exists) and the lookup reads "providers.json" relative to
+  // the process's cwd — a file that is not magpie's, whose absence reads as
+  // "fresh install, safe to write". The name is written over a state nobody
+  // looked at.
+  const cwd = process.cwd()
+  const scratch = mkdtempSync(join(tmpdir(), "msmoli-nodir-"))
+  try {
+    writeFileSync(join(scratch, "providers.json"), JSON.stringify({ providers: [{ id: "msmoli" }] }))
+    process.chdir(scratch)
+    const writes = []
+    const p = await MsmoliPlugin({ client: { auth: { set: async (o) => { writes.push(o) } } } })
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await p.auth.checkin(async () => ({ type: "api", key: "ms-nodir-0000-0000-0000-000000000024" }))
+        assert.equal(writes.length, 0, "no directory is having nowhere to look, not 'no alias'")
+      },
+    )
+  } finally {
+    process.chdir(cwd)
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test("an accountNames value that is not a string is not a name to keep", async () => {
+  // providers.json is another program's file. `typeof mine === "string" && mine`
+  // keeps a name only when it is a non-empty string; read as `||`, a number
+  // under the label is returned as the user's name, `!== ""` is true, and the
+  // nickname is never written — the card keeps the key's tail for good.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nonstr-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  writeFileSync(
+    join(dir, "providers.json"),
+    JSON.stringify({ providers: [{ id: "msmoli", accountNames: { "api key …0016": 42 } }] }),
+  )
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    const token = "ms-nonstr-0000-0000-0000-000000000016"
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(writes.length, 1, "a number is not a name, so the nickname is written")
       },
     )
   } finally {

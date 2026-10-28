@@ -543,6 +543,37 @@ test("a missing preset is refused before planning, both directions", async () =>
 
 // ---- the failure partway through the two-step replace
 
+test("without --force, two different tokens are refused before anything runs", async () => {
+  // --force is the CLI's permission to log the user out and back in; the
+  // plan functions honour it, but who hands it to them is parseArgs. A
+  // `force: true` default there turned a plain `--to-plugin` into a replace
+  // with no question asked — the one destructive step this tool can take.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-noforce-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    for (const to of ["--to-plugin", "--to-preset"]) {
+      let spawned = false
+      const out = []
+      const code = await main({
+        argv: ["--dir", dir, to, "--magpie", "/nonexistent"],
+        log: (s) => out.push(s),
+        spawn: () => {
+          spawned = true
+          return { status: 0, stdout: "", stderr: "" }
+        },
+      })
+      // both directions refuse, and neither may run anything: the plan
+      // functions honour --force, but whose hand it is in is parseArgs
+      assert.equal(code, 1, `${to} on two different tokens`)
+      assert.equal(spawned, false, `${to}: nothing may run without --force`)
+      assert.match(out.join("\n"), /--force/, `${to}: the user is told how to go through with it`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("a failed login after a successful logout says how to recover", async () => {
   const dir = mkdtempSync(join(tmpdir(), "msmoli-half-"))
   try {

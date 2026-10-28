@@ -576,16 +576,13 @@ async function rememberAccountName(client, token, name, auth, dir) {
     // the message can carry whatever the host put in it; scrub the token out
     // of it before it reaches magpie's log
     const why = cardText(whyOf(e), token)
-    let logged = false
     try {
       const r = client?.app?.log?.({ body: { level: "warn", service: "msmoli", message: `account name not written back: ${why}` } })
       if (r && typeof r.catch === "function") r.catch(() => {})
-      logged = true
     } catch {
       // a host whose log throws synchronously must not turn a successful
       // check-in into a failed one, nor a usage read into a rejection
     }
-    void logged
   }
 }
 
