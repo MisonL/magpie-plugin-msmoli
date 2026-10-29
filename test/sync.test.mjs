@@ -2741,3 +2741,227 @@ test("a providers.json that disappears during the write is 'not found', not a cr
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("a relative XDG_CONFIG_HOME is not rooted just because it holds a separator", () => {
+  // rooted() takes a drive-letter path on any host, and on win32 also a path
+  // that *begins* with a separator. Read as `includes`, "data\\magpie" and
+  // "data/magpie" — an XDG_CONFIG_HOME written as a relative path, which
+  // magpie itself ignores — are taken for rooted, and the tool reads a folder
+  // magpie never writes while reporting it as the config dir.
+  for (const rel of ["data\\magpie", "data/magpie"]) {
+    const got = findConfigDir({
+      env: { XDG_CONFIG_HOME: rel },
+      home: "C:\\Users\\q",
+      os: "win32",
+      exists: (p) => p.includes("magpie"),
+      real: (p) => p,
+      stat: () => ({ isFile: () => false, isDirectory: () => false, ino: 1, dev: 1 }),
+    })
+    // the wrong answer is exactly join(rel, "magpie") — naming it, rather
+    // than testing for a prefix, keeps the assertion the same on Windows
+    assert.notEqual(got, join(rel, "magpie"), `${JSON.stringify(rel)} is relative and must be ignored: ${got}`)
+  }
+  // the rooted spellings that do count still count
+  const rooted = findConfigDir({
+    env: { XDG_CONFIG_HOME: "\\xdg" },
+    home: "C:\\Users\\q",
+    os: "win32",
+    exists: (p) => p.includes("magpie"),
+    real: (p) => p,
+    stat: () => ({ isFile: () => false, isDirectory: () => false, ino: 1, dev: 1 }),
+  })
+  assert.equal(rooted, join("\\xdg", "magpie"), "a path that begins with a separator is rooted")
+})
+
+test("a mount folder that merely starts with the AppImage's is not inside it", () => {
+  // within() is a folder test, not a substring test: /tmp/.mount_X and
+  // /tmp/.mount_XY are two different mounts, and reading the second as inside
+  // the first sends a magpie running from its own folder to a data folder
+  // beside somebody else's AppImage.
+  const apps = pathToFileURL("/opt/apps").pathname.replace(/\/$/, "")
+  const img = join(apps, "magpie.AppImage")
+  const mount = join(pathToFileURL("/tmp").pathname.replace(/\/$/, ""), ".mount_X")
+  const sibling = mount + "Y"
+  const files = new Set([join(sibling, "data"), join(sibling, "data", "providers.json")])
+  const got = findConfigDir({
+    env: { APPIMAGE: img, APPDIR: mount },
+    home: "/h",
+    os: "linux",
+    binPath: join(sibling, "magpie"),
+    real: (p) => p,
+    exists: (p) => files.has(p),
+    stat: (p) => ({ isFile: () => false, isDirectory: () => p.endsWith("data"), ino: 1, dev: 1 }),
+  })
+  assert.equal(got, join(sibling, "data"), "its own folder's data, not the AppImage's")
+
+  // the other shape of a substring test: the mount's name somewhere in the
+  // middle of the path, with the separator too, so neither `includes(dir)`
+  // nor `includes(dir + sep)` can tell it from being inside
+  const under = pathToFileURL("/home/tmp").pathname.replace(/\/$/, "")
+  const nested = join(under, ".mount_X")
+  const nestedFiles = new Set([join(nested, "data"), join(nested, "data", "providers.json")])
+  const got2 = findConfigDir({
+    env: { APPIMAGE: img, APPDIR: mount },
+    home: "/h",
+    os: "linux",
+    binPath: join(nested, "magpie"),
+    real: (p) => p,
+    exists: (p) => nestedFiles.has(p),
+    stat: (p) => ({ isFile: () => false, isDirectory: () => p.endsWith("data"), ino: 1, dev: 1 }),
+  })
+  assert.equal(got2, join(nested, "data"), "a folder named like the mount, elsewhere, is not inside it")
+})
+
+test("the .app ending is read whatever its case", () => {
+  // a Mac volume that folds case lets the bundle be spelled MAGPIE.APP, and
+  // the .app test decides which folder is the base for a portable install.
+  // Without the /i the bundle is not recognised, and the data folder is
+  // looked for inside Contents/MacOS instead of beside the bundle — where
+  // writing one would break its signature.
+  const data = join("/Applications", "data")
+  const got = findConfigDir({
+    env: {},
+    home: "/Users/q",
+    os: "darwin",
+    exists: () => false,
+    binPath: "/Applications/MAGPIE.APP/Contents/MacOS/magpie",
+    real: (p) => p,
+    stat: (p) => {
+      // the installed folder holds none of magpie's files, so the bundle's
+      // own folder is magpie's; spelled with join() so it holds on Windows too
+      if (p.includes(join(".config", "magpie"))) throw new Error("ENOENT")
+      return { isFile: () => false, isDirectory: () => p.endsWith("data"), ino: 1, dev: 1 }
+    },
+  })
+  assert.equal(got, data, "the bundle's own folder, not the folder inside it")
+})
+
+test("a shared folder is recognised whatever its case", () => {
+  // shared() compares the base against /Applications, ~/Downloads and the
+  // rest after folding both to lower case — a case-insensitive volume gives
+  // the same folder either spelling. Without the fold the comparison misses,
+  // the shared-folder rule never fires, and a data folder that belongs to
+  // another app is read as magpie's.
+  const got = findConfigDir({
+    env: {},
+    home: "/Users/q",
+    os: "darwin",
+    exists: (p) => p.endsWith("magpie") || p.endsWith("providers.json"),
+    binPath: "/applications/Magpie.app/Contents/MacOS/magpie",
+    real: (p) => p,
+    stat: (p) => ({ isFile: () => false, isDirectory: () => p.endsWith("data"), ino: 1, dev: 1 }),
+  })
+  assert.equal(got, join("/Users/q", ".config", "magpie"), "a shared folder in another case is still shared")
+})
+
+test("every token-shaped run in the plan is masked, not only the first", () => {
+  // show()'s tokenShaped carries /g because the mask is a replace. Without it
+  // a provider id that happens to carry two token-shaped runs prints the
+  // second one whole — and a poisoned providers.json can put anything there.
+  const t1 = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const t2 = "ms-zzzz9999-yyyy-8888-xxxx-777766665555"
+  const plan = planToPlugin({ preset: { key: A, id: `${t1} ${t2}` }, accounts: [], force: false })
+  const text = plan.lines.join("\n")
+  assert.ok(!text.includes(t1), `the first token printed whole:\n${text}`)
+  assert.ok(!text.includes(t2), `the second token printed whole:\n${text}`)
+  assert.match(text, /ms-z…5555/, `the second should be masked:\n${text}`)
+})
+
+test("the hostname comparison folds case for every scheme, not only the ones URL folds", () => {
+  // new URL() lower-cases the host of a special scheme (http, https, ws, ftp,
+  // file) but leaves a non-special one as written; hostOf's .toLowerCase() is
+  // what makes the comparison hold for both. For http and https — every chat
+  // URL a real provider carries — the parser has already folded the host, so
+  // the call is invisible there; this is the one shape that shows it working.
+  // A provider it stops recognising is one the tool then tells the user to
+  // add, so the difference is the wrong advice, not a silent no-op.
+  const mixed = presetCandidates([{ id: "mine", chat: "https://Api-Inference.ModelScope.Cn/v1", key: A }])
+  assert.equal(mixed.length, 1, "a special scheme is folded by the URL parser itself")
+  const upper = presetCandidates([{ id: "mine", chat: "foo://API-INFERENCE.MODELSCOPE.CN/v1", key: A }])
+  assert.equal(upper.length, 1, "a non-special scheme keeps its case, so the fold is hostOf's own")
+})
+
+test("a key of only spaces is not a key", () => {
+  // keyedOf trims before it tests: a key pasted with a trailing newline is the
+  // same key, and a key of nothing but spaces is no key at all. Read without
+  // the trim, a providers.json entry with "   " for its key counts as signed
+  // in, and the tool offers to sync a token that cannot work.
+  assert.deepEqual(presetCandidates([{ id: "modelscope", preset: "modelscope", key: "   " }]), [])
+})
+
+test("an account key that merely contains msmoli# is not one of ours", () => {
+  // pluginAccounts takes the main key and msmoli#…; anything else in the file
+  // belongs to another provider. Read as `includes`, "xmsmoli#1" is taken for
+  // a second account of this plugin — and a --force run then counts a solvable
+  // state as ambiguous.
+  const auth = { "xmsmoli#1": { type: "api", key: B }, msmoli: { type: "api", key: A }, "msmoli#2": { type: "api", key: B } }
+  assert.deepEqual(pluginAccounts(auth).map((a) => a.name), ["msmoli", "msmoli#2"])
+})
+
+test("a token read out of plugin-auth.json loses the padding around it", () => {
+  // a token pasted with a trailing newline is the same token; the key is
+  // trimmed where it is read so every comparison and every read-back below
+  // sees the one spelling. Read untrimmed, the same credential compares
+  // unequal to itself and the read-back reports a write that did land.
+  const [acct] = pluginAccounts({ msmoli: { type: "api", key: ` ${A}\n` } })
+  assert.equal(acct.token, A)
+})
+
+test("a child's output is trimmed at its edges before it is echoed or quoted", async () => {
+  // run() trims the combined output once, and echoes only the lines with
+  // something in them. Without the outer trim a padded answer keeps its
+  // padding in the log and in the error, and a leading blank line pushes the
+  // line the user needs out of the three the error quotes.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-outtrim-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    const out = []
+    await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 0, stdout: "  hello  \n", stderr: "" }),
+    })
+    assert.ok(out.includes("  hello"), `the echoed line is trimmed: ${JSON.stringify(out)}`)
+
+    const failOut = []
+    await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => failOut.push(s),
+      spawn: () => ({ status: 1, stdout: "", stderr: "\n  \nboom\n" }),
+    })
+    const text = failOut.join("\n")
+    assert.match(text, /：\nboom$/, `the quoted failure is trimmed at both ends: ${JSON.stringify(text)}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a line of only spaces in the child's output is not echoed as a line", async () => {
+  // the echo skips a line with nothing in it; read as `if (line)` only a
+  // genuinely empty one is skipped, and a padded line prints as the indent
+  // plus the padding — on a terminal that reads as a blank line in the middle
+  // of magpie's answer, with no way to tell it from a step that said nothing.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-blankline-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    const out = []
+    await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 0, stdout: "alpha\n\n   \nbeta\n", stderr: "" }),
+    })
+    // the child's lines come after the "$ magpie …" echo and before the
+    // read-back's refusal; the report above them also indents by two, so only
+    // that window says what the echo did
+    const at = out.findIndex((l) => l.startsWith("$ magpie"))
+    assert.ok(at > 0, `the command echo should be there: ${JSON.stringify(out)}`)
+    const echoed = []
+    for (const line of out.slice(at + 1)) {
+      if (line.startsWith("✗")) break
+      echoed.push(line)
+    }
+    assert.deepEqual(echoed, ["  alpha", "  beta"], `only the lines with text are echoed: ${JSON.stringify(out)}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

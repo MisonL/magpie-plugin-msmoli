@@ -4786,3 +4786,313 @@ test("a body carrying both envelope spellings is read by the one ModelScope owns
     },
   )
 })
+
+test("a timeout or a dead network is recognised however the runtime capitalises it", { timeout: 8000 }, async () => {
+  // Both branches of saidFailure match a runtime's own wording with /i:
+  // "Timeout" from a runtime that capitalises its sentences, and "Fetch
+  // failed" from one that does the same with fetch's own error. The /i is the
+  // only thing between the user and that runtime's English on the card, and
+  // neither spelling was ever fed to it — every fixture words it in lower case.
+  const real = globalThis.fetch
+  try {
+    for (const [text, want, why] of [
+      ["Timeout", /请求超时（8 秒）/, "a capitalised timeout is still a timeout"],
+      ["Fetch failed", /请求失败：网络不通、被代理拦截，或被重定向到了别的站点/, "capitalised fetch wording is still the network"],
+    ]) {
+      globalThis.fetch = async () => {
+        throw new Error(text)
+      }
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.match(u.error ?? "", want, `${why}: ${JSON.stringify(u.error)}`)
+    }
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a title and a nickname lose the padding around them before the card sees them", async () => {
+  // text() trims after the control-character fold: a title the server padded,
+  // or a nickname whose answer carried a stray space, otherwise lands on the
+  // card as "（  首次  ）" and gets written back to plugin-auth.json with the
+  // padding still on — the account then reads "  alice  " in magpie's own UI.
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records: [day({ title: "  首次  " })] } },
+      },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "  alice  " } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.doesNotMatch(r.message, /（\s+首次\s+）/, `the title must arrive trimmed: ${JSON.stringify(r.message)}`)
+    },
+  )
+})
+
+test("a padded nickname is written back trimmed", async () => {
+  // the same trim, on the other exit: what goes to auth.set is the account's
+  // name in magpie's UI, and "  alice  " is not how a person writes it
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-padname-"))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    const writes = []
+    const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "  alice  " } } },
+      },
+      async () => {
+        await p.auth.checkin(async () => ({ type: "api", key: "ms-padname-0000000" }))
+      },
+    )
+    assert.deepEqual(writes.map((w) => w.body.accountId), ["alice"], "the name is written as a person writes it")
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('"OFF" written with spaces around it is still off, not the default window', async () => {
+  // a hand-edited config is exactly where padding turns up, and a value that
+  // misses the off-test falls through to the window parser, which cannot read
+  // it either — so it silently becomes 08:30-10:00 and claims at a time the
+  // user did not name, from a setting that says "off".
+  for (const off of ["  OFF  ", " off ", "\toff\n"]) {
+    assert.equal(windowOf({ checkinWindow: off }), null, `${JSON.stringify(off)} turns the window off`)
+  }
+})
+
+test("an account label with padding around it still finds the alias kept under it", async () => {
+  // aliasOf keyed the lookup on `label.trim().toLowerCase()`: the label is the
+  // accountId the host hands over, and a padded one that misses the trim finds
+  // no alias — so the nickname is written over the name the user chose.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-padalias-"))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    writeFileSync(
+      join(dir, "providers.json"),
+      JSON.stringify({ providers: [{ id: "msmoli", accountNames: { "my label": "kept" } }] }),
+    )
+    const writes = []
+    const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      },
+      async () => {
+        await p.auth.checkin(async () => ({ type: "api", key: "ms-padalias-000000", accountId: "  my label  " }))
+      },
+    )
+    assert.deepEqual(writes, [], "the user's alias was found, so nothing is written over it")
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a message naming two tokens has both of them masked", async () => {
+  // tokenShaped carries /g because the mask is a replace: without it only the
+  // first run is rewritten and the second is printed whole — the one promise
+  // this tool makes about a token, broken by the message that names two.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-twotok-"))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    const t1 = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+    const t2 = "ms-zzzz9999-yyyy-8888-xxxx-777766665555"
+    const p = await MsmoliPlugin({ directory: dir, client: {} })
+    const fail = async () => {
+      throw new Error(`no key ${t1} for provider; also saw ${t2}`)
+    }
+    for (const [what, said] of [
+      ["usage", (await p.auth.usage(fail)).error],
+      ["checkin", (await p.auth.checkin(fail)).message],
+    ]) {
+      assert.ok(!said.includes(t1), `${what}: the first token reached the card whole: ${JSON.stringify(said)}`)
+      assert.ok(!said.includes(t2), `${what}: the second token reached the card whole: ${JSON.stringify(said)}`)
+      assert.match(said, /ms-z…5555/, `${what}: the second token should be shown masked: ${JSON.stringify(said)}`)
+    }
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a nickname that is a middle slice of the token, or that carries it, is refused", async () => {
+  // unusableName's piece test is `token.includes(name)` and its whole-token
+  // test is `name.includes(token)`: both are contains, not prefixes. Read as
+  // startsWith, a 24-character slice from the middle of the token is written
+  // back as the account name, and so is a name with the token inside it — the
+  // server is handed its own session back, once removed.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-midname-"))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    // Two shapes, and each needs a token of its own length: the piece must be
+    // under text()'s cut to 40 (a 39-character token leaves no room for a
+    // carrying name), and a name that carries the token must fit in 40 too.
+    // Each case also gets its own token, so the write-back is not skipped by
+    // the module's own "named once" set.
+    const long = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+    const middle = long.slice(6, 30)
+    assert.ok(middle.length >= 20 && long.includes(middle), "a 24-character piece from the middle of the token")
+    assert.ok(!long.startsWith(middle), "and not its front, so a prefix test cannot see it")
+    const short = "ms-abcdefgh" // 11 characters: "key " + it still fits under 40
+    for (const [token, nick, why] of [
+      [long, middle, "a middle slice of the token is the token"],
+      [short, "key " + short, "a name carrying the whole token is the token too"],
+    ]) {
+      assert.ok(nick.length <= 40, `${why}: the fixture must survive text()'s cut`)
+      const writes = []
+      const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
+      await withFetch(
+        {
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
+        },
+        async () => {
+          await p.auth.checkin(async () => ({ type: "api", key: token }))
+        },
+      )
+      assert.deepEqual(writes, [], `${why}, so nothing is written back`)
+    }
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a nickname of only whitespace falls through to the Name behind it", async () => {
+  // `named` tests `v.trim()`: a NickName of spaces is not a name, so the
+  // `||` moves on to Name. Read as the bare string, "   " is truthy, wins the
+  // `||`, and text() then trims it to "" — the account is left without the
+  // name the server did send.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-wsnick-"))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    const writes = []
+    const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "   ", Name: "alice" } } },
+      },
+      async () => {
+        await p.auth.checkin(async () => ({ type: "api", key: "ms-wsnick-00000000" }))
+      },
+    )
+    assert.deepEqual(writes.map((w) => w.body.accountId), ["alice"], "the name behind the blank nickname is the name")
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("an amount with a third decimal rounds to two, it does not truncate", async () => {
+  // yin exists because a sum in binary floating point lands on
+  // 0.30000000000000004, and the card must read "0.3". Its Math.round is what
+  // makes 0.125 into 0.13: as Math.floor it truncates every amount with a
+  // third decimal — 0.125 reads 0.12, 0.335 reads 0.33, and the totals on the
+  // card disagree with the ledger they came from.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-yin-"))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    const p = await MsmoliPlugin({ directory: dir, client: {} })
+    for (const [amount, want] of [
+      [0.125, "0.13"],
+      [0.335, "0.34"],
+    ]) {
+      await withFetch(
+        {
+          "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 0 } } },
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+            body: {
+              success: true,
+              data: {
+                records: [{ gmt_created: today, type: "SPEND_CONFIRM", rule_key: "api_inference", model_tier: "a", total_amount: amount, count: 1 }],
+              },
+            },
+          },
+        },
+        async () => {
+          const r = await p.auth.usage(async () => ({ type: "api", key: "ms-test" }))
+          assert.match(r.windows?.[0]?.display ?? "", new RegExp(`今日用 ${want.replace(".", "\\.")} `), `${amount} reads as ${want}: ${r.windows?.[0]?.display}`)
+        },
+      )
+    }
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the usage percentage rounds to two decimals on both denominators", async () => {
+  // `used` is a percentage the card draws a bar from. Both branches round
+  // (`Math.round(x * 10000) / 100`); as Math.floor they truncate: 2 of 3 spends
+  // reads 66.66 instead of 66.67, and 2 used out of 201 earned reads 0.99
+  // instead of a full 1. The two branches take different inputs, so each needs
+  // its own arithmetic.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-pct-"))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    const p = await MsmoliPlugin({ directory: dir, client: {} })
+    const cases = [
+      // earned > 0: 2 used of 200 + 1 earned
+      {
+        claim: [day(), day({ rule_key: "aliyun_bindlogin", total_amount: 1 })],
+        spends: [0, 2],
+        available: 1,
+        want: 1,
+        why: "2 of 201 is a whole percent",
+      },
+      // earned == 0: the denominator is used + available
+      {
+        claim: [],
+        spends: [2],
+        available: 1,
+        want: 66.67,
+        why: "2 of 3 rounds up at the second decimal",
+      },
+    ]
+    for (const c of cases) {
+      const rows = [
+        ...c.claim,
+        ...c.spends.map((n, i) => ({ gmt_created: today, type: "SPEND_CONFIRM", rule_key: "api_inference", model_tier: `t${i}`, total_amount: n, count: 1 })),
+      ]
+      await withFetch(
+        {
+          "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: c.available } } },
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: rows } } },
+        },
+        async () => {
+          const r = await p.auth.usage(async () => ({ type: "api", key: "ms-test" }))
+          assert.equal(r.windows?.[0]?.used, c.want, `${c.why}, not ${r.windows?.[0]?.used}`)
+        },
+      )
+    }
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
