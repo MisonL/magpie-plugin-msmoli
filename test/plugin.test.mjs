@@ -114,6 +114,12 @@ const spend = (amount, count = 1, on = today) => ({
 const reply = (hit) => {
   const text = hit.raw !== undefined ? hit.raw : JSON.stringify(hit.body ?? {})
   const bytes = hit.bytes !== undefined ? hit.bytes : new TextEncoder().encode(text)
+  // `chunkBytes` hands the body over in pieces of at most that many bytes, the
+  // way a socket does — a piece can end in the middle of a multi-byte
+  // character. The default is one piece, which is what most tests want.
+  const step = Math.max(1, hit.chunkBytes ?? bytes.length)
+  const pieces = []
+  for (let at = 0; at < bytes.length; at += step) pieces.push(bytes.subarray(at, at + step))
   return {
     status: hit.status ?? 200,
     headers: {
@@ -124,12 +130,11 @@ const reply = (hit) => {
       ? undefined
       : {
           getReader() {
-            let sent = false
+            let at = 0
             return {
               async read() {
-                if (sent) return { done: true, value: undefined }
-                sent = true
-                return { done: false, value: bytes }
+                if (at >= pieces.length) return { done: true, value: undefined }
+                return { done: false, value: pieces[at++] }
               },
               async cancel() {},
               releaseLock() {},
@@ -4468,4 +4473,316 @@ test("with no directory and no XDG_CONFIG_HOME, the config comes from ~/.config/
     else process.env.USERPROFILE = saved.up
     rmSync(home, { recursive: true, force: true })
   }
+})
+
+// ── 第二十四轮：操作符与集合判断 ─────────────────────────────────────────
+// 前几轮把布尔、比较、整数和字符串/正则常量都改过一遍，`??`↔`||`、
+// `.some`↔`.every`、`+=`↔`-=`、`?.` 的有无、`await` 的有无一直没动。
+// 每条变异都在真模块上跑过：下面这些用例是那些变异唯一说得出口的地方。
+
+test("a body that arrives in pieces is put back together byte for byte", async () => {
+  // fetch hands the body over in whatever pieces the socket delivered, and a
+  // piece boundary lands wherever it lands — inside a multi-byte character as
+  // often as not. The pieces are joined by byte offset and decoded once:
+  // joined with a decreasing offset (`at -=`) the second piece lands before
+  // the first and the read throws "offset is out of bounds"; decoded piece by
+  // piece, 魔 becomes two replacement marks and the card's title is rubble.
+  const body = { success: true, data: { records: [day({ title: "注册并登录" })] } }
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body, chunkBytes: 3 },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "小明" } }, chunkBytes: 5 },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(r.outcome, "done", `a chunked body is still a body: ${r.message}`)
+      assert.match(r.message, /注册并登录/, `the title must survive the split: ${r.message}`)
+    },
+  )
+})
+
+test("a getAuth that hands back nothing is a missing sign-in, not a crash", async () => {
+  // magpie's authCopy answers undefined for a key that was never stored — the
+  // ordinary state of a provider that was added but not signed in. `auth?.type`
+  // read as `auth.type` puts "Cannot read properties of undefined" on the card,
+  // which reads as the plugin being broken rather than the account being new.
+  for (const nothing of [undefined, null]) {
+    const u = await auth.usage(async () => nothing)
+    assert.equal(u.error, "没有登录信息", `usage: ${u.error}`)
+    assert.equal(u.signIn, "")
+    const c = await auth.checkin(async () => nothing)
+    assert.equal(c.outcome, "failed")
+    assert.match(c.message, /没有登录信息/, `checkin: ${c.message}`)
+  }
+})
+
+test("a getAuth that rejects with null still gets a card, not a TypeError", async () => {
+  // `throw null` is a legal rejection, and the host's rejection value is its
+  // own to choose. whyOf and signedOut read e?.message / e?.signIn; without the
+  // `?.` the catch block itself throws, and the hook rejects where it promised
+  // an answer.
+  const u = await auth.usage(async () => {
+    throw null
+  })
+  assert.equal(u.error, "用量查询失败")
+  assert.equal(u.signIn, "")
+  const c = await auth.checkin(async () => {
+    throw null
+  })
+  assert.equal(c.outcome, "failed")
+  assert.equal(c.message, "签到失败")
+})
+
+test("a null row in the ledger is skipped, not read from", async () => {
+  // records is a list the server fills; a null among the rows is not a row.
+  // The card and the check-in both walk it with `r?.field`; read as `r.field`
+  // one null takes the whole answer down with "Cannot read properties of null"
+  // — a card that looks broken because the server sent junk.
+  const body = { success: true, data: { records: [null, day()] } }
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body },
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 300 } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "" } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.error, undefined, `usage must skip the null row: ${u.error}`)
+      assert.equal(u.balance, "300 魔粒可用")
+      const c = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(c.outcome, "done", `the check-in must skip it too: ${c.message}`)
+    },
+  )
+})
+
+test("a null entry in providers.json does not stop the name being written back", async () => {
+  // providers.json is another program's file and can arrive half-written: a
+  // null in the providers list is a row that is not a provider. aliasOf walks
+  // every list looking for our id; read as `p.id` the null throws, and the
+  // check-in reports "Cannot read properties of null" with the nickname never
+  // written back.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nullprov-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [null, { id: "msmoli", accountNames: {} }] }))
+  const token = "ms-null-0000-0000-0000-000000000024"
+  const writes = []
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "小明" } } },
+      },
+      async () => {
+        const c = await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(c.outcome, "done", `a junk row is not a failed check-in: ${c.message}`)
+        assert.equal(writes.length, 1, "the nickname should still be written back")
+        assert.equal(writes[0].body.accountId, "小明")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a config whose provider field is not an object gets a fresh one", async () => {
+  // magpie builds config as `{ provider: {}, ...userConfig }`, so a user's own
+  // provider field wins — and one that is not an object (a string left by an
+  // older version, a number, a boolean) made `provider[ID] = …` a TypeError.
+  // The host logs a config hook's error and carries on, so the plugin showed
+  // up unnamed with nothing on screen to say why. `??=` replaces null and
+  // undefined only.
+  for (const junk of ["", 0, false, "旧条目"]) {
+    const config = { provider: junk }
+    await hooks.config(config)
+    assert.deepEqual(config.provider, { msmoli: { name: "ModelScope 魔粒" } }, `provider was ${JSON.stringify(junk)}`)
+  }
+})
+
+test("a size refusal survives a cancel that fails", async () => {
+  // Over the cap the read is abandoned; cancel() closes the socket, and a
+  // socket already gone can make it reject. Awaiting it unguarded lets that
+  // rejection replace the refusal with the runtime's own words; dropping the
+  // await leaves it unobserved, which Node treats as a process-level failure.
+  const real = globalThis.fetch
+  const unhandled = []
+  const watch = (e) => unhandled.push(e)
+  process.on("unhandledRejection", watch)
+  globalThis.fetch = async (url) => {
+    if (!String(url).includes("balance")) return reply({ body: { success: true, data: { records: [] } } })
+    return {
+      status: 200,
+      headers: { get: () => null },
+      body: {
+        getReader: () => {
+          let sent = 0
+          return {
+            async read() {
+              sent += 1
+              return sent > 300 ? { done: true, value: undefined } : { done: false, value: new Uint8Array(1024) }
+            },
+            async cancel() {
+              throw new Error("socket already gone")
+            },
+            releaseLock() {},
+          }
+        },
+      },
+      text: async () => "",
+    }
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+    assert.match(u.error ?? "", /过大/, `the refusal is ours to word: ${u.error}`)
+    await new Promise((r) => setTimeout(r, 20))
+    assert.deepEqual(unhandled, [], "the abandoned cancel must not reject unobserved")
+  } finally {
+    process.off("unhandledRejection", watch)
+    globalThis.fetch = real
+  }
+})
+
+test("a fetch that rejects with nothing is still a sentence, not a TypeError", async () => {
+  // the same rule as getAuth one step later: the runtime's rejection value is
+  // its own to choose, and `throw null` from fetch is legal. saidFailure reads
+  // e?.message and e?.name; without the `?.` the handler throws where the card
+  // promised a failure to read.
+  const real = globalThis.fetch
+  globalThis.fetch = async () => {
+    throw null
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+    assert.equal(u.error, "用量查询失败", `usage: ${u.error}`)
+    assert.equal(u.signIn, "")
+    const c = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+    assert.equal(c.outcome, "failed")
+    assert.equal(c.message, "签到失败")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a host with no auth.set still gets its check-in, with the name simply not written", async () => {
+  // `!client?.auth?.set` is the guard for a client that cannot write: the
+  // host passes a client, not necessarily one with every method. Read as
+  // `client?.auth.set`, a client without auth throws on `.set`, and the
+  // check-in reports a TypeError instead of claiming.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-noset-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    for (const client of [{}, { app: {} }, { app: { log: () => {} } }]) {
+      const p = await MsmoliPlugin({ directory: dir, client })
+      await withFetch(
+        {
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "小明" } } },
+        },
+        async () => {
+          const c = await p.auth.checkin(async () => ({ type: "api", key: "ms-noset-0000-0000-000000000009" }))
+          assert.equal(c.outcome, "done", `a client without auth.set is not a failed check-in: ${c.message}`)
+        },
+      )
+    }
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the nickname is written back before the hook answers", async () => {
+  // rememberAccountName is awaited on both paths: the host labels the account
+  // by the accountId, and a write that is still in flight when the card is
+  // answered has not landed anywhere yet. Dropped, the check-in answers first
+  // and the write races it — on a host that closes the plugin the moment the
+  // answer is in, it never lands at all.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-awaitset-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const client = {
+      auth: {
+        set: (o) =>
+          new Promise((resolve) => {
+            setTimeout(() => {
+              writes.push(o)
+              resolve()
+            }, 5)
+          }),
+      },
+      app: { log: () => {} },
+    }
+    const p = await MsmoliPlugin({ directory: dir, client })
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 300 } } },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "小明" } } },
+      },
+      async () => {
+        const c = await p.auth.checkin(async () => ({ type: "api", key: "ms-await-0000-0000-000000000001" }))
+        assert.equal(c.outcome, "done")
+        assert.equal(writes.length, 1, "the write must have landed by the time the hook answers")
+
+        // the other path: a check-in whose write failed leaves the name known
+        // and the token unwritten, and the next usage retries it. That retry
+        // is awaited too — the card must not be answered ahead of it.
+        let failNext = true
+        client.auth.set = (o) =>
+          new Promise((resolve, reject) => {
+            setTimeout(() => {
+              if (failNext) {
+                failNext = false
+                reject(new Error("host busy"))
+              } else {
+                writes.push(o)
+                resolve()
+              }
+            }, 5)
+          })
+        const p2 = await MsmoliPlugin({ directory: dir, client })
+        const c2 = await p2.auth.checkin(async () => ({ type: "api", key: "ms-await-0000-0000-000000000002" }))
+        assert.equal(c2.outcome, "done", `the failed write is not a failed check-in: ${c2.message}`)
+        assert.equal(writes.length, 1, "the failed write left nothing behind")
+        const before = writes.length
+        const u = await p2.auth.usage(async () => ({ type: "api", key: "ms-await-0000-0000-000000000002" }))
+        assert.equal(u.error, undefined, `usage should read: ${u.error}`)
+        assert.equal(writes.length, before + 1, "the retried write must have landed by the time usage answers")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a body carrying both envelope spellings is read by the one ModelScope owns", async () => {
+  // okOf reads `body.Code ?? body.code`: the capital-Code field is
+  // ModelScope's own, and a body that carries both is read by it even when
+  // its value is falsy. Read as `||`, a Code of 0 falls through to a
+  // lowercase code of "200" and a contradictory answer passes for a success —
+  // one field saying "no", the other "yes", and the plugin believing the one
+  // the API does not use.
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { Code: 0, code: "200", data: { available_balance: 300 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.ok(u.error, `Code 0 is not a success: ${JSON.stringify(u)}`)
+      assert.match(u.error, /余额查询失败/)
+      assert.equal(u.balance, undefined, "a body whose Code says 0 is not a balance to show")
+    },
+  )
 })

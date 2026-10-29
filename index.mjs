@@ -181,7 +181,14 @@ async function readBounded(res) {
       if (done) break
       size += value.byteLength
       if (size > MAX_BODY) {
-        await reader.cancel()
+        // The read is abandoned either way, so a cancel that fails has nothing
+        // to add: its own error ("terminated", a runtime's sentence about
+        // sockets) would replace the one sentence the user can act on. Not
+        // awaited at all, that rejection is unobserved, and an unobserved
+        // rejection is a process-level failure in Node.
+        try {
+          await reader.cancel()
+        } catch {}
         throw new Error("响应过大")
       }
       chunks.push(value)
@@ -981,7 +988,13 @@ export async function MsmoliPlugin(input) {
     // 让 provider 以名字出现，不注册任何模型：聊天仍走 providers.json 里
     // API key 版的那个 modelscope 预设。
     async config(config) {
-      config.provider ??= {}
+      // 宿主是 `{ provider: {}, ...userConfig }` 拼出来的，用户配置里那个
+      // provider 会盖掉默认的 {}。它不是对象时（旧版本写的字符串、手改的
+      // 数字），下面 `[ID] =` 会抛 TypeError，宿主只把 config 钩子的错误
+      // 记进日志——插件照常出现，只是没有名字，看不出哪里错了。`??=` 只挡
+      // null/undefined，挡不住 ""、0、false；一个装不下 ID 的容器里没有可
+      // 保留的东西，整个换掉。
+      if (!config.provider || typeof config.provider !== "object") config.provider = {}
       // 用户自己改过的名字留着：magpie 把 provider 的名字存在 providers.json
       // 里，而钩子每次启动都跑一遍——强制写回默认值会把 UI 里的改名悄悄撤销，
       // 与账号昵称那条「用户命名过就不动」是同一条规矩。值不是对象时当作没有。

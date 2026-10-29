@@ -2619,3 +2619,125 @@ test("the shared-folder rule looks in the XDG folder when one is set", () => {
     "the XDG folder is the installed one; ~/Downloads/data is not magpie's",
   )
 })
+
+// ── 第二十四轮：操作符与集合判断 ─────────────────────────────────────────
+
+test("the preset direction's read-back fails when the list it reads is empty", async () => {
+  // `every` on an empty list is vacuously true. A write that lands but leaves
+  // providers.json without a candidate — an emptied list, a provider that was
+  // renamed away — then passed the read-back and printed ✓ 完成 with nothing
+  // written, the one outcome this check exists to prevent.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-emptyback-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-preset", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        // exits 0, and the write it "made" leaves no candidate to compare
+        writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [] }))
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1, "an empty read-back is not a success")
+    const text = out.join("\n")
+    assert.match(text, /回读|没找到/)
+    assert.doesNotMatch(text, /✓ 完成/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a providers list with a null entry is read past, not tripped over", async () => {
+  // providers.json is another program's file and can arrive half-written: a
+  // null in the list is a row that is not a provider. presetCandidates and
+  // main's own advice both walk it; read as `p.id` / `p.key` the null throws,
+  // and the tool dies with a stack trace where it had an answer to give.
+  assert.deepEqual(presetCandidates([null, presetOf(A)]), [presetOf(A)])
+  assert.deepEqual(presetCandidates([null, presetOf(A)], "modelscope"), [presetOf(A)])
+  assert.deepEqual(pluginAccounts({ msmoli: null, "msmoli#x": { key: B } }), [
+    { name: "msmoli", token: "" },
+    { name: "msmoli#x", token: B },
+  ])
+
+  // and through main: a provider of ours that has no key, next to a null row
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nullrow-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [null, { id: "modelscope", preset: "modelscope" }] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+    })
+    assert.equal(code, 1)
+    assert.match(out.join("\n"), /还没有 key/, "the advice should still name the provider that is there")
+
+    // --from looks for the id in the same list
+    const out2 = []
+    const code2 = await main({
+      argv: ["--dir", dir, "--to-plugin", "--from", "nope", "--magpie", "/nonexistent"],
+      log: (s) => out2.push(s),
+      spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+    })
+    assert.equal(code2, 1)
+    assert.match(out2.join("\n"), /没有 id 为 "nope" 的 provider/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a plugin-only install (no providers.json yet) is told what to add, not left with a stack trace", async () => {
+  // a fresh magpie that has only ever signed in a plugin has no providers.json.
+  // looksLikeMagpie accepts any one of the three files, so this folder is a
+  // magpie folder — and `providersRaw?.providers` is what turns "the file is
+  // not there" into "there is nothing configured". Read as `providersRaw
+  // .providers`, the missing file is a TypeError before any advice is printed.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-onlyplugin-"))
+  try {
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--status"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+    })
+    assert.equal(code, 1)
+    const text = out.join("\n")
+    assert.match(text, /没有带 key 的 ModelScope 预设|provider add/)
+    assert.doesNotMatch(text, /Cannot read properties/, "a missing file is not a crash")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a providers.json that disappears during the write is 'not found', not a crash", async () => {
+  // the write is magpie's: it can replace the file, or fail and leave nothing
+  // (a half-done .bak restore). The preset read-back reads it again, and a
+  // file that is no longer there is "the key is not in it" — the same answer
+  // an empty list gets. Read as `raw.providers`, the missing file is a
+  // TypeError from inside main, past every message the user could act on.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-gone-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-preset", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        rmSync(join(dir, "providers.json"))
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1)
+    const text = out.join("\n")
+    assert.match(text, /回读|没找到/)
+    assert.doesNotMatch(text, /Cannot read properties/, "a file that is gone is not a crash")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
