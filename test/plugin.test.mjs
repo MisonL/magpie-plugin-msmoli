@@ -5,7 +5,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { MsmoliPlugin, testables } from "../index.mjs"
@@ -1093,6 +1093,10 @@ test("the name read at check-in is written back so the card can show it", async 
         const body = writes[0].body
         assert.equal(body.accountId, "Mison")
         assert.equal(body.key, token)
+        // auth.set replaces the whole sign-in, so the kind has to be restated
+        // here: dropped or mis-typed, the account comes back as a sign-in of a
+        // type magpie has no renderer for.
+        assert.equal(body.type, "api", "the write-back is still an api sign-in")
         assert.equal(JSON.stringify(body).split(token).length - 1, 1, "the token appears once, not twice")
         assert.equal(body.metadata?.kept, "yes", "fields the host already had are kept")
 
@@ -1180,6 +1184,39 @@ test("an account the user already named is not renamed under them", async () => 
   } finally {
     if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
     else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a providers.json with a BOM is read, not kept from being written back", async () => {
+  // Notepad and PowerShell's Out-File write a BOM into JSON on Windows, and
+  // magpie's own #1821 is about that. aliasOf reads providers.json with its
+  // own BOM strip — the same rule configOf has — and losing it makes a file
+  // that parses look unreadable: aliasOf answers "could not look", the
+  // nickname is never written back, and nothing says why.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-aliasbom-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  writeFileSync(join(dir, "providers.json"), "﻿" + JSON.stringify({ providers: [{ id: "msmoli" }] }))
+  const token = "ms-aliasbom-0000-0000-0000-000000000027"
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(writes.length, 1, "a BOM must not read as an unreadable file: the name is written back")
+        assert.equal(writes[0].body.accountId, "Mison")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
   }
 })
 
@@ -1473,6 +1510,12 @@ test("windowOf reads the shapes a user writes, and refuses the ones it cannot", 
   }
   // a one-digit hour is a clock time, and reads as one
   assert.deepEqual(windowOf({ checkinWindow: ["8:30", "10:00"] }), { start: 8 * 60 + 30, end: 10 * 60 })
+  // the minute is two digits, the hour is not: a one-digit minute is a shape
+  // the parser does not read, so the window falls back rather than guessing
+  // "09:5" means 09:05
+  for (const bad of [["09:5", "10:00"], ["09:00", "10:5"]]) {
+    assert.deepEqual(windowOf({ checkinWindow: bad }), { start: 8 * 60 + 30, end: 10 * 60 }, `${JSON.stringify(bad)} is not a clock time`)
+  }
   // a full-width colon is what a Chinese IME produces for that key: read as a
   // bad value it silently fell back to the default window, and the claim went
   // out at a time the user never named
@@ -1609,6 +1652,10 @@ test("a write-back failure is retried later, and never logs the token", async ()
         assert.equal(attempts, 1)
         const logged = logs.map((l) => l.body?.message ?? "").join("\n")
         assert.ok(logged.includes("account name not written back"), "the failure is logged")
+        // the two fields that decide where the line lands in magpie's log: a
+        // wrong level buries it, a wrong service hides it from the filter
+        assert.equal(logs[0].body.level, "warn", "it is a warning, not a debug line")
+        assert.equal(logs[0].body.service, "msmoli", "and it is filed under this plugin")
         assert.ok(!logged.includes(token), `the token leaked into the log: ${logged}`)
         assert.match(logged, /ms-w…0013/, "the masked tail still identifies the account")
 
@@ -2554,6 +2601,15 @@ test("a token-shaped run is masked whatever its first character and length", asy
         assert.match(said, /…/, `${what}: it should be shown masked: ${JSON.stringify(said)}`)
       }
     }
+    // the other side of the boundary: ms- plus one plus ten is the pattern's
+    // minimum, so a 13-character run is below it and is not a token. Pinned so
+    // the boundary cannot drift: one character wider and a real token of that
+    // length would be printed whole.
+    const short = "ms-abcdefghij" // 13 characters
+    const u13 = await p.auth.usage(async () => {
+      throw new Error(`no key ${short} for provider`)
+    })
+    assert.ok(u13.error.includes(short), `a 13-character run is below the pattern and is shown whole: ${JSON.stringify(u13.error)}`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -2802,6 +2858,23 @@ test("a time that is not a time is refused instead of rolled over", async () => 
       assert.equal(u.windows[0].resetsAt, `${nextYear}-10-05T15:30:00.000Z`, "a 23:30 expiry is a time")
     },
   )
+  // the year is four digits, not "three or more": a stamp whose year lost a
+  // digit still round-trips through Date.UTC and reads as a real moment, and
+  // the countdown would point at it.
+  for (const stamp of ["999-10-05 09:13:40", `${nextYear}1-10-05 09:13:40`]) {
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+          body: { success: true, data: { records: [day({ expire_at: stamp })] } },
+        },
+      },
+      async () => {
+        const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+        assert.equal(u.windows[0].resetsAt, "", `a ${stamp.split("-")[0].length}-digit year is no time: ${JSON.stringify(u.windows[0])}`)
+      },
+    )
+  }
 })
 
 test("a ledger with no data at all is a failure, not an empty day", async () => {
@@ -2882,6 +2955,14 @@ test("done reports the day's grant from before the trigger, not from a page that
     const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
     assert.equal(r.outcome, "done")
     assert.equal(r.credit, 250, `the day's own grant, not a later empty page: ${r.message}`)
+    // the day's rows are named on the card, joined by " + ". The separator is
+    // the only thing between two titles, so a wrong one runs them together
+    // into a name the user never had a grant for.
+    assert.match(
+      r.message,
+      /今日已领取 250 魔粒（注册并登录 \+ 绑定阿里云账号）/,
+      `both rows must be named, joined by " + ": ${r.message}`,
+    )
   } finally {
     globalThis.fetch = real
   }
@@ -3091,6 +3172,15 @@ test("every request is made as the browser the README says it is", async () => {
     for (const headers of seen) {
       assert.match(headers["User-Agent"] ?? "", /^Mozilla\/5\.0 .*Chrome\//, `not a browser UA: ${JSON.stringify(headers["User-Agent"])}`)
       assert.match(headers["User-Agent"] ?? "", /Safari\/537\.36$/, `a Chrome UA ends the way Chrome's does: ${JSON.stringify(headers["User-Agent"])}`)
+      // and the whole string, not just its ends: the middle is a browser's
+      // own tokens (AppleWebKit/537.36, KHTML, like Gecko), and a typo there
+      // is a UA no browser has ever sent while the shape assertions above
+      // still pass
+      assert.equal(
+        headers["User-Agent"],
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+        "the UA is one browser's, whole",
+      )
       assert.equal(headers.Referer, "https://modelscope.cn/", "the Referer is the site root")
       assert.equal(headers.Accept, "application/json")
     }
@@ -3108,6 +3198,20 @@ test("a network failure says what happened instead of the bare English", async (
     const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
     assert.equal(r.outcome, "failed")
     assert.doesNotMatch(r.message, /^fetch failed$/, `the raw English reached the card: ${r.message}`)
+    assert.match(r.message, /网络|代理|重定向/, `should say what it may be, got: ${r.message}`)
+  } finally {
+    globalThis.fetch = real
+  }
+  // the name is not the only way a runtime says it: an Error that is not a
+  // TypeError but says "fetch failed" is the same failure, and the message
+  // test is what catches it.
+  globalThis.fetch = async () => {
+    throw new Error("fetch failed")
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+    assert.equal(r.outcome, "failed")
+    assert.doesNotMatch(r.message, /^fetch failed$/, `a plain Error with the same words reached the card: ${r.message}`)
     assert.match(r.message, /网络|代理|重定向/, `should say what it may be, got: ${r.message}`)
   } finally {
     globalThis.fetch = real
@@ -4188,4 +4292,180 @@ test("a data object without a records key is an empty ledger, not an error", asy
     async () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
   )
   assert.equal(r.outcome, "inactive", "the day is answered on what the empty ledger says")
+})
+
+// ---- 第二十三轮：字符串字面量的宽扫（前六轮扫的是布尔、比较与整数）留下的
+// 位点。每条都是「把这一个字改一个字母，整套测试全绿」的写法。
+
+test("no request may follow a redirect away from modelscope.cn", async () => {
+  // The session cookie is a request header, not a cookie jar: a redirect that
+  // is followed asks whatever host the Location names, with the header in
+  // hand. Measured against a real two-port loopback pair — the first answering
+  // 302 to the second — with "error" the second listener is never asked at
+  // all, and with "follow" it is asked twice (the balance and the ledger).
+  // Every test here stubs fetch, so nothing had ever looked at the mode: a
+  // typo fails closed (the request never goes out) and a stray "follow" fails
+  // open, and the suite reads the same either way.
+  const inits = []
+  const real = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    inits.push(init)
+    return reply({ body: { success: true, data: { records: [] } } })
+  }
+  try {
+    await auth.checkin(async () => ({ type: "api", key: "ms-test-0000000000" }))
+    await auth.usage(async () => ({ type: "api", key: "ms-test-0000000000" }))
+    assert.ok(inits.length >= 2, "requests must have gone out")
+    for (const init of inits) {
+      assert.equal(init.redirect, "error", "a followed redirect would carry the session cookie off-site")
+    }
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("an answer in the capital-S envelope counts, with no Code to fall back on", async () => {
+  // okOf reads three shapes: {success}, {Success}, {Code:"200"}. Every fixture
+  // that carries Success also carries Code, so the second branch has never
+  // decided anything on its own: mis-read it, and a ModelScope answer that
+  // comes in that envelope is refused as if it were a proxy's error page.
+  const u = await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { Success: true, Data: { available_balance: 5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { Success: true, Data: { records: [] } } },
+    },
+    async () => auth.usage(async () => ({ type: "api", key: "ms-test" })),
+  )
+  assert.equal(u.error, undefined, `a Success envelope is an answer: ${u.error}`)
+  assert.equal(u.balance, "5 魔粒可用")
+})
+
+test("a getAuth that rejects as expired marks the sign-in expired, on both hooks", async () => {
+  // magpie's own authCopy answers undefined rather than throwing, so these two
+  // exits run only for a host that does throw. When it throws and says the
+  // session is gone, that has to reach the card: without it magpie sends the
+  // user to sign in again for a token it already knows is dead. Both spellings
+  // of "gone" are what signedOut reads (signIn:"expired" and a bare .expired).
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-getexp-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const real = globalThis.fetch
+  let asked = 0
+  globalThis.fetch = async () => {
+    asked += 1
+    throw new Error("should not have been asked")
+  }
+  try {
+    const p = await MsmoliPlugin({ directory: dir, client: {} })
+    for (const shape of [
+      Object.assign(new Error("session gone"), { expired: true }),
+      Object.assign(new Error("session gone"), { signIn: "expired" }),
+    ]) {
+      const fail = async () => {
+        throw shape
+      }
+      const u = await p.auth.usage(fail)
+      const c = await p.auth.checkin(fail)
+      assert.equal(u.signIn, "expired", `usage must say so: ${JSON.stringify(u)}`)
+      assert.equal(c.signIn, "expired", `check-in must say so: ${JSON.stringify(c)}`)
+    }
+    assert.equal(asked, 0, "a failed getAuth must not send a request")
+  } finally {
+    globalThis.fetch = real
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a runtime that words its own abort still reads as a timeout", { timeout: 8000 }, async (t) => {
+  // saidFailure recognises our own abort by identity first (e === signal.reason).
+  // Two other shapes reach it only through the word the reason carries: a
+  // runtime that raises an error of its own when the abort lands, and one that
+  // copies the reason's message into a fresh error. There identity fails and
+  // the word in `new Error("timeout")` is all that is left — lose it and the
+  // card shows that runtime's English (or a bare "timeout") to the user.
+  const real = globalThis.fetch
+  globalThis.fetch = async () => {
+    throw new Error("The operation was aborted due to timeout")
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+    assert.match(u.error ?? "", /请求超时（8 秒）/, `should be our wording, got: ${u.error}`)
+  } finally {
+    globalThis.fetch = real
+  }
+  // and the reason's own word, in an error that is not the reason object
+  if (!withMockTimers(t)) return
+  try {
+    t.mock.timers.enable({ apis: ["setTimeout"] })
+  } catch {
+    t.mock.timers.enable(["setTimeout"])
+  }
+  globalThis.fetch = (url, init) =>
+    new Promise((_, reject) => {
+      init.signal.addEventListener("abort", () => reject(new Error(init.signal.reason?.message ?? "aborted")), { once: true })
+    })
+  try {
+    const pending = auth.usage(async () => ({ type: "api", key: "ms-test" }))
+    await new Promise((resolve) => setImmediate(resolve))
+    t.mock.timers.tick(8001)
+    const copied = await pending
+    assert.match(copied.error ?? "", /请求超时（8 秒）/, `a copied reason must still read as a timeout: ${copied.error}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("with no directory and no XDG_CONFIG_HOME, the config comes from ~/.config/magpie", async (t) => {
+  // The other half of the sentence the XDG test finishes: an installed magpie
+  // keeps its files in ~/.config/magpie when XDG says nothing, and that is the
+  // folder the README tells a user to write msmoli.json into. Nothing asserted
+  // the name of that folder — read the wrong one, the user's window is
+  // silently the default, with their file sitting where they were told.
+  // Both spellings of "home" are set because the runtimes read different ones:
+  // HOME on POSIX, USERPROFILE on Windows.
+  const home = mkdtempSync(join(tmpdir(), "msmoli-homewin-"))
+  mkdirSync(join(home, ".config", "magpie"), { recursive: true })
+  // a window that does not overlap the default 08:30-10:00, so a fall-through
+  // to the default is not mistaken for having read the file
+  writeFileSync(join(home, ".config", "magpie", "msmoli.json"), JSON.stringify({ checkinWindow: ["02:00", "03:00"] }))
+  const saved = { env: process.env.MAGPIE_MSMOLI_CONFIG, xdg: process.env.XDG_CONFIG_HOME, home: process.env.HOME, up: process.env.USERPROFILE }
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    process.env.XDG_CONFIG_HOME = ""
+    process.env.HOME = home
+    process.env.USERPROFILE = home
+    // Bun resolves homedir() once at startup and ignores HOME set afterwards,
+    // so on that runtime the plugin would read the real user's home whatever
+    // this test does. Skipped with the reason, not silently passed.
+    if (homedir() !== home) {
+      t.skip(`this runtime does not read HOME at call time (homedir() is ${homedir()})`)
+      return
+    }
+    const hooks = await MsmoliPlugin({})
+    const realNow = Date.now
+    Date.now = () => Date.parse("2026-10-25T00:30:00+08:00")
+    try {
+      const r = await hooks.auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      const t = targetFrom(r.message)
+      assert.ok(
+        t.minute >= 2 * 60 && t.minute < 3 * 60,
+        `the window should be the one ~/.config/magpie names, got ${t.text}`,
+      )
+    } finally {
+      Date.now = realNow
+    }
+  } finally {
+    if (saved.env === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved.env
+    if (saved.xdg === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = saved.xdg
+    if (saved.home === undefined) delete process.env.HOME
+    else process.env.HOME = saved.home
+    if (saved.up === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = saved.up
+    rmSync(home, { recursive: true, force: true })
+  }
 })

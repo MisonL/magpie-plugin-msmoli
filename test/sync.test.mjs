@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, sep } from "node:path"
 import { test } from "node:test"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import {
@@ -191,6 +191,36 @@ test("findMagpieBin looks where each OS installs it", () => {
   assert.equal(lin, "/usr/local/bin/magpie")
 
   assert.equal(findMagpieBin({ os: "linux", env: {}, home: "/h", exists: () => false }), "")
+})
+
+test("every install location is probed, not only the first one on each OS", () => {
+  // Each candidate is a place a user really has magpie. A typo in one of them
+  // is invisible while only the first is asserted: the probe answers "no
+  // magpie here" and the tool tells a MacPorts or ~/.local user to install it.
+  const probes = (os, env = {}, home = "/h") => {
+    const seen = []
+    findMagpieBin({ os, env, home, exists: (p) => (seen.push(p), false) })
+    return seen
+  }
+  const mac = probes("darwin")
+  for (const p of [
+    "/Applications/magpie.app/Contents/MacOS/magpie",
+    "/Applications/Magpie.app/Contents/MacOS/magpie",
+    "/opt/homebrew/bin/magpie",
+    "/usr/local/bin/magpie",
+    "/opt/local/bin/magpie",
+    join("/h", ".local", "bin", "magpie"),
+  ]) {
+    assert.ok(mac.includes(p), `darwin should probe ${p}: ${mac.join(", ")}`)
+  }
+  const lin = probes("linux")
+  for (const p of ["/usr/local/bin/magpie", "/usr/bin/magpie", join("/h", ".local", "bin", "magpie")]) {
+    assert.ok(lin.includes(p), `linux should probe ${p}: ${lin.join(", ")}`)
+  }
+  const win = probes("win32", { LOCALAPPDATA: "C:\\u\\Local", ProgramFiles: "C:\\Program Files" }, "C:\\u")
+  assert.equal(win.length, 2, `both Windows locations: ${win.join(", ")}`)
+  assert.ok(win.some((p) => p.startsWith("C:\\u\\Local")), win.join(", "))
+  assert.ok(win.some((p) => p.startsWith("C:\\Program Files")), win.join(", "))
 })
 
 // Windows 下 Node 把 "/" 开头的参数翻成 "C:\..."，所以探测层的断言全部走
@@ -411,7 +441,12 @@ test("an AppImage outside its own mount is not taken for one", () => {
 
 test("looksLikeMagpie wants one of magpie's files", () => {
   const base = pathToFileURL("/x").pathname.replace(/\/$/, "")
-  assert.equal(looksLikeMagpie(base, (p) => p === join(base, "plugin-auth.json")), true)
+  // each of the three names, alone: a folder magpie has written only one of
+  // (a fresh install writes providers.json first, a plugin-only install
+  // plugin-auth.json) is still magpie's folder
+  for (const name of ["providers.json", "plugins.json", "plugin-auth.json"]) {
+    assert.equal(looksLikeMagpie(base, (p) => p === join(base, name)), true, `${name} alone is enough`)
+  }
   assert.equal(looksLikeMagpie(base, () => false), false)
 })
 
@@ -425,6 +460,20 @@ test("runs when node is handed the file directly", () => {
   const r = run(["--help"])
   assert.equal(r.status, 0, r.stderr)
   assert.match(r.stdout, /magpie-plugin-msmoli — 把 magpie/)
+  // the usage page names where an installed magpie keeps its files: a user who
+  // reads it to find the folder must be sent to the real one, and the file
+  // magpie itself reads is the one under ~/.config/magpie
+  assert.ok(r.stdout.includes("~/.config/magpie"), `the usage should name the installed folder: ${r.stdout}`)
+})
+
+test("the shebang is the one npm's bin symlink execs", () => {
+  // npm points its .bin/<name> symlink at this file and the OS runs it by its
+  // shebang, so a typo there breaks `npx magpie-plugin-msmoli` while
+  // `node bin/sync.mjs` — what every other test does — keeps working. The
+  // symlink test below skips when it cannot exec, which is exactly what a
+  // broken shebang looks like, so it cannot catch this on its own.
+  const first = readFileSync(bin, "utf8").split("\n")[0]
+  assert.equal(first, "#!/usr/bin/env node", `npm execs this file by its first line: ${JSON.stringify(first)}`)
 })
 
 test("runs through a symlink, the way npm's .bin and npx invoke it", (t) => {
@@ -512,6 +561,10 @@ test("a --from that matches nothing fails clean, not with a crash", async () => 
     const text = out.join("\n")
     assert.equal(code, 1)
     assert.match(text, /typo/)
+    // the id is the one thing this line exists to say: the next line repeats
+    // it in the advice, so a message that lost it still reads fine to a
+    // regex looking only for the word
+    assert.match(text, /id 为 "typo" 的 provider/, `the message must name what was looked for: ${text}`)
     assert.doesNotMatch(text, /Cannot read properties/, "a mistyped --from must not reach a null preset")
     assert.doesNotMatch(text, /undefined/, "no leaked undefined in the message")
   } finally {
@@ -675,6 +728,10 @@ test("a broken providers.json is refused, not crashed on", async () => {
     // "there but unreadable" must not be reported as "not configured": that
     // sends the user off to add a provider that is already there
     assert.match(out.join("\n"), /读不出来/)
+    // and the line has to name the file it means: two of the five messages in
+    // this block point at one of magpie's files, and "a file is unreadable" is
+    // not something the user can act on
+    assert.match(out.join("\n"), /providers\.json 存在但读不出来/, out.join("\n"))
     assert.doesNotMatch(out.join("\n"), /未配置|provider add/, "a damaged file is not an absent one")
     assert.doesNotMatch(out.join("\n"), /SyntaxError|at /)
   } finally {
@@ -753,8 +810,82 @@ test("an unreadable plugin-auth.json is a refusal, not 'not signed in'", async (
     assert.equal(code, 1)
     assert.equal(spawned, false, "a write decision must not rest on an unreadable file")
     assert.match(out.join("\n") + String(code), /读不出来/)
+    assert.match(out.join("\n"), /plugin-auth\.json 存在但读不出来/, "the message must name the file it means")
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the real spawn receives the token on stdin and the output decoded as text", () => {
+  // Every other test injects `spawn`, so the options object handed to
+  // spawnSync itself was never exercised: rename `input` to anything else and
+  // magpie's login reads EOF, a typo in `encoding` makes spawnSync throw, and
+  // the suite stayed green either way. Here the injected spawn still calls the
+  // real spawnSync with the options object exactly as run() built it — only
+  // the program is swapped for a child that reports what it read.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-stdin-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const child = join(dir, "child.mjs")
+    writeFileSync(
+      child,
+      'let data = ""\nprocess.stdin.on("data", (c) => (data += c))\nprocess.stdin.on("end", () => {\n  process.stdout.write(`收到：${data.trim()}\\n`)\n  process.exit(7)\n})\n',
+    )
+    const out = []
+    let sawOptions
+    const code = main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: (_bin, _argv, opts) => {
+        sawOptions = opts
+        return spawnSync(process.execPath, [child], opts)
+      },
+    })
+    return Promise.resolve(code).then((rc) => {
+      const text = out.join("\n")
+      assert.equal(rc, 1, text)
+      assert.equal(sawOptions.encoding, "utf8", "the child's output must be decoded as utf8 text")
+      assert.equal(sawOptions.input, `${A}\n`, "the token goes in on stdin, exactly as the plan says")
+      // the child read the token back, and the failure line masks it
+      assert.match(text, /收到：ms-a…5555/, `the child must have received the token on stdin: ${text}`)
+      assert.doesNotMatch(text, /Unknown encoding|ERR_UNKNOWN_ENCODING/, "the spawn options must be valid")
+    })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a read-back that cannot read the file says so by name, not 'not found'", async () => {
+  // The write ran; the file came back unparseable (a half-write, a lock). The
+  // token may well have landed, so the user must be sent to the file, not to
+  // "is magpie running?" — and the line names which file. Both directions.
+  for (const [direction, file] of [
+    ["--to-preset", "providers.json"],
+    ["--to-plugin", "plugin-auth.json"],
+  ]) {
+    const dir = mkdtempSync(join(tmpdir(), "msmoli-rbnull-"))
+    try {
+      writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+      writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+      const out = []
+      const code = await main({
+        argv: ["--dir", dir, direction, "--force", "--magpie", "/nonexistent"],
+        log: (s) => out.push(s),
+        spawn: () => {
+          // the write "succeeded" and left the file unreadable
+          writeFileSync(join(dir, file), "{ broken")
+          return { status: 0, stdout: "", stderr: "" }
+        },
+      })
+      const text = out.join("\n")
+      assert.equal(code, 1, text)
+      assert.match(text, new RegExp(`${file.replace(".", "\\.")} 读不出来`), `the read-back must name ${file}: ${text}`)
+      assert.match(text, /写入已执行/, `and say the write may have landed: ${text}`)
+      assert.doesNotMatch(text, /没找到目标/, "unreadable is not 'the token is not there'")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   }
 })
 
@@ -780,6 +911,10 @@ test("a timeout in the second step of a replace still says how to recover", asyn
     const text = out.join("\n")
     assert.equal(code, 1)
     assert.match(text, /ETIMEDOUT/)
+    // the branch's whole job: tell the user it was a timeout, and of what
+    // length. "ETIMEDOUT" itself is the runtime's word, carried in by
+    // r.error.message — the hint is the only part written for the user.
+    assert.match(text, /超过 120 秒没有结束/, `the timeout hint must say how long: ${text}`)
     assert.match(text, /已被登出/, "the account is gone; the user must be told")
     assert.match(text, /重新运行/)
   } finally {
@@ -1070,21 +1205,88 @@ test("isMain answers true for another spelling of the same file where the volume
 
 test("a wrapper script as --magpie gets a hint that helps, not one that repeats", async () => {
   // spawnSync cannot hand stdin to a .cmd/.bat (Windows: EINVAL). The old
-  // message said "use --magpie" to a user who had just used --magpie.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-cmd-"))
+  // message said "use --magpie" to a user who had just used --magpie. All
+  // three wrapper spellings are checked: the pattern is what decides, and a
+  // class narrowed to cmd|bat leaves a .ps1 user with the advice they already
+  // followed.
+  for (const wrapper of ["magpie.cmd", "magpie.bat", "magpie.ps1", "MAGPIE.CMD"]) {
+    const dir = mkdtempSync(join(tmpdir(), "msmoli-cmd-"))
+    try {
+      writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+      writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+      const out = []
+      const code = await main({
+        argv: ["--dir", dir, "--to-plugin", "--magpie", `C:\\tools\\${wrapper}`],
+        log: (s) => out.push(s),
+        spawn: () => ({ error: new Error("spawnSync EINVAL"), status: null, stdout: "", stderr: "" }),
+      })
+      assert.equal(code, 1)
+      const text = out.join("\n")
+      assert.match(text, /magpie\.exe/, `${wrapper}: it should point at the real binary`)
+      assert.doesNotMatch(text, /用 --magpie 指定完整路径/, `${wrapper}: not the advice they already followed`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test("a machine with no magpie binary is told where to point --magpie", async () => {
+  // The branch itself was never reached: the only test naming it asserted it
+  // was NOT printed, on a --dry-run that is allowed to go without a binary.
+  // The advice is the whole value of the message — a path that is not where
+  // magpie installs sends the user to a file that is not there.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nobin-"))
   try {
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
     writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
     const out = []
     const code = await main({
-      argv: ["--dir", dir, "--to-plugin", "--magpie", "C:\\tools\\magpie.cmd"],
+      argv: ["--dir", dir, "--to-plugin"],
       log: (s) => out.push(s),
-      spawn: () => ({ error: new Error("spawnSync EINVAL"), status: null, stdout: "", stderr: "" }),
+      env: {},
+      home: dir,
+      // the folder holds the two config files but no magpie binary anywhere:
+      // a portable magpie that has never been downloaded beside its data, or
+      // an install this tool does not know the path of
+      exists: (p) => p.startsWith(dir) && !/magpie(\.exe)?$/.test(p),
+      spawn: () => {
+        throw new Error("no binary means nothing to spawn")
+      },
     })
-    assert.equal(code, 1)
     const text = out.join("\n")
-    assert.match(text, /magpie\.exe/, "it should point at the real binary")
-    assert.doesNotMatch(text, /用 --magpie 指定完整路径/, "not the advice they already followed")
+    assert.equal(code, 1, text)
+    assert.match(text, /没找到 magpie 可执行文件/, `should name the problem: ${text}`)
+    assert.match(text, /\/Applications\/magpie\.app\/Contents\/MacOS\/magpie/, `should name a real install path: ${text}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a folder with none of magpie's files is told which files it looked for", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nofiles-"))
+  try {
+    const out = []
+    const code = await main({ argv: ["--dir", dir], log: (s) => out.push(s), spawn: () => ({ status: 0, stdout: "", stderr: "" }) })
+    const text = out.join("\n")
+    assert.equal(code, 1, text)
+    for (const name of ["providers.json", "plugins.json", "plugin-auth.json"]) {
+      assert.ok(text.includes(name), `the message should name ${name}: ${text}`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a machine with no config folder is told the two places it tried", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nodir-"))
+  try {
+    const out = []
+    const code = await main({ argv: [], log: (s) => out.push(s), env: {}, home: dir, exists: () => false, spawn: () => ({ status: 0, stdout: "", stderr: "" }) })
+    const text = out.join("\n")
+    assert.equal(code, 1, text)
+    assert.match(text, /没找到 magpie 的配置目录/, `should name the problem: ${text}`)
+    assert.match(text, /\$XDG_CONFIG_HOME\/magpie/, `should name the XDG place: ${text}`)
+    assert.match(text, /~\/\.config\/magpie/, `should name the home place: ${text}`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -1114,6 +1316,9 @@ test("a bare --magpie name is refused instead of looked up on PATH", async () =>
       assert.equal(spawned, false, `${name} must never reach a spawn`)
       const text = out.join("\n")
       assert.match(text, /裸名/, `${name} should say a bare name is not taken: ${text}`)
+      // and the advice names a real install path — a typo there sends the
+      // user to a file that is not there
+      assert.match(text, /\/Applications\/magpie\.app\/Contents\/MacOS\/magpie/, `the advice names a real path: ${text}`)
       assert.doesNotMatch(text, /magpie-plugin-msmoli: /, "said as a message, not a crash")
     }
   } finally {
@@ -1998,6 +2203,7 @@ test("a provider that is ours but has no key is told to fill it in, not to add i
     const byId = await run(["--from", "modelscope", "--to-preset"])
     assert.equal(byId.code, 1)
     assert.match(byId.text, /还没有 key/)
+    assert.match(byId.text, /"modelscope" 在，但还没有 key/, `the message must name the provider: ${byId.text}`)
     assert.doesNotMatch(byId.text, /不是 ModelScope/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -2014,6 +2220,7 @@ test("--from on a provider that is not ours still says so, not 'no key'", async 
     assert.equal(code, 1)
     const text = out.join("\n")
     assert.match(text, /不是 ModelScope/)
+    assert.match(text, /"openai" 在，但它不是 ModelScope/, `the message must name the provider: ${text}`)
     assert.doesNotMatch(text, /还没有 key/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -2102,6 +2309,14 @@ test("a token-shaped run is masked whatever its first character and length", asy
       const text = out.join("\n")
       assert.ok(!text.includes(tok), `the token was echoed whole: ${text}`)
     }
+    // and the other side of the boundary: the pattern's minimum is ms- plus
+    // one plus ten, so a 13-character run is below it and is not a token. Pinned
+    // so the boundary cannot drift in either direction — one character wider
+    // and a real token of that length would be printed whole.
+    const short = "ms-abcdefghij" // 13 characters
+    const out = []
+    await main({ argv: ["--dir", dir, "--from", short, "--status", "--magpie", "/nonexistent"], log: (s) => out.push(s) })
+    assert.ok(out.join("\n").includes(short), `a 13-character run is below the pattern and is shown whole: ${out.join("\n")}`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -2112,7 +2327,7 @@ test("a provider id with digits 2-9 is a legal id", () => {
   // read as a flag. Narrowed to [A-Za-z0-10] it refuses `5relay` — a name
   // magpie itself accepts — and the refusal text tells the user their id is
   // not a shape anyone uses.
-  for (const id of ["relay2", "5relay", "a8", "my-ms_3"]) {
+  for (const id of ["relay2", "5relay", "a8", "my-ms_3", "relay-z", "z9"]) {
     const r = planToPreset({ preset: { id, key: B }, accounts: [{ name: "msmoli", token: A }], force: true })
     assert.equal(r.action, "run", `${id} must be a legal provider id: ${r.lines.join(" / ")}`)
   }
@@ -2142,8 +2357,10 @@ test("a providers.json of the wrong shape is refused as unreadable, not read as 
   // a list reads as "there is no ModelScope preset" — and the advice becomes
   // "add one", over a file that is there and damaged.
   for (const [content, want] of [
-    ["[1,2,3]", /形状/],
-    [JSON.stringify({ providers: { a: 1 } }), /不是列表/],
+    // the file is named in the message, not just "a file": that is the one
+    // thing the user has to go and look at
+    ["[1,2,3]", /providers\.json 存在但不是 magpie 写的形状/],
+    [JSON.stringify({ providers: { a: 1 } }), /providers\.json 的 providers 不是列表/],
   ]) {
     const dir = mkdtempSync(join(tmpdir(), "msmoli-shape-"))
     try {
@@ -2288,6 +2505,35 @@ test("a rooted XDG path is rooted on every spelling: drive-letter on POSIX, UNC 
   assert.equal(on("/srv/xdg", "win32", want("/srv/xdg")), want("/srv/xdg"), "a slash-rooted XDG is rooted on Windows")
   // and a relative one is not rooted anywhere
   assert.equal(on("rel", "win32", join("C:\\u", ".config", "magpie")), join("C:\\u", ".config", "magpie"), "a relative XDG is ignored on Windows too")
+  // every drive letter, not just the ones an example happens to use: z: is as
+  // much a drive as C:, and a class that stops at "y" reads it as a relative
+  // path and falls through to ~/.config. Windows drive letters are
+  // case-insensitive, so both spellings are real.
+  for (const drive of ["Z:", "z:", "c:", "D:"]) {
+    assert.equal(on(`${drive}\\x`, "linux", want(`${drive}\\x`)), want(`${drive}\\x`), `${drive} is a rooted path`)
+  }
+})
+
+test("a data folder spelled with a trailing separator is still the shared folder", () => {
+  // fold strips trailing separators before comparing, because `home` can
+  // arrive spelled "/Users/me/" the way a shell completes it. Without the
+  // strip, /Users/me/ is not equal to /Users/me, the shared-folder rule says
+  // "not shared", and an empty data folder there is taken as magpie's — and
+  // the write lands somewhere magpie never looks.
+  // The executable has to sit directly in home for this: join() irons the
+  // trailing slash out of any path it builds, so a data folder one level down
+  // is spelled the same either way. The fixture is spelled with the platform's
+  // own separator, the way dirname(exe) spells it, or the two would differ on
+  // Windows for a reason that has nothing to do with this rule.
+  const home = join(tmpdir(), "msmoli-fold-fixture")
+  const data = join(home, "data")
+  const installed = join(home, ".config", "magpie")
+  const files = new Set([data, join(data, "providers.json"), join(installed, "providers.json")])
+  assert.equal(
+    findConfigDir({ env: {}, home: home + sep, os: "linux", binPath: join(home, "magpie"), exists: (p) => files.has(p) }),
+    installed,
+    "a home with a trailing separator names the same shared folder",
+  )
 })
 
 test("the shared folders are the platform's own: /Applications only on a Mac", () => {
@@ -2326,4 +2572,50 @@ test("the shared folders are the platform's own: /Applications only on a Mac", (
     })
   assert.equal(underHome("linux"), join("/h", "Applications", "data"), "on Linux ~/Applications is just a folder")
   assert.equal(underHome("darwin"), "", "on a Mac ~/Applications is shared too")
+})
+
+test("a data folder on the Desktop or in Documents is as much a stranger's as one in Downloads", () => {
+  // sharedFolders is the list appdir.go's #989 calls out: Downloads, Desktop
+  // and Documents are where a user unpacks an archive, and an empty "data"
+  // there is as likely the user's own. Only Downloads had a test; with the
+  // other two misspelled, a portable-looking folder on the Desktop is taken
+  // as magpie's and the write lands where magpie never looks.
+  const home = pathToFileURL("/h").pathname.replace(/\/$/, "")
+  const installed = join(home, ".config", "magpie")
+  for (const name of ["Downloads", "Desktop", "Documents"]) {
+    const base = join(home, name)
+    const data = join(base, "data")
+    const files = new Set([data, join(data, "providers.json"), join(installed, "providers.json")])
+    assert.equal(
+      findConfigDir({ env: {}, home, os: "linux", binPath: join(base, "magpie"), exists: (p) => files.has(p) }),
+      installed,
+      `a data folder in ~/${name} is not magpie's when the installed folder has files`,
+    )
+    // and with nothing installed, the same data folder is the portable one
+    const only = new Set([data, join(data, "providers.json")])
+    assert.equal(
+      findConfigDir({ env: {}, home, os: "linux", binPath: join(base, "magpie"), exists: (p) => only.has(p) }),
+      data,
+      `with nothing installed, ~/${name}/data is the portable folder`,
+    )
+  }
+})
+
+test("the shared-folder rule looks in the XDG folder when one is set", () => {
+  // installedDir, not findConfigDir's own return: the same "where does an
+  // installed magpie keep its files" question, answered with XDG_CONFIG_HOME
+  // when it is rooted. Misspelled there, the rule finds an empty folder and
+  // takes a data folder in Downloads as portable — and the tool then writes
+  // to a folder magpie is not using.
+  const home = pathToFileURL("/h").pathname.replace(/\/$/, "")
+  const xdg = pathToFileURL("/xdg").pathname.replace(/\/$/, "")
+  const base = join(home, "Downloads")
+  const data = join(base, "data")
+  const installed = join(xdg, "magpie")
+  const files = new Set([data, join(data, "providers.json"), join(installed, "providers.json")])
+  assert.equal(
+    findConfigDir({ env: { XDG_CONFIG_HOME: xdg }, home, os: "linux", binPath: join(base, "magpie"), exists: (p) => files.has(p) }),
+    installed,
+    "the XDG folder is the installed one; ~/Downloads/data is not magpie's",
+  )
 })
