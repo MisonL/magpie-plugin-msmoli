@@ -1437,6 +1437,37 @@ test("a check-in whose first read spends the whole budget sends no touch", async
   assert.deepEqual(asked, ["/openapi/v1/magicubes/transactions"], "the touch must not go out with the budget gone")
 })
 
+test("the check-in budget is 25 seconds: one fewer still has a millisecond left", async () => {
+  // The test above answers at *exactly* the deadline, so a 24-second budget
+  // refuses the touch there just as 25 does — and so would 24.999. Only a
+  // spend just short of 25 s tells them apart: at 24_999 ms there is 1 ms
+  // left, `left <= 0` is false, and the touch goes out. The constant is
+  // documented as 25 seconds, and README.zh-CN says so.
+  for (const [spend, wantTouch] of [
+    [24_999, true],
+    [25_000, false],
+  ]) {
+    const realFetch = globalThis.fetch
+    const realNow = Date.now
+    let clock = Date.parse(`${today} 10:30:00`.replace(" ", "T") + "+08:00")
+    Date.now = () => clock
+    const asked = []
+    globalThis.fetch = async (url) => {
+      asked.push(new URL(url).pathname)
+      clock += spend
+      return reply({ body: { success: true, data: { records: [] } } })
+    }
+    try {
+      await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+    } finally {
+      globalThis.fetch = realFetch
+      Date.now = realNow
+    }
+    const touched = asked.length > 1
+    assert.equal(touched, wantTouch, `spending ${spend}ms of a 25s budget: touch sent = ${touched}`)
+  }
+})
+
 // ── 时段解析：直接读 windowOf，别依赖当天的哈希落点 ────────────────────────
 // 目标时刻是「日 + 账号」的哈希，端到端测 LAST 截断只在哈希恰好落进
 // 23:00 以后的那些日子才生效（实测约一半的日期会放过回归）。截断本身是
@@ -1520,6 +1551,19 @@ test("windowOf reads the shapes a user writes, and refuses the ones it cannot", 
   // "09:5" means 09:05
   for (const bad of [["09:5", "10:00"], ["09:00", "10:5"]]) {
     assert.deepEqual(windowOf({ checkinWindow: bad }), { start: 8 * 60 + 30, end: 10 * 60 }, `${JSON.stringify(bad)} is not a clock time`)
+  }
+  // a bound with something after the seconds is not a clock time either: the
+  // regex's `$` is what keeps "13:30x" from reading as 13:30, and a dropped
+  // `$` honours a window the user never wrote
+  for (const bad of [["13:30x", "14:00"], ["13:30", "14:00x"], ["13:30x", "14:00x"]]) {
+    assert.deepEqual(windowOf({ checkinWindow: bad }), { start: 8 * 60 + 30, end: 10 * 60 }, `${JSON.stringify(bad)} is not a window of its own`)
+  }
+  // "off" written with anything around it is a value the parser does not read,
+  // so it falls back to the default — turning the window OFF would end the
+  // check-ins silently. Both anchors are what keep "off" exact: dropped, the
+  // regex matches a prefix ("offx") or a suffix ("xoff") of the word.
+  for (const notOff of ["xoff", "offx", "falsey", "noo", "onno", "nox"]) {
+    assert.deepEqual(windowOf({ checkinWindow: notOff }), { start: 8 * 60 + 30, end: 10 * 60 }, `${JSON.stringify(notOff)} is not an off-intent value`)
   }
   // a full-width colon is what a Chinese IME produces for that key: read as a
   // bad value it silently fell back to the default window, and the claim went
@@ -1938,34 +1982,33 @@ test("a login/info that refuses in its own words, or in none at all", async () =
   }
 })
 
-test("the name cache is bounded: the oldest account's name falls out", async () => {
+test("the name cache holds exactly eight accounts: the eighth stays, the ninth evicts the first", async () => {
   // login/info is the claim, so the name is only ever read at check-in; the
   // cache is capped so a long-lived host does not grow one entry per account
-  // seen forever. Ten accounts, so at least one has to be gone.
-  const tokens = Array.from({ length: 10 }, (_, i) => `ms-lru-0000-0000-0000-000000000${String(i).padStart(2, "0")}`)
-  await withFetch(
-    {
+  // seen forever. Ten accounts only prove that *some* eviction happens — a
+  // cap of 7 or 9 passes that too. Eight in, none out; the ninth takes the
+  // oldest and leaves the rest.
+  const tokens = Array.from({ length: 9 }, (_, i) => `ms-lru-0000-0000-0000-000000000${String(i).padStart(2, "0")}`)
+  const checkin = async (i) => {
+    globalThis.fetch = fakeFetch({
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: `user${i}` } } },
+    })
+    await auth.checkin(async () => ({ type: "api", key: tokens[i] }))
+  }
+  const nameOf = async (i) => {
+    globalThis.fetch = fakeFetch({
       "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
       "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
-    },
-    async () => {
-      for (const [i, token] of tokens.entries()) {
-        globalThis.fetch = fakeFetch({
-          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
-          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: `user${i}` } } },
-        })
-        await auth.checkin(async () => ({ type: "api", key: token }))
-      }
-      globalThis.fetch = fakeFetch({
-        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
-        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
-      })
-      const first = await auth.usage(async () => ({ type: "api", key: tokens[0] }))
-      const last = await auth.usage(async () => ({ type: "api", key: tokens[9] }))
-      assert.equal(last.user, "user9", "the newest name is still there")
-      assert.equal(first.user, "", "the oldest must have been evicted")
-    },
-  )
+    })
+    return (await auth.usage(async () => ({ type: "api", key: tokens[i] }))).user
+  }
+  for (let i = 0; i < 8; i++) await checkin(i)
+  for (let i = 0; i < 8; i++) assert.equal(await nameOf(i), `user${i}`, `the eighth check-in evicts nothing: ${i}`)
+  await checkin(8)
+  assert.equal(await nameOf(0), "", "the ninth check-in takes the oldest")
+  assert.equal(await nameOf(1), "user1", "and only the oldest")
+  assert.equal(await nameOf(8), "user8", "the newest is kept")
 })
 
 test("a usage read that meets a dead token marks the sign-in expired, at either step", async () => {
@@ -2882,6 +2925,42 @@ test("a time that is not a time is refused instead of rolled over", async () => 
   }
 })
 
+test("a time at the edge of every range is still a time", async () => {
+  // The rejection test above tries values one past each limit; the limits
+  // themselves have to pass. Tighten any of them by one — `+mo > 12` to
+  // `> 11`, `+d < 1` to `< 2`, `> 59` to `> 58` — and not one rejection
+  // breaks, so the suite stayed green while a real New Year's Eve expiry
+  // (month 12, 23:59:59) or the first of a month read back as "no time" and
+  // fell off the countdown. Each stamp sits a year out so the "still
+  // running" filter keeps it.
+  const nextYear = new Date(Date.now() + 8 * 3600e3 + 365 * 86400e3).getUTCFullYear()
+  for (const [stamp, want, why] of [
+    // month 12, hour 23, minute 59, second 59 in one stamp
+    [`${nextYear}-12-31 23:59:59`, `${nextYear}-12-31T15:59:59.000Z`, "month 12, 23:59:59"],
+    // month 1 and day 1, at the day's first second: the -8h shift lands on
+    // the previous UTC date, which is the day the round-trip check compares
+    [`${nextYear}-01-01 00:00:00`, `${nextYear - 1}-12-31T16:00:00.000Z`, "month 1, day 1, midnight"],
+    // Beijing midnight mid-month: exactly 8 hours back is the previous UTC
+    // day, so the round-trip check's own +8h has to be 8h to the second —
+    // at 8h less 8s it asks for 23:59:52 of the day before and refuses a
+    // stamp that is a perfectly real moment
+    [`${nextYear}-10-05 00:00:00`, `${nextYear}-10-04T16:00:00.000Z`, "midnight mid-month"],
+  ]) {
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+          body: { success: true, data: { records: [day({ expire_at: stamp })] } },
+        },
+      },
+      async () => {
+        const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+        assert.equal(u.windows[0].resetsAt, want, `${why} is a time: ${JSON.stringify(u.windows[0])}`)
+      },
+    )
+  }
+})
+
 test("a ledger with no data at all is a failure, not an empty day", async () => {
   // `inactive` ends the day. A body whose data went missing (a proxy rewrite,
   // a renamed field) is one we did not understand, and has to be retried.
@@ -3704,6 +3783,32 @@ test("a rule that grows during the touch is this run's claim, with the growth", 
   }
 })
 
+test("a growth of one 魔粒 is still this run's claim", async () => {
+  // `gain > 0` decides that a rule's growth counts as the claim. As `> 1` a
+  // growth of exactly one 魔粒 — the smallest grant there is — stops being
+  // one: the check-in answers "没有到账记录" for a grant that landed. The
+  // growth test above moves by 50, so the switch's own boundary was untested.
+  const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10)
+  let reads = 0
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname + new URL(url).search
+    const reply = (body) => ({ status: 200, headers: { get: () => null }, body: null, text: async () => JSON.stringify(body) })
+    if (path === "/api/v1/users/login/info") return reply({ success: true, data: { NickName: "Mison" } })
+    reads += 1
+    const row = (amount) => ({ gmt_created: today, type: "EARN", rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: amount })
+    return reply({ success: true, data: { records: [reads === 1 ? row(0) : row(1)] } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+    assert.equal(r.outcome, "claimed", `one 魔粒 is a grant: ${JSON.stringify(r)}`)
+    assert.equal(r.credit, 1, `the smallest grant there is: ${r.credit}`)
+    assert.match(r.message, /领取 1 魔粒/, `the card names it: ${r.message}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("a negative grant or a negative balance is not written onto the card as one", async () => {
   // EARN can carry a reversal. Summed as it comes the card reads
   // "领 -50" and the limit is negative; a negative balance must not turn the
@@ -3724,6 +3829,20 @@ test("a negative grant or a negative balance is not written onto the card as one
       const w = u.windows[0]
       assert.equal(w.limit, 0, `limit must not be negative: ${w.limit}`)
       assert.ok(!w.display.includes("-"), `the card must not say 领 -50: ${w.display}`)
+    },
+  )
+  // and the balance itself: the reversal direction can put it below zero, and
+  // "-5 魔粒可用" is not a thing the card can show. The clamp stopped at 0 for
+  // the grant, but nothing had ever handed it a negative balance to clamp.
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: -5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.balance, "0 魔粒可用", `a balance is not a debt: ${u.balance}`)
+      assert.ok(!u.windows[0].display.includes("-"), `the card must not say 余额 -5: ${u.windows[0].display}`)
     },
   )
 })
@@ -3748,7 +3867,23 @@ test("a time that carries a zone is not read as Beijing time", async () => {
   // ModelScope writes. A reply that grew a zone would match the first 19
   // characters, have its zone ignored and the Beijing shift applied anyway —
   // a countdown 8 hours off, stated with full confidence.
-  for (const stamp of ["2026-10-27T00:00:24Z", "2026-10-27T00:00:24+00:00", "2026-10-27 00:00:24Z", "2026-10-27 00:00:24.123"]) {
+  //
+  // The stamps sit a year out, as the range and February tests do: dropped
+  // onto a moment in the past, the "still running" filter would take them out
+  // before cnTime's answer could show, and the test would pass with the
+  // trailing anchor deleted. It carried fixed 2026-10-27 stamps until now and
+  // had quietly stopped proving anything the day the clock passed them.
+  const nextYear = new Date(Date.now() + 8 * 3600e3 + 365 * 86400e3).getUTCFullYear()
+  const F = `${nextYear}-10-05`
+  for (const stamp of [
+    `${F}T09:13:40Z`, // a zone after a T
+    `${F}T09:13:40+00:00`,
+    `${F} 09:13:40Z`, // a zone after a space
+    `${F} 09:13:40.123`, // fractional seconds: also not the whole string
+    `${F} 09:13:40x`, // any trailing junk at all
+    ` ${F} 09:13:40`, // and leading junk: the string is anchored at the front too
+    `x${F} 09:13:40`,
+  ]) {
     const body = { success: true, data: { records: [day({ expire_at: stamp })] } }
     await withFetch(
       {
@@ -3757,10 +3892,24 @@ test("a time that carries a zone is not read as Beijing time", async () => {
       },
       async () => {
         const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
-        assert.equal(u.windows[0].resetsAt, "", `${stamp} carries a zone we do not read`)
+        assert.equal(u.windows[0].resetsAt, "", `${stamp} carries a zone or junk we do not read`)
       },
     )
   }
+  // the control: the same stamp with nothing around the seconds is a time, so
+  // the loop above is not passing because the fixtures stopped reaching cnTime
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records: [day({ expire_at: `${F} 09:13:40` })] } },
+      },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.windows[0].resetsAt, `${F}T01:13:40.000Z`, "the bare stamp is a time")
+    },
+  )
 })
 
 test("a February that has no 30th is no time at all", async () => {
@@ -4182,18 +4331,24 @@ test("a nickname a token could hold is refused at 20 characters, and a longer on
   // token does not contain must go through.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-longname-"))
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
-  const token = "ms-0123456789abcdef0123456789abcdef012345678"
-  const piece = token.slice(0, 20)
-  const stranger = "MisonLiangWithALongName"
-  assert.equal(piece.length, 20, "exactly the threshold")
-  assert.ok(stranger.length > 20 && !token.includes(stranger), "a long name the token does not hold")
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
   try {
-    for (const [nick, want, why] of [
-      [piece, 0, "a 20-character slice of the token is the token"],
-      [stranger, 1, "a long name the token does not hold is a name"],
+    // Each case gets its own token: a name is written back once per token
+    // (`named`), so one token shared across the loop lets an early passing
+    // case consume the write a later one asserts on. The pieces are sliced
+    // from the token the case actually signs in with.
+    const stranger = "MisonLiangWithALongName"
+    for (const [i, slice, want, why] of [
+      [0, 20, 0, "a 20-character slice of the token is the token"],
+      [1, null, 1, "a long name the token does not hold is a name"],
+      // 19 is one short of the rule: that slice is not looked for, and a
+      // nickname of a few characters that happens to sit inside a token is a
+      // nickname. Tightening `>= 20` to `>= 19` refuses it.
+      [2, 19, 1, "a 19-character slice is not met by the rule"],
     ]) {
+      const tok = `ms-0123456789abcdef0123456789abcdef012345${i}${i}`
+      const nick = slice === null ? stranger : tok.slice(0, slice)
       const writes = []
       const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
       await withFetch(
@@ -4202,7 +4357,7 @@ test("a nickname a token could hold is refused at 20 characters, and a longer on
           "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
         },
         async () => {
-          await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+          await withClient.auth.checkin(async () => ({ type: "api", key: tok }))
           assert.equal(writes.length, want, why)
         },
       )
@@ -5073,6 +5228,16 @@ test("the usage percentage rounds to two decimals on both denominators", async (
         want: 66.67,
         why: "2 of 3 rounds up at the second decimal",
       },
+      // the switch into that branch is `usedToday + available > 0`; as `> 1`
+      // a fractional pair summing to exactly one 魔粒 falls through to 100%,
+      // so half of a whole spent reads as everything spent
+      {
+        claim: [],
+        spends: [0.5],
+        available: 0.5,
+        want: 50,
+        why: "half of one 魔粒 is half, not all of it",
+      },
     ]
     for (const c of cases) {
       const rows = [
@@ -5090,6 +5255,36 @@ test("the usage percentage rounds to two decimals on both denominators", async (
         },
       )
     }
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a grant of one 魔粒 is today's grant, not a fall-back to the balance", async () => {
+  // The denominator switches on `earnedToday > 0`. As `> 1` an exactly-one
+  // grant falls through to the balance denominator, and one 魔粒 earned and
+  // one spent reads "used 0.4" — a rounding test whose smallest grant is 201
+  // never reaches the switch's own boundary.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-one-"))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    const p = await MsmoliPlugin({ directory: dir, client: {} })
+    const rows = [day({ total_amount: 1 }), spend(1)]
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 251.5 } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: rows } } },
+      },
+      async () => {
+        const r = await p.auth.usage(async () => ({ type: "api", key: "ms-test" }))
+        assert.equal(r.windows?.[0]?.used, 100, `one of one is all of it, not ${r.windows?.[0]?.used}`)
+        assert.equal(r.windows?.[0]?.limit, 1, "the grant is the limit")
+      },
+    )
   } finally {
     if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
     else process.env.MAGPIE_MSMOLI_CONFIG = saved

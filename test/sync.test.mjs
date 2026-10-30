@@ -263,6 +263,29 @@ test("findConfigDir reads a Mac app's portable folder beside the .app, not insid
   assert.equal(got, dataDir, "a data folder inside the bundle would break its signature")
 })
 
+test("a folder only shaped like a bundle is not one: MacOSX and .appX stay inside", () => {
+  // The two anchors that make the folder a bundle both end in `$`. Dropped,
+  // `Contents/MacOS` matches `Contents/MacOSX` and `\.app` matches
+  // `Magpie.appX`, and a data folder that lives inside the bundle's own
+  // folder is read as the one beside it — magpie's real data folder is then
+  // never found and the tool reports "not signed in" on a working install.
+  const dataDir = join("/Applications", "data")
+  const files = new Set([dataDir, join(dataDir, "providers.json")])
+  const exists = (p) => files.has(p)
+  for (const binPath of [
+    "/Applications/Magpie.app/Contents/MacOSX/magpie",
+    "/Applications/Magpie.appX/Contents/MacOS/magpie",
+    "/Applications/Magpie.appx/Contents/MacOS/magpie",
+  ]) {
+    const got = findConfigDir({ env: {}, home: "/h", os: "darwin", binPath, exists })
+    assert.equal(got, "", `${binPath} is not inside a bundle: ${JSON.stringify(got)}`)
+  }
+  // the control: the same shape with the real ending is a bundle, so the loop
+  // above is not passing because the fixture never reached the bundle test
+  const got = findConfigDir({ env: {}, home: "/h", os: "darwin", binPath: "/Applications/Magpie.app/Contents/MacOS/magpie", exists })
+  assert.equal(got, dataDir, "the real bundle keeps its data folder beside the .app")
+})
+
 test("findConfigDir follows the executable's symlink, as appdir.Resolve does", () => {
   // /usr/local/bin/magpie and /opt/homebrew/bin/magpie are what findMagpieBin
   // itself names, and both are usually links into the app. appdir.Resolve
@@ -694,6 +717,13 @@ test("a providers.json with a BOM reads as JSON, not as nothing", () => {
     assert.equal(r.status, 0, r.stderr)
     assert.doesNotMatch(r.stdout, /未配置/, "a BOM must not hide the preset")
     assert.match(r.stdout, /modelscope/)
+
+    // the strip is anchored at the front: a U+FEFF inside a value is the
+    // value's own character, not a BOM to remove. As `/﻿/` (unaligned)
+    // the first one found anywhere is deleted, and a provider whose id holds
+    // one is silently renamed.
+    writeFileSync(file, '{"providers":[{"id":"model﻿scope","preset":"modelscope","key":"ms-a…"}]}')
+    assert.equal(readJson(file).providers[0].id, "model﻿scope", "a BOM in the middle is not a BOM")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -985,6 +1015,25 @@ test("a provider id shaped like a flag is refused before provider key runs", asy
   }
 })
 
+test("a provider id with a space or slash is refused, not written as an argument", () => {
+  // The id is the first argument to `provider key`. The regex's `$` is what
+  // keeps the check to the whole id: dropped, a prefix that starts well
+  // ("a b" starts with "a") passes, and the tool writes the key under an id
+  // magpie never stores — a success message for a write that did not happen.
+  for (const id of ["a b", "a/b", "modelscope/../../x", "a\nb"]) {
+    const p = planToPreset({ preset: { id, preset: "modelscope", key: A }, accounts: [{ name: "msmoli", token: B }], force: true })
+    assert.equal(p.action, "refuse", `${JSON.stringify(id)} is not a provider id: ${p.action}`)
+    assert.equal(p.cmds.length, 0, "nothing runs with a malformed id")
+  }
+  // the control: the same plan with a well-formed id runs — including the
+  // shortest one there is. `[A-Za-z0-9._-]+` instead of `*` demands a second
+  // character and refuses a provider id of one, which magpie accepts.
+  for (const id of ["modelscope", "x", "0"]) {
+    const ok = planToPreset({ preset: presetOf(A, id), accounts: [{ name: "msmoli", token: B }], force: true })
+    assert.equal(ok.action, "run", `${JSON.stringify(id)} is a plain id`)
+  }
+})
+
 test("an id or name with control characters is printed as text, not as terminal input", async () => {
   const dir = mkdtempSync(join(tmpdir(), "msmoli-esc-"))
   try {
@@ -1224,6 +1273,26 @@ test("a wrapper script as --magpie gets a hint that helps, not one that repeats"
       const text = out.join("\n")
       assert.match(text, /magpie\.exe/, `${wrapper}: it should point at the real binary`)
       assert.doesNotMatch(text, /用 --magpie 指定完整路径/, `${wrapper}: not the advice they already followed`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+  // and the ending is the whole test: a file that merely CONTAINS ".cmd" is
+  // not a wrapper. "magpie.cmd.bak" is a renamed something — the wrapper hint
+  // would point a user at a magpie.exe that does not exist next to it. As
+  // /\.(cmd|bat|ps1)/ (no $) every one of these is read as a wrapper.
+  for (const notWrapper of ["magpie.cmd.bak", "magpie.batt", "magpied.ps1x"]) {
+    const dir = mkdtempSync(join(tmpdir(), "msmoli-cmdbak-"))
+    try {
+      writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+      writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+      const out = []
+      await main({
+        argv: ["--dir", dir, "--to-plugin", "--magpie", `C:\\tools\\${notWrapper}`],
+        log: (s) => out.push(s),
+        spawn: () => ({ error: new Error("spawnSync EINVAL"), status: null, stdout: "", stderr: "" }),
+      })
+      assert.doesNotMatch(out.join("\n"), /包装脚本/, `${notWrapper} is not a wrapper script`)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -1958,6 +2027,12 @@ test("two different folders are still two, and a missing one is not another's", 
       }),
       false,
     )
+    // and a volume that reports ino 0 for everything (exFAT, some SMB shares)
+    // has no identity to compare: the resolved strings decided above, and the
+    // ino check must not turn their 0 === 0 into "one folder". As `!== -1`
+    // the guard passes ino 0 through and two different folders are one.
+    const noIno = () => ({ ino: 0, dev: 1 })
+    assert.equal(sameFolder(a, b, (p) => p, noIno), false, "ino 0 is no identity to compare")
   } finally {
     rmSync(a, { recursive: true, force: true })
     rmSync(b, { recursive: true, force: true })
@@ -1979,6 +2054,94 @@ test("a child killed by a signal is not reported as an exit code of null", async
     const text = out.join("\n")
     assert.match(text, /SIGKILL/, `should name the signal: ${text}`)
     assert.doesNotMatch(text, /退出码 null/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a failed login after a successful logout does not claim a logout on the first step", async () => {
+  // e.recover is set for every step but the first: the first step is what
+  // FAILED, so nothing has run yet and "前面的步骤已经执行，现有登录已被登出"
+  // would be a lie that reads as "your sign-in is gone". As `i > -1` every
+  // step carries it. The two-step tests above assert the line's presence on
+  // later steps; nothing asserted its absence on the first.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-step0-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      // the logout is step 0 and fails: nothing has run
+      spawn: (_cmd, argv) => (argv.includes("logout") ? { status: 2, stdout: "", stderr: "boom" } : { status: 0, stdout: "", stderr: "" }),
+    })
+    assert.equal(code, 1)
+    const text = out.join("\n")
+    assert.doesNotMatch(text, /已被登出/, `nothing has run yet, no logout to report: ${text}`)
+    assert.doesNotMatch(text, /重新运行/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the outgoing token is scrubbed from the login step's output too", async () => {
+  // the secret list is built from every command up to and including the
+  // current one. `slice(0, i)` drops the current one, and the login step's
+  // `secret` is the new token — but its output can echo the OLD one the
+  // logout just removed, which only the slice's own tail still covers.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-loginmask-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: (_cmd, argv) => {
+        if (argv.includes("logout")) {
+          writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+          return { status: 0, stdout: "✓ signed out", stderr: "" }
+        }
+        // the login step fails, and its output names the token that was just
+        // signed out — the old key, which only the slice of earlier commands
+        // knows about
+        return { status: 2, stdout: "", stderr: `cannot sign in, still holding ${B}` }
+      },
+    })
+    assert.equal(code, 1)
+    const text = out.join("\n")
+    assert.ok(!text.includes(B), `the outgoing token must not reach the terminal: ${text}`)
+    assert.match(text, /ms-b/, `it is masked instead: ${text}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a first login that leaves two accounts is not a failed logout", async () => {
+  // the two-account read-back check guards the logout→login sequence: there,
+  // two accounts means the logout never really deleted. A plan with one
+  // command had no logout at all, so `plan.cmds.length > 1` keeps the check
+  // away from it; as `> 0` a fresh login that finds two accounts is reported
+  // as a failed logout — a diagnosis that is wrong and an exit code of 1 for
+  // a write that landed.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-oneplan-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      // no logout is planned: the plugin has no account, so this is one
+      // login that (per the stub's own file) leaves two accounts behind
+      spawn: () => {
+        writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A }, "msmoli#abc123": { type: "api", key: A } }))
+        return { status: 0, stdout: "✓ signed in", stderr: "" }
+      },
+    })
+    assert.equal(code, 0, `the token landed, the run is a success: ${out.join("\n")}`)
+    assert.doesNotMatch(out.join("\n"), /旧账号没被登出/, "no logout happened to have failed")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
