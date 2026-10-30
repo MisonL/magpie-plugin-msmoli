@@ -5433,3 +5433,145 @@ test("the usage card's target moves with the date", async () => {
   }
   assert.ok(seen.size > 1, `twelve days, one target minute: ${[...seen].join(", ")}`)
 })
+
+test("a key that is not a string is no key, not the token 'null'", async () => {
+  // rawKey 的 `String(auth.key ?? "")`：null / undefined 时 `??` 给空串（没有
+  // 钥匙）。漏掉这个默认值就成了 String(null) = "null"——一个 SENDABLE 放行
+  // 的「令牌」，插件拿它去请求，卡片报「不在活动范围」而不是「没有登录信息」。
+  // 反过来，0 / false 是「不是 nullish 的值」：`??` 保留它们，String 之后
+  // 是 "0" / "false"，那确实是一把可以发出去的钥匙；`||` 会把它们读成空串，
+  // 把一把有值的钥匙丢成「没有登录信息」。
+  for (const [key, want] of [
+    [null, "none"],
+    [undefined, "none"],
+    [0, "sent"],
+    [false, "sent"],
+  ]) {
+    const calls = []
+    const realFetch = globalThis.fetch
+    globalThis.fetch = async (url) => {
+      calls.push(String(url))
+      return reply({ body: { success: true, data: { records: [] } } })
+    }
+    try {
+      const r = await auth.checkin(async () => ({ type: "api", key }))
+      if (want === "none") {
+        assert.equal(r.outcome, "failed", `${JSON.stringify(key)} must not check in: ${r.message}`)
+        assert.match(r.message, /没有登录信息/, `a nullish key is no sign-in: ${r.message}`)
+        assert.equal(calls.length, 0, "and nothing may be sent with it")
+      } else {
+        assert.equal(r.outcome, "inactive", `${JSON.stringify(key)} is a key: ${r.message}`)
+        assert.ok(calls.length > 0, `${JSON.stringify(key)} stringifies to a key that is sent`)
+        assert.ok(!calls.some((c) => /undefined|null/.test(c)), `no bogus token on the wire: ${calls[0]}`)
+      }
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  }
+})
+
+test("a response with no headers object is a length we do not know, not a crash", async () => {
+  // readBounded 用 `res.headers?.get?.(...)` 读长度。一个被代理改写、或被
+  // 宿主的 fetch 实现自己构造的响应，可能根本没有 headers 对象：`?.` 读成
+  // undefined，长度落在 NaN，正文照常读完。读成 `res.headers.get` 会抛
+  // TypeError，被 saidFailure 兜成「网络不通、被代理拦截」——一个拿到了
+  // 回答的请求被报成网络故障。
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async () => ({
+    status: 200,
+    headers: undefined,
+    body: {
+      getReader() {
+        let done = false
+        return {
+          async read() {
+            if (done) return { done: true, value: undefined }
+            done = true
+            return { done: false, value: new TextEncoder().encode(JSON.stringify({ success: true, data: { records: [] } })) }
+          },
+          async cancel() {},
+          releaseLock() {},
+        }
+      },
+    },
+    text: async () => JSON.stringify({ success: true, data: { records: [] } }),
+  })
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-noheaders-0000-0000-0000-0000001" }))
+    assert.equal(r.outcome, "inactive", `the body was read, not a network failure: ${r.message}`)
+    assert.doesNotMatch(r.message, /网络不通|Cannot read/)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("a login answer with no data still finishes the check-in", async () => {
+  // dataOf 的 `?? {}`：login/info 可能只回一个 { Code: 200 }。少了这个
+  // 默认值，dataOf 给了 undefined，`me.NickName` 抛「Cannot read properties
+  // of undefined」——已经落地的领取被兜成 failed。空对象读成「没有昵称」，
+  // 是正常的完成，不是读不懂。
+  const r = await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true } },
+    },
+    async () => auth.checkin(async () => ({ type: "api", key: "ms-nodata-0000-0000-0000-00000001" })),
+  )
+  assert.equal(r.outcome, "done", `the claim landed despite the empty login: ${r.message}`)
+  assert.equal(r.credit, 200)
+})
+
+test("a ledger row with no title is not named on the card", async () => {
+  // cardText 的 `String(value ?? "")`：title 缺失/为 null 时读成空串，卡片
+  // 只写金额，不列「（undefined）」。0 / false 的标题则原样列上——「（0）」
+  // 是那一行真实的标题，不是没有；`||` 会把它们吞成纯金额。
+  for (const [title, want] of [
+    [undefined, "今日已领取 200 魔粒"],
+    [null, "今日已领取 200 魔粒"],
+    [0, "今日已领取 200 魔粒（0）"],
+    [false, "今日已领取 200 魔粒（false）"],
+  ]) {
+    const row = day()
+    if (title === undefined) delete row.title
+    else row.title = title
+    const r = await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [row] } } },
+        // 已经领过的那一支照样要读 login/info 拿昵称：少了它这里会是 404，
+        // 断言就会钉在「登录接口失败」上，跟 title 没关系
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+      },
+      async () => auth.checkin(async () => ({ type: "api", key: "ms-notitle-0000-0000-0000-00000042" })),
+    )
+    assert.equal(r.outcome, "done")
+    assert.equal(r.message, want, `title=${JSON.stringify(title)}`)
+  }
+})
+
+test("a data field that is an empty string is not shifted to the other spelling", async () => {
+  // dataObjectOf 的 `body?.data ?? body?.Data`：`??` 只在 data 是 nullish 时
+  // 看第二个拼写，`||` 则在一个空的 data 上也换过去。modelScope 两种拼写
+  // 都存在（账本用 data，login 用 Data），一个空字符串的 data 换过去就成了
+  // Data.records——一次真实的「没有 data」被读成「不在活动范围」。
+  const r = await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: "", Data: { records: [] } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+    },
+    async () => auth.checkin(async () => ({ type: "api", key: "ms-dblspell-0000-0000-0000-000000001" })),
+  )
+  assert.equal(r.outcome, "failed")
+  assert.match(r.message, /账单格式不认识：没有 data/, r.message)
+})
+
+test("the plugin builds without an input object", async () => {
+  // MsmoliPlugin 的 `input?.directory` / `input?.client`：一个没有参数的调用
+  // （宿主的旧版本、或一个只 import 就调用的壳）该建出一个没有目录、没有
+  // client 的插件，两个字段各自取默认值。读成 `input.directory` 会在工厂里抛
+  // TypeError，插件整个加载失败——宿主只记一行日志，卡片上什么都不出现。
+  for (const arg of [undefined, {}, null]) {
+    const hooks = await MsmoliPlugin(arg)
+    assert.equal(typeof hooks.auth.checkin, "function", `input=${JSON.stringify(arg)}`)
+    assert.equal(hooks.auth.provider, "msmoli")
+  }
+})

@@ -3531,3 +3531,54 @@ test("the read-back asks the same exists the pre-check did", async () => {
     rmSync(dir2, { recursive: true, force: true })
   }
 })
+
+test("a path that is not given is not the folder named 'undefined'", () => {
+  // norm 的 `String(p ?? "")`：undefined/null 读成空串，norm 早退成 ""，
+  // `sameFolder(undefined, undefined)` 因此是 false——两个「没给路径」不是
+  // 同一个文件夹，正是注释里那条「不存在的两个文件夹永不相等」。漏掉默认
+  // 值，String(undefined) = "undefined" 成了一个非空串，两边都解析成同一个
+  // 词，方法说「是同一个」。
+  const identity = (p) => p
+  const stat = () => ({ ino: 1, dev: 1 })
+  assert.equal(sameFolder(undefined, undefined, identity, stat), false)
+  assert.equal(sameFolder(null, null, identity, stat), false)
+  assert.equal(sameFolder(undefined, "undefined", identity, stat), false)
+  assert.equal(sameFolder("undefined", undefined, identity, stat), false)
+  // 两个都写着 "undefined" 的字符串仍然是同一个（这是两个真实的词）
+  assert.equal(sameFolder("undefined", "undefined", identity, stat), true)
+  // 0 / false 不是 nullish：`??` 保留它们，String 之后是 "0" / "false"，两个
+  // 同一个值仍是同一个文件夹；`||` 会把它们读成空串，一对相等的东西变成
+  // 「都没给路径」。
+  assert.equal(sameFolder(0, 0, identity, stat), true)
+  assert.equal(sameFolder(false, false, identity, stat), true)
+})
+
+test("a provider with no id is not displayed as 'undefined'", async () => {
+  // show 的 `String(s ?? "")`：providers.json 里一条没有 id 的预设，状态行
+  // 该写「内置 ModelScope：（ms-a…5555）」，不是「undefined（…）」。`||` 那侧
+  // 是数字 0/false 的 id：它们是真值，`String(0)` = "0" 应当显示出来。
+  for (const [id, want] of [
+    [undefined, "内置 ModelScope：（ms-a…0000）"],
+    [null, "内置 ModelScope：（ms-a…0000）"],
+    [0, "内置 ModelScope：0（ms-a…0000）"],
+    [false, "内置 ModelScope：false（ms-a…0000）"],
+  ]) {
+    const dir = mkdtempSync(join(tmpdir(), "msmoli-noid-"))
+    try {
+      const entry = { preset: "modelscope", key: "ms-ablate-0000" }
+      if (id !== undefined) entry.id = id
+      writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [entry] }))
+      writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+      const out = []
+      await main({
+        argv: ["--dir", dir, "--status", "--magpie", "/nonexistent"],
+        log: (s) => out.push(s),
+        spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+      })
+      const line = out.find((l) => l.includes("内置 ModelScope"))
+      assert.equal(line, `  ${want}`, `id=${JSON.stringify(id)}`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
