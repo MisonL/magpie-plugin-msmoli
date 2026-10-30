@@ -2965,3 +2965,428 @@ test("a line of only spaces in the child's output is not echoed as a line", asyn
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ── 第二十六轮：语句级宽扫 ──────────────────────────────────────────────
+// 与 plugin.test.mjs 同一轮：整条语句被掏空/删掉。下面是探针测出真实差异的
+// 位点；等价变异记录在各条注释里。
+
+test("sameFolder's resolved match decides before the volume is asked", () => {
+  // 两边 realpath 之后字符串相等时，第一条守卫直接答 true，根本不去 stat。
+  // 掏空它，每一对相等的路径都落到 inode 比较；报 ino=0 的卷（exFAT、部分
+  // SMB）上没有身份可比，同一个文件夹会被判成两个——正是 --dir 守卫承诺
+  // 不再犯的那个错。
+  // 两处拼写都解析成同一串：identity real 配一条把 "X/." 折成 "X" 的规则，
+  // 平台无关——真机上的 /tmp 与 /private/tmp 是同一形状（macOS 才有）。
+  const real = (p) => (p.endsWith("/.") ? p.slice(0, -2) : p)
+  const statThrows = () => {
+    throw new Error("EACCES")
+  }
+  assert.equal(sameFolder("/a", "/a", real, statThrows), true, "resolved twins need no inode")
+  assert.equal(sameFolder("/a", "/a/.", real, statThrows), true, "two spellings that resolve equal are one folder")
+  const statZero = () => ({ ino: 0, dev: 1 })
+  assert.equal(sameFolder("/a", "/a", real, statZero), true, "an ino=0 volume still has one folder under one spelling")
+})
+
+test("a folder the volume cannot resolve is never another folder's match", () => {
+  // 第二条守卫在任一边解析失败（""）时直接答 false。掏空它，"" 也会被送去
+  // stat；注入的 stat 若对空路径也给一个身份，两个无从解析的路径就被当成
+  // 同一个文件夹——工具会往 magpie 从未建过的目录里写。
+  const real = (p) => (p.startsWith("/nope") ? "" : p)
+  const stat = () => ({ ino: 42, dev: 1 })
+  assert.equal(sameFolder("/nope", "/tmp", real, stat), false, "missing vs real is not one folder")
+  assert.equal(sameFolder("/tmp", "/nope", real, stat), false)
+  assert.equal(sameFolder("/nope", "/nope2", real, stat), false, "two unresolvable paths are never one")
+})
+
+test("isMain's URL match decides before the volume is asked", () => {
+  // 解析后的入口与 import.meta.url 逐字相等时直接答 true，不问 stat。掏空它，
+  // 一个 stat 抛错的卷（权限墙、掉线的共享）会让 catch 把「这是入口」翻成
+  // 「不是」——整个 sync.mjs 静默跳过，不打印任何东西、退出码 0，用户以为
+  // 同步成功了。
+  const real = (p) => p
+  // 用 join 与 pathToFileURL 自己造入口与它的 URL：Windows 上盘符与分隔符
+  // 都不同，写死的 "/x/bin/sync.mjs" 在那边根本对不上
+  const entry = join("x", "bin", "sync.mjs")
+  const self = pathToFileURL(entry).href
+  const statZero = () => ({ ino: 0, dev: 1 })
+  assert.equal(isMain(entry, self, statZero, real), true, "the entry's own URL is main with no inode")
+  assert.equal(isMain(join("x", "bin", "other.mjs"), self, statZero, real), false, "a different file is still not main")
+  const statThrows = () => {
+    throw new Error("EACCES")
+  }
+  assert.equal(isMain(entry, self, statThrows, real), true, "a stat that throws must not flip a URL match")
+})
+
+test("a chat that is not a string does not make a provider ours", () => {
+  // hostOf 先要求 chat 是字符串再交给 new URL。掏空这条守卫后，new URL 会先
+  // 把数组 / String 对象转成字符串：["https://api-inference.modelscope.cn/v1"]
+  // 转出来正好是那个地址，于是一个 chat 字段形状不对的 provider 被当成内置的
+  // ModelScope 预设——--to-plugin 会把它的 key 当成 ms 令牌登录给插件。
+  assert.deepEqual(presetCandidates([{ id: "evil", key: A, chat: ["https://api-inference.modelscope.cn/v1"] }]), [])
+  assert.deepEqual(
+    presetCandidates([{ id: "evil", key: A, chat: new String("https://api-inference.modelscope.cn/v1") }]),
+    [],
+  )
+  assert.equal(
+    presetCandidates([{ id: "evil", key: A, chat: "https://api-inference.modelscope.cn/v1" }]).length,
+    1,
+    "a real string is still ours",
+  )
+})
+
+test("planToPlugin's refusal spells out both sides, not one", () => {
+  const p = planToPlugin({ preset: presetOf(A), accounts: [{ name: "msmoli", token: B }], force: false })
+  assert.equal(p.action, "refuse")
+  assert.deepEqual(p.lines, [
+    `  插件现有：msmoli（${mask(B)}）`,
+    `  内置预设：modelscope（${mask(A)}）`,
+    `✗ 两边令牌不同，未做改动。`,
+    `  直接 login 会新增第二个账号（宿主按令牌分账号），logout 会登出该 provider 的全部账号，`,
+    `  两个默认动作都不是你要的。确认要换成内置那把，加 --force 重跑。`,
+  ])
+})
+
+test("planToPlugin refuses a multi-account force with the reason --force cannot help", () => {
+  const p = planToPlugin({
+    preset: presetOf(A),
+    accounts: [
+      { name: "msmoli", token: B },
+      { name: "msmoli#abc123", token: "ms-cccc1111-dddd-2222-eeee-333344445555" },
+    ],
+    force: true,
+  })
+  assert.equal(p.action, "refuse")
+  assert.deepEqual(p.lines, [
+    `  插件现有：msmoli（${mask(B)}）、msmoli#abc123（ms-c…5555）`,
+    `  内置预设：modelscope（${mask(A)}）`,
+    `✗ 插件有 2 个账号，--force 不适用：替换要先 logout，那会一次登出全部账号。`,
+    `  请先在 magpie 里删掉多余账号，或手动执行。`,
+  ])
+})
+
+test("planToPlugin's forced replace says what it will log out and redo", () => {
+  const p = planToPlugin({ preset: presetOf(A), accounts: [{ name: "msmoli", token: B }], force: true })
+  assert.equal(p.action, "run")
+  assert.deepEqual(p.lines, [
+    `  插件现有：msmoli（${mask(B)}）`,
+    `  内置预设：modelscope（${mask(A)}）`,
+    `→ 将先 logout（登出 msmoli）再 login 内置那把。当天已签到的记录会重来，昵称下次签到时写回。`,
+  ])
+})
+
+test("planToPlugin refuses a preset key the plugin could not send", () => {
+  const BAD = "ms-bad key 0000-0000-0000-000000000000"
+  const p = planToPlugin({ preset: presetOf(BAD), accounts: [], force: false })
+  assert.equal(p.action, "refuse")
+  assert.deepEqual(p.lines, [
+    `✗ 内置预设的 key 含空格、换行或非 ASCII 字符，插件发不出去，不登录。`,
+    `  先修好内置那边的 key（magpie provider key modelscope <key>）。`,
+  ])
+})
+
+test("planToPreset's refusals name the account and where the preset comes from", () => {
+  const noMain = planToPreset({ preset: presetOf(A), accounts: [], force: false })
+  assert.equal(noMain.action, "refuse")
+  assert.deepEqual(noMain.lines, [
+    `✗ 插件主账号（msmoli）没有登录，没有可同步的令牌。`,
+    `  先用 magpie plugin login msmoli 登录，或用 --to-plugin 从内置预设同步。`,
+  ])
+  // main() 先把缺预设拦下，但 planToPreset 是导出的，direct 调用不能少这两行
+  const noPreset = planToPreset({ preset: null, accounts: [{ name: "msmoli", token: A }], force: false })
+  assert.equal(noPreset.action, "refuse")
+  assert.deepEqual(noPreset.lines, [
+    `✗ 内置还没有 ModelScope 预设，没有可写的地方。`,
+    `  要加的话：magpie provider add modelscope <key>（工具不代建 provider）。`,
+  ])
+})
+
+test("planToPreset says there is nothing to do when both sides already match", () => {
+  const p = planToPreset({ preset: presetOf(A), accounts: [{ name: "msmoli", token: A }], force: false })
+  assert.equal(p.action, "noop")
+  assert.deepEqual(p.lines, [`✓ 内置预设已用同一把令牌（${mask(A)}），无需操作。`])
+})
+
+test("planToPreset's replace plan names both tokens and the command", () => {
+  const noForce = planToPreset({ preset: presetOf(B), accounts: [{ name: "msmoli", token: A }], force: false })
+  assert.equal(noForce.action, "refuse")
+  assert.deepEqual(noForce.lines, [
+    `  插件主账号：msmoli（${mask(A)}）`,
+    `  内置预设：modelscope，现有 key（${mask(B)}）会被整条替换。`,
+    `✗ 内置这把 key 是聊天请求正在用的，替换会让那边跟着换。确认的话加 --force 重跑。`,
+  ])
+  const forced = planToPreset({ preset: presetOf(B), accounts: [{ name: "msmoli", token: A }], force: true })
+  assert.equal(forced.action, "run")
+  assert.deepEqual(forced.lines, [
+    `  插件主账号：msmoli（${mask(A)}）`,
+    `  内置预设：modelscope，现有 key（${mask(B)}）会被整条替换。`,
+    `→ 将执行 magpie provider key modelscope（令牌是该命令的参数，进程列表里短暂可见）。`,
+  ])
+})
+
+test("planToPreset refuses a plugin token the CLI could not send", () => {
+  const BAD = "ms-bad key 0000-0000-0000-000000000000"
+  const p = planToPreset({ preset: presetOf(B), accounts: [{ name: "msmoli", token: BAD }], force: true })
+  assert.equal(p.action, "refuse")
+  assert.deepEqual(p.lines, [
+    `  插件主账号：msmoli（${mask(BAD)}）`,
+    `  内置预设：modelscope，现有 key（${mask(B)}）会被整条替换。`,
+    `✗ 插件里那把令牌含空格、换行或非 ASCII 字符，发不出去，不写进内置预设。`,
+    `  先修好插件那边的登录（magpie plugin login msmoli）。`,
+  ])
+})
+
+test("a file that is there but unreadable is refused with the don't-guess line", async () => {
+  // 每个「存在但读不出来」的分支都是两行：哪一行文件坏了，以及「别猜它的
+  // 内容」。只留第一行，用户会自己去猜——而猜错就是覆盖一份可能还救得回来
+  // 的状态。四种形状共用第二行，各自走各自的守卫。
+  const cases = [
+    { name: "providers.json 不解析", prov: "{ not json", auth: JSON.stringify({ msmoli: { type: "api", key: B } }) },
+    { name: "plugin-auth.json 不解析", prov: JSON.stringify({ providers: [presetOf(A)] }), auth: "{ broken" },
+    { name: "providers.json 不是对象", prov: "[]", auth: JSON.stringify({ msmoli: { type: "api", key: B } }) },
+    { name: "providers 不是列表", prov: JSON.stringify({ providers: {} }), auth: JSON.stringify({ msmoli: { type: "api", key: B } }) },
+  ]
+  for (const c of cases) {
+    const dir = mkdtempSync(join(tmpdir(), "msmoli-unreadable-"))
+    try {
+      writeFileSync(join(dir, "providers.json"), c.prov)
+      writeFileSync(join(dir, "plugin-auth.json"), c.auth)
+      const out = []
+      const code = await main({
+        argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+        log: (s) => out.push(s),
+        spawn: () => {
+          throw new Error(`nothing may run on an unreadable file: ${c.name}`)
+        },
+      })
+      assert.equal(code, 1, c.name)
+      // 报头（配置目录）在前面，拒绝自己是最后两行
+      const tail = out.slice(-2)
+      assert.equal(tail.length, 2, `${c.name}: both lines, got ${JSON.stringify(out)}`)
+      assert.match(tail[0], /存在但读不出来|存在但|不是列表/, `${c.name}: the first line says which file and why`)
+      assert.match(tail[1], /不猜它的内容：先确认 magpie 正常，或备份后重试。/, `${c.name}: the second line says not to guess`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test("the report names the folder it read and both sides of the pair", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-hdr-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--status", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+    })
+    assert.equal(code, 0)
+    assert.equal(out[0], `magpie 配置目录：${dir}`, "the first line names the folder it read")
+    assert.equal(out[1], `  内置 ModelScope：modelscope（${mask(A)}）`, "the preset side is named with its token's ends")
+    assert.equal(out[2], `  签到插件 msmoli：msmoli（${mask(A)}）`, "the plugin side is named with its token's ends")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("more than one candidate refuses with the count and the way out", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-cands-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A), presetOf(B)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--status", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+    })
+    assert.equal(code, 1)
+    const text = out.join("\n")
+    assert.match(text, /✗ 内置侧有 2 个候选（modelscope、modelscope），不确定用哪个。/, `the count and the doubt are one line: ${text}`)
+    assert.match(
+      text,
+      /它们用的是同一个 id（modelscope），--from 也分不开；请在 magpie 里删掉多余的那个 provider。/,
+      `same-id candidates say --from cannot split them: ${text}`,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("--from and a bare run each say what to do next", async () => {
+  const run = async (providers, argv) => {
+    const dir = mkdtempSync(join(tmpdir(), "msmoli-from-"))
+    try {
+      writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers }))
+      writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+      const out = []
+      const code = await main({
+        argv: ["--dir", dir, "--status", "--magpie", "/nonexistent", ...argv],
+        log: (s) => out.push(s),
+        spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+      })
+      return { code, text: out.join("\n") }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+  // --from 指向一个我们自己的、但还没有 key 的 provider
+  let r = await run([{ id: "modelscope", preset: "modelscope" }], ["--from", "modelscope"])
+  assert.equal(r.code, 1)
+  assert.match(r.text, /✗ "modelscope" 在，但还没有 key，没有可同步的令牌。/)
+  assert.match(r.text, /  用 magpie provider key modelscope <key> 写入。/, "and names the command that fills it in")
+  // --from 指向一个存在但不是我们的 provider
+  r = await run([{ id: "openai", preset: "openai", key: "sk-x" }], ["--from", "openai"])
+  assert.equal(r.code, 1)
+  assert.match(r.text, /✗ "openai" 在，但它不是 ModelScope：chat 不指向 api-inference\.modelscope\.cn，id\/preset 也不是 modelscope。/)
+  assert.match(r.text, /  这个工具只同步内置的 ModelScope 预设与插件登录态之间的令牌。/, "and says what the tool does sync")
+  // --from 什么都没匹配到
+  r = await run([{ id: "openai", preset: "openai", key: "sk-x" }], ["--from", "typo"])
+  assert.equal(r.code, 1)
+  assert.match(r.text, /✗ 内置侧没有 id 为 "typo" 的 provider。/)
+  assert.match(r.text, /  用 --status 看现有的，或先 magpie provider add typo <key>。/)
+  // 不带 --from，内置侧一个我们的都没有
+  r = await run([{ id: "openai", preset: "openai", key: "sk-x" }], [])
+  assert.equal(r.code, 1)
+  assert.match(r.text, /✗ 内置侧没有带 key 的 ModelScope 预设。/)
+  assert.match(r.text, /  先在 magpie 的「供应商」页添加 ModelScope，或 magpie provider add modelscope <key>。/)
+})
+
+test("--dir and --magpie pointing at different folders names both", async () => {
+  // 读一个目录、写另一个目录，正是这条守卫存在的理由；三行里的每一行都是
+  // 用户对齐两个参数所需要的信息：读的是哪个、magpie 会写到哪个、为什么
+  // 不能用 --dir 让它跟过来。
+  const home = mkdtempSync(join(tmpdir(), "msmoli-home-"))
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-misdir-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const fakebin = join(home, "magpie")
+    writeFileSync(fakebin, "")
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", fakebin],
+      env: {},
+      home,
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+    })
+    assert.equal(code, 1)
+    const text = out.join("\n")
+    assert.match(text, /✗ --dir 与 --magpie 指向不同的配置目录，而写入只会落在 magpie 自己的那个。/)
+    assert.ok(text.includes(`  读的是：${dir}`), `the folder that was read is named: ${text}`)
+    assert.match(text, /  magpie 会写到：它自己的默认目录（这里找不到现成的）/, `the folder magpie would write is named: ${text}`)
+    assert.match(text, /  magpie 的命令行没有 --dir。两处用同一个目录，或去掉 --magpie 让它自动探测。/)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a read-back that finds two accounts says the old one was not logged out", async () => {
+  // logout 退出码 0 却没真删时，login 会把新令牌加成第二个账号；「有一个
+  // 账号拿着目标令牌」照样成立，但那正是 planToPlugin 说 --force 不适用的
+  // 状态。回读要数账号，并说清是怎么变成两个的。
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-dbl-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: (_cmd, argv) => {
+        if (argv.includes("login")) {
+          writeFileSync(
+            join(dir, "plugin-auth.json"),
+            JSON.stringify({ msmoli: { type: "api", key: B }, "msmoli#extra": { type: "api", key: A } }),
+          )
+        }
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1)
+    const text = out.join("\n")
+    assert.match(text, /✗ 回读发现插件现在有 2 个账号（msmoli、msmoli#extra）。/)
+    assert.match(text, /  旧账号没被登出，login 追加了一个。请在 magpie 里删掉多余账号后重试。/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a read-back that cannot be read says which page to check", async () => {
+  // 读不动是「写入成功了但没法确认」，不是「没找到令牌」——后者会把人推去查
+  // magpie 是否在运行。两个方向看的页面不同，所以 where 也要对。
+  let dir = mkdtempSync(join(tmpdir(), "msmoli-rb-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: (_cmd, argv) => {
+        if (argv.includes("login")) writeFileSync(join(dir, "plugin-auth.json"), "{ broken")
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1)
+    const text = out.join("\n")
+    assert.match(text, /^\? 写入已执行，但回读时 .*plugin-auth\.json 读不出来，无法确认（ms-a…5555）。$/m)
+    assert.match(text, /  先确认 magpie 正常，再看一眼插件列表里那把 key 在不在。/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  dir = mkdtempSync(join(tmpdir(), "msmoli-rb2-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(B)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-preset", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        writeFileSync(join(dir, "providers.json"), "{ broken")
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1)
+    const text = out.join("\n")
+    assert.match(text, /^\? 写入已执行，但回读时 .*providers\.json 读不出来，无法确认（ms-a…5555）。$/m)
+    assert.match(text, /  先确认 magpie 正常，再看一眼供应商列表里那把 key 在不在。/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("--help answers with a success code", async () => {
+  // 掏空 `return 0` 后 main 返回 undefined；isMain 那段把它塞进 exitCode，
+  // 生产里仍是 0，但 main 的返回值就是它对调用方的契约，每条路径都该是数字。
+  const code = await main({ argv: ["--help"], log: () => {} })
+  assert.equal(code, 0)
+})
+
+test("a bare --dry-run says both that it needs a direction and that nothing ran", async () => {
+  // 不带 --to-* 时只报计划：第一行说方向，第二行（只在 --dry-run 时）说没有
+  // 执行。第二行被删掉，一次 --dry-run 的裸跑看起来就像跑过了——用户带着
+  // 「已经同步」的印象离开。两条都要在。
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-baredry-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--dry-run", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        throw new Error("a dry run must not spawn anything")
+      },
+    })
+    assert.equal(code, 0)
+    assert.match(out.join("\n"), /\(要执行请显式指定方向：--to-plugin 或 --to-preset\)/)
+    assert.match(out.join("\n"), /\(--dry-run：未执行\)/, "a dry run has to say it did not run")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

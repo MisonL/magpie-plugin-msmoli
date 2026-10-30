@@ -5096,3 +5096,115 @@ test("the usage percentage rounds to two decimals on both denominators", async (
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ── 第二十六轮：语句级宽扫 ──────────────────────────────────────────────
+// 一轮只改表达式（运算符、字面量、方法名、正则标志）的扫描之后，这一轮改的是
+// 整条语句：掏空一条一行守卫、删掉 return 的值、删掉一条纯调用语句。下面钉住的
+// 是探针测出真实行为差异的那些位点；判为等价的几个记录在各条注释里。
+
+test("a providers.json that parses to an empty object still takes the nickname", async () => {
+  // aliasOf 把 raw.providers 放进候选列表；{} 里没有 providers 键，列表元素
+  // 是 undefined。`if (!Array.isArray(list)) continue` 被掏空后，for...of
+  // undefined 立刻抛 "list is not iterable"，整次签到回答 failed——用户没做错
+  // 任何事，网也通，只因为 providers.json 恰好是个空对象，昵称就永远写不回来。
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-emptyobj-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  writeFileSync(join(dir, "providers.json"), "{}")
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    const token = "ms-emptyobj-0000-0000-0000-000000000028"
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+      },
+      async () => {
+        const r = await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(r.outcome, "done", `an empty object is a readable file with no alias: ${r.message}`)
+        assert.equal(writes.length, 1, "the nickname is still written back")
+        assert.equal(writes[0].body.accountId, "Mison")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a claim that landed is answered before the ledger is read a third time", async () => {
+  // 第二次读账本读到发放，回答 claimed。`if (daily) return …` 被掏空后，代码会
+  // 再读第三次——发放已经写出来、签到确实成功，而第三次读的失败把这张卡从
+  // 「领取 200 魔粒」翻成 failed。宿主看到 failed 会重试，但用户这一轮看到的是
+  // 一次假失败；账本已经写出来的事实不因重读的失败而改变。
+  let reads = 0
+  const real = globalThis.fetch
+  const grant = { gmt_created: today, type: "EARN", rule_key: "daily_active", title: "注册并登录", total_amount: 200, count: 1 }
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname + new URL(url).search
+    if (path === "/api/v1/users/login/info") return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    reads += 1
+    if (reads === 1) return reply({ body: { success: true, data: { records: [] } } })
+    if (reads === 2) return reply({ body: { success: true, data: { records: [grant] } } })
+    throw new Error("the third read fails")
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-thirdread" }))
+    assert.equal(reads, 2, `two ledger reads decide the answer; the third buys nothing: reads=${reads}`)
+    assert.equal(r.outcome, "claimed")
+    assert.equal(r.credit, 200)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a finished request leaves no timer armed behind it", async (t) => {
+  // json() 用 setTimeout 给整个请求（fetch 与读完 body）装上限时，finally 里
+  // clearTimeout。删掉那条语句，请求结束后计时器还挂着：逐个账号轮询时，每个
+  // 计时器都把插件的进程按满 TIMEOUT_MS 才放行。用计时器探针数，比数
+  // getActiveResourcesInfo 稳：本机 node 24 可用、bun 1.4.3 报空数组，探针
+  // 先自检「装了计时器看得见」，看不见就跳过，不会静默假绿。
+  const realSet = globalThis.setTimeout
+  const realClear = globalThis.clearTimeout
+  const armed = new Set()
+  const cleared = new Set()
+  globalThis.setTimeout = (fn, ms, ...a) => {
+    const h = realSet(fn, ms, ...a)
+    armed.add(h)
+    return h
+  }
+  globalThis.clearTimeout = (h) => {
+    cleared.add(h)
+    return realClear(h)
+  }
+  try {
+    // 自检：探针看得见的计时器才算数
+    const probe = setTimeout(() => {}, 60000)
+    const visible = armed.has(probe)
+    clearTimeout(probe)
+    armed.clear()
+    cleared.clear()
+    // 看不见计时器的运行时明说跳过：静默 return 在 CI 里和通过长得一样
+    if (!visible) return t.skip("this runtime's timers are not visible to the spy")
+
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        const u = await auth.usage(async () => ({ type: "api", key: "ms-timerleft" }))
+        assert.ok(u.windows?.length, "the read succeeded, so the timeout was not the answer")
+      },
+    )
+    assert.ok(armed.size > 0, "the request arms its own timeout; without one the answer would hang forever")
+    const left = [...armed].filter((h) => !cleared.has(h))
+    assert.equal(left.length, 0, `${left.length} of ${armed.size} timers left armed after the work is done`)
+  } finally {
+    globalThis.setTimeout = realSet
+    globalThis.clearTimeout = realClear
+  }
+})
