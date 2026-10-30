@@ -3390,3 +3390,144 @@ test("a bare --dry-run says both that it needs a direction and that nothing ran"
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("a root-relative XDG_CONFIG_HOME is rooted when the OS is simulated as win32", () => {
+  // rooted() 的 os 参数是给「在 mac 上测 windows」用的：真 windows 上
+  // path.isAbsolute("\\rel") 本来就是 true，这一条让模拟走同一条路。少了
+  // 它，模拟出来的 win32 把 \rel 当成相对路径，转去读 ~/.config，判定
+  // 便携 data 文件夹归属时问错了目录。
+  const home = sep === "\\" ? "C:\\u" : "/home/u"
+  const xdg = "\\rel"
+  const data = join(home, "data")
+  const files = new Set([join(data, "providers.json"), join(xdg, "magpie", "providers.json")])
+  const got = findConfigDir({
+    env: { XDG_CONFIG_HOME: xdg },
+    home,
+    os: "win32",
+    exists: (p) => files.has(p),
+    stat: (p) => (p === data ? { isDirectory: () => true } : (() => { throw new Error("ENOENT") })()),
+    real: (p) => p,
+    binPath: join(home, "magpie"),
+  })
+  assert.equal(got, join(xdg, "magpie"))
+})
+
+test("two install locations say which one wins", () => {
+  // 搜索顺序就是优先顺序：两个位置都装了 magpie 时用的是排在前面的那个。
+  // 交换前两个候选，Intel Homebrew 的 /usr/local/bin 会让给 /usr/bin 上
+  // 那个来路不明的二进制——令牌在它手上。
+  const both = new Set(["/usr/local/bin/magpie", "/usr/bin/magpie"])
+  assert.equal(
+    findMagpieBin({ os: "linux", env: {}, home: "/h", exists: (p) => both.has(p) }),
+    "/usr/local/bin/magpie",
+  )
+})
+
+test("the read-back checks the provider it wrote to, not any provider holding the key", async () => {
+  // --to-preset 写的是 --from 指名的那个 provider。回读如果按默认规则找
+  // （任意 ModelScope 预设），另一个恰好拿着同一把 key 的 provider 就能让
+  // 一次没落地的写入报「✓ 完成」——用户以为同步好了，实际没换。
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-rbid-"))
+  try {
+    writeFileSync(
+      join(dir, "providers.json"),
+      JSON.stringify({ providers: [presetOf(A, "alt"), presetOf(B, "other")] }),
+    )
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-preset", "--from", "alt", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      // 写入没落地：magpie 退出码 0 却没动手，alt 上还是 A
+      spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+    })
+    assert.equal(code, 1, "the write did not land, and the tool must say so")
+    assert.match(out.join("\n"), /回读没找到目标 key/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the config files are read through the exists main was given", async () => {
+  // exists 是 main 的注入点：一个 stat 得到、读却读不动的文件（正在被写、
+  // 权限被收紧）走的正是这条缝。它决定「有但读不出来」。丢了这个实参，
+  // 同一个文件成了「没配置」——把人引去新建一个已经存在的 provider。
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-seam1-"))
+  try {
+    // providers.json 不在盘上，exists 说在：读不动
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      exists: (p) => p === join(dir, "providers.json") || p === join(dir, "plugin-auth.json"),
+      spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+    })
+    assert.equal(code, 1)
+    assert.match(out.join("\n"), /providers\.json 存在但读不出来/, out.join("\n"))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  const dir2 = mkdtempSync(join(tmpdir(), "msmoli-seam2-"))
+  try {
+    // providers.json 在，plugin-auth.json 不在盘上而 exists 说在
+    writeFileSync(join(dir2, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir2, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      exists: (p) => p === join(dir2, "providers.json") || p === join(dir2, "plugin-auth.json"),
+      spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+    })
+    assert.equal(code, 1)
+    assert.match(out.join("\n"), /plugin-auth\.json 存在但读不出来/, out.join("\n"))
+  } finally {
+    rmSync(dir2, { recursive: true, force: true })
+  }
+})
+
+test("the read-back asks the same exists the pre-check did", async () => {
+  // 写入之后 magpie 可能正在重写文件：exists 说在、读却读不动。回读这时要
+  // 说「写入已执行，但没法确认」，不是「没找到令牌」——后者会把人送去查
+  // magpie 为什么没运行，而写入其实已经落地。丢了这个实参，回读改用
+  // existsSync，两句就换了个说法。
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-seam3-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      exists: (p) => p === join(dir, "providers.json") || p === join(dir, "plugin-auth.json"),
+      spawn: (_cmd, argv) => {
+        // login 之后文件短暂不在盘上；exists 仍然答「在」，读就是读不动
+        if (argv.includes("login")) rmSync(join(dir, "plugin-auth.json"))
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1)
+    assert.match(out.join("\n"), /回读时 .*plugin-auth\.json 读不出来，无法确认/, out.join("\n"))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  const dir2 = mkdtempSync(join(tmpdir(), "msmoli-seam4-"))
+  try {
+    writeFileSync(join(dir2, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir2, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir2, "--to-preset", "--force", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      exists: (p) => p === join(dir2, "providers.json") || p === join(dir2, "plugin-auth.json"),
+      spawn: () => {
+        rmSync(join(dir2, "providers.json"))
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1)
+    assert.match(out.join("\n"), /回读时 .*providers\.json 读不出来，无法确认/, out.join("\n"))
+  } finally {
+    rmSync(dir2, { recursive: true, force: true })
+  }
+})

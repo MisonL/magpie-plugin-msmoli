@@ -5208,3 +5208,228 @@ test("a finished request leaves no timer armed behind it", async (t) => {
     globalThis.clearTimeout = realClear
   }
 })
+
+// cnDay is the Beijing date i days after the one the suite loaded on. The
+// check-in target is a hash of the day, so a test about the day has to walk
+// real dates rather than assume one.
+const cnDay = (i) =>
+  new Date(Date.parse(`${today}T00:00:00+08:00`) + i * 86400e3 + 8 * 3600e3).toISOString().slice(0, 10)
+
+test("the request timer is armed with the request's whole budget", async (t) => {
+  // json() 给整个请求（fetch 与读完 body）装上限时：setTimeout(…, budget)。
+  // 漏掉 budget 这个实参，延时就成了 0——每个请求都在发出去的同时被自己掐断，
+  // 卡片写「请求超时（1 秒）」。探针记下延时，并用 0 毫秒把它真触发一次，
+  // 这样不用等满 8 秒，超时那条文案也照样走到。
+  const realSet = globalThis.setTimeout
+  const realClear = globalThis.clearTimeout
+  const realFetch = globalThis.fetch
+  const delays = []
+  globalThis.setTimeout = (fn, ms, ...a) => {
+    delays.push(ms)
+    return realSet(fn, 0, ...a)
+  }
+  try {
+    // 自检：探针看不见计时器的运行时明说跳过，静默 return 在 CI 里和通过一样
+    let seen = false
+    const probe = setTimeout(() => {
+      seen = true
+    }, 60000)
+    await new Promise((r) => realSet(r, 5))
+    realClear(probe)
+    if (!seen) return t.skip("this runtime's timers are not visible to the spy")
+    delays.length = 0
+
+    // a request that never answers on its own: only the timer ends it, the
+    // way a real socket does when the signal aborts
+    globalThis.fetch = (url, init) =>
+      new Promise((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal.reason), { once: true })
+      })
+    const r = await withWindow(["08:30", "10:00"], `${today} 10:00:00`, () =>
+      auth.checkin(async () => ({ type: "api", key: "ms-armedbudget-0000-0000-0000-0001" })),
+    )
+    assert.equal(r.outcome, "failed", "the request never answered")
+    assert.match(r.message, /请求超时（8 秒）/, `the timeout says the budget it used: ${r.message}`)
+    assert.deepEqual(delays, [8000], "the timer is armed with the budget, not with no delay at all")
+  } finally {
+    globalThis.setTimeout = realSet
+    globalThis.clearTimeout = realClear
+    globalThis.fetch = realFetch
+  }
+})
+
+test("a control character in a name becomes a space, not the word undefined", async () => {
+  // text() 把控制字符替换成一个空格。漏掉替换串，String.replace 会把替换结果
+  // 写成字面量 "undefined"——昵称原样写回成「Miundefinedson」，卡片和
+  // plugin-auth.json 里都是这个。
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-cc-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mi\u0007son" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: "ms-ctrlchar-0000-0000-0000-000001" }))
+        assert.equal(writes.length, 1, "the name is still a name worth writing back")
+        assert.equal(writes[0].body.accountId, "Mi son")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a server's own words are cut at the card's 120 characters", async () => {
+  // saidOf 把服务端的 message 截到 120：卡片那一行放不下更多，而 magpie 原样
+  // 渲染 message。丢掉这个实参，截断点退回 cardText 的默认 200，一段两百字的
+  // 代理错误页会整段挤进卡片。
+  const long = "x".repeat(200)
+  const r = await withFetch(
+    { "/openapi/v1/magicubes/transactions?page=1&page_size=50": { status: 500, body: { Message: long } } },
+    async () => auth.checkin(async () => ({ type: "api", key: "ms-longmsg-0000-0000-0000-0000001" })),
+  )
+  assert.equal(r.outcome, "failed")
+  assert.ok(r.message.includes("x".repeat(120)), "the server's words survive up to 120 characters")
+  assert.ok(!r.message.includes("x".repeat(121)), `the line stops at 120, not at the next cap: ${r.message.length}`)
+})
+
+test("the day's claim target moves with the date", async () => {
+  // plan() 的 target 是「日期 + 账号」的哈希：同一天同一个账号固定（半小时
+  // 一次的追问要对得上），不同天不同。丢掉 day 这个实参，哈希里就只剩账号，
+  // 一年到头都在同一分钟领取。
+  const seen = new Set()
+  for (let i = 0; i < 12; i++) {
+    await withWindow(["08:30", "10:00"], `${cnDay(i)} 00:00:00`, async () => {
+      seen.add((await targetOf(auth.checkin)).text)
+    })
+  }
+  assert.ok(seen.size > 1, `twelve days, one target minute: ${[...seen].join(", ")}`)
+})
+
+test("a nickname longer than 40 is cut before it is written back", async () => {
+  // 写回的是 magpie 卡片上的账号名：一行放不下四十个字符以外的部分。丢掉
+  // 这个实参，截断点退回 text 的默认 120，一个长昵称会把卡片撑成两行。
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nm40-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "n".repeat(60) } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: "ms-nick40-0000-0000-0000-00000001" }))
+        assert.equal(writes.length, 1)
+        assert.equal(writes[0].body.accountId, "n".repeat(40))
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a ledger title in the day's list is cut at 40 characters", async () => {
+  // 两条路径都把账本标题放进卡片：今天已经领过时列的是触发前那一页
+  // （beforeDaily），刚领到时列的是账本长出来的那几行（gained）。两处的
+  // 标题都占卡片一行，都截到 40；截断点退回 200，长标题会把金额挤出去。
+  const claimed = await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records: [day({ title: "t".repeat(60), total_amount: 200 })] } },
+      },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+    },
+    async () => auth.checkin(async () => ({ type: "api", key: "ms-which40a-0000-0000-0000-00001" })),
+  )
+  assert.equal(claimed.outcome, "done", `the day was already claimed: ${claimed.message}`)
+  assert.ok(claimed.message.includes("t".repeat(40)), "the title survives up to 40 characters")
+  assert.ok(!claimed.message.includes("t".repeat(41)), `the title stops at 40: ${claimed.message.length}`)
+
+  const realFetch = globalThis.fetch
+  let reads = 0
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname
+    if (path !== "/openapi/v1/magicubes/transactions") {
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "Mison" } } })
+    }
+    reads += 1
+    // 第一次是触发前的账本（空的），第三次是到账后的
+    const records =
+      reads === 1 ? [] : [day({ rule_key: "aliyun_bindlogin", title: "u".repeat(60), total_amount: 5 })]
+    return reply({ body: { success: true, data: { records } } })
+  }
+  try {
+    const gained = await auth.checkin(async () => ({ type: "api", key: "ms-which40b-0000-0000-0000-00001" }))
+    assert.equal(gained.outcome, "claimed", `the grant landed: ${gained.message}`)
+    assert.ok(gained.message.includes("u".repeat(40)), "the title survives up to 40 characters")
+    assert.ok(!gained.message.includes("u".repeat(41)), `the title stops at 40: ${gained.message.length}`)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("once the budget is spent, the re-read is not sent", async () => {
+  // 每次请求吃掉 13 秒，25 秒的预算在第二次之后就用完了：第三次账本读取
+  // （到账确认）不该再发出去。丢掉 deadline 这个实参，它按 Infinity 算，
+  // 预算用完也照样发——钩子超时之后还挂着一个请求。
+  const realNow = Date.now
+  const realFetch = globalThis.fetch
+  let at = Date.parse(`${today}T10:00:00+08:00`)
+  let calls = 0
+  Date.now = () => at
+  globalThis.fetch = async (url) => {
+    calls += 1
+    at += 13000
+    const path = new URL(url).pathname
+    if (path === "/api/v1/users/login/info") {
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "Mison" } } })
+    }
+    return reply({ body: { success: true, data: { records: [] } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-budget-0000-0000-0000-000000001" }))
+    assert.equal(r.outcome, "failed")
+    assert.match(r.message, /预算已用完/, `the answer names the budget, not the network: ${r.message}`)
+    assert.equal(calls, 2, "the third read is past the deadline and must not be sent")
+  } finally {
+    Date.now = realNow
+    globalThis.fetch = realFetch
+  }
+})
+
+test("the usage card's target moves with the date", async () => {
+  // 用量卡片上「· HH:MM 领取」和签到卡是同一个 plan()。丢掉 day，这一天
+  // 里没领到的账号会在卡片上永远写着同一个时刻。
+  const seen = new Set()
+  for (let i = 0; i < 12; i++) {
+    await withWindow(["08:30", "10:00"], `${cnDay(i)} 00:00:00`, async () => {
+      await withFetch(
+        {
+          "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 0 } } },
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+        },
+        async () => {
+          const u = await auth.usage(async () => ({ type: "api", key: "ms-hintday" }))
+          const m = /· (\d\d:\d\d) 领取/.exec(u.windows[0].display)
+          assert.ok(m, `the hint is on the card: ${u.windows[0].display}`)
+          seen.add(m[1])
+        },
+      )
+    })
+  }
+  assert.ok(seen.size > 1, `twelve days, one target minute: ${[...seen].join(", ")}`)
+})
