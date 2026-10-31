@@ -520,6 +520,43 @@ function aliasOf(dir, label) {
 const maskToken = (token) =>
   typeof token === "string" && token.length >= 12 ? `${token.slice(0, 4)}…${token.slice(-4)}` : "…"
 
+// maskEchoes masks a piece of the token wherever the text carries one. The
+// exact split in cardText catches a byte-for-byte echo; a server (or a proxy
+// in front of it) that logged only the front of the session, or framed it
+// with a prefix, is no longer equal to the key and split() walked past it. A
+// piece is a run of the text that is a contiguous substring of the token, at
+// least MIN_ECHO characters long — below that a coincidence is likelier than
+// an echo, and a two-character nickname that sits inside a key ("ms") is not
+// one. maskToken is length-preserving in neither direction here, which is
+// fine: what it leaves behind (at most nine characters) is under MIN_ECHO, so
+// the scan does not match its own output.
+const MIN_ECHO = 12
+const maskEchoes = (s, token) => {
+  if (typeof token !== "string" || token.length < MIN_ECHO) return s
+  let out = ""
+  for (let i = 0; i < s.length; ) {
+    let end = i
+    while (end < s.length && token.includes(s.slice(i, end + 1))) end++
+    if (end - i >= MIN_ECHO) {
+      out += maskToken(token)
+      i = end
+    } else {
+      out += s[i]
+      i++
+    }
+  }
+  return out
+}
+
+// tokenShaped is a ModelScope key seen in someone else's text. Every key
+// ModelScope issues starts with "ms-", and tokenOf only lets visible ASCII
+// out (SENDABLE), so the run it matches is the same character set — a key
+// with an underscore in it goes out, and a pattern that stopped at
+// [A-Za-z0-9-] would leave that one on the card whole. It is the shape, not
+// the key, that is known here; the length floor keeps a short "ms-" word
+// ("ms-dos") out of it.
+const tokenShaped = /ms-[\x21-\x7e]{11,}/g
+
 // cardText is what a host error becomes before it reaches the account card or
 // the terminal. The host's message is not our text: magpie's own CLI scrubs
 // tokens out of "no key ms-… for provider" for the same reason, and a message
@@ -532,19 +569,24 @@ const maskToken = (token) =>
 // check-in puts the login answer's message and the ledger's titles straight
 // into its line, and a server (or a proxy in front of it) that echoes the
 // session back must not put it on the card whole.
+//
+// Three passes, in this order. The key itself, whatever its shape or length:
+// a split on the exact string masks it whole. Then a piece of it (maskEchoes)
+// for the echo that is no longer equal to it — cut short, or framed. Then,
+// when there is no key in hand, whatever is merely token-shaped: that last
+// pass is all hostText has, and all a message from magpie carries.
 const cardText = (value, token, max = 200) => {
-  const masked = typeof token === "string" && token ? String(value ?? "").split(token).join(maskToken(token)) : String(value ?? "")
-  return text(masked, max)
+  let s = String(value ?? "")
+  if (typeof token === "string" && token) s = s.split(token).join(maskToken(token))
+  return text(maskEchoes(s, token).replace(tokenShaped, (m) => maskToken(m)), max)
 }
 
 // hostText is cardText for the two exits where there is no token to split on:
 // getAuth itself failed, so the plugin never got as far as reading the key.
 // The host's message can still carry one — magpie's own wording for a missing
-// key is "no key <key> for provider" — and these two lines are the only ones
-// that would print it whole. ModelScope's keys all start with "ms-", so a
-// token-shaped run is masked wherever it appears.
-const tokenShaped = /ms-[A-Za-z0-9][A-Za-z0-9-]{10,}/g
-const hostText = (value) => cardText(String(value ?? "").replace(tokenShaped, (m) => maskToken(m)), "")
+// key is "no key <key> for provider" — and these two lines would print it
+// whole. With no key in hand the shape is all there is, which cardText does.
+const hostText = (value) => cardText(value, "")
 
 // unusableName is a nickname that must not be written back: empty, the token
 // itself or a piece of it (the server would be handed it twice), or a key the
@@ -561,7 +603,12 @@ const unusableName = (name, token) =>
   ["__proto__", "constructor", "prototype"].includes(name)
 
 async function rememberAccountName(client, token, name, auth, dir) {
-  if (!name || !client?.auth?.set) return
+  // "can write" is a function, not a truthy value: `{ auth: { set: 1 } }` is a
+  // client that cannot write, and `!client?.auth?.set` let it through to call
+  // a number — the TypeError is caught below, but it logs "account name not
+  // written back" on every check-in, a failure report for a client that never
+  // had a chance to succeed.
+  if (!name || typeof client?.auth?.set !== "function") return
   if (named.has(token) || auth?.accountId === name) return
   // an account the user has named keeps that name: writing the nickname over
   // it would re-key their alias to a label the account no longer has. A
@@ -671,15 +718,31 @@ const amountOf = (row) => {
   const kind = typeof raw
   if (kind !== "number" && kind !== "string") throw new Error("账单格式不认识：total_amount 不是数字")
   const n = Number(raw)
-  if (!Number.isFinite(n)) throw new Error("账单格式不认识：total_amount 不是数字")
+  // readable, not just isFinite: a huge finite value ("1e307") survives isFinite
+  // and only blows up at the card, where yin's ×100 overflows to Infinity — so
+  // "Infinity 魔粒" would be printed for a body we cannot actually read. The
+  // same door the balance read and yin itself use.
+  if (!readable(n)) throw new Error("账单格式不认识：total_amount 不是数字")
   return n
 }
+
+// readable says a value is a number we can put on a card. Finite is not enough:
+// yin multiplies by 100 to round, and a finite value past ~1.8e306 overflows
+// that to Infinity — finite in, "Infinity" out. The three places a server
+// number enters the card (a ledger amount, the balance, a summed amount) all
+// pass through it, so the rule lives once.
+const readable = (n) => Number.isFinite(n) && Number.isFinite(n * 100)
 
 // yin is a credit amount as a card says it: at most two decimals, with a
 // trailing 0.30 written as 0.3. The tiers are 0.5/1/2, but a grant or a spend
 // summed in binary floating point comes out as 0.30000000000000004, and that
-// goes straight into the card and into the division below.
-const yin = (n) => Math.round(n * 100) / 100
+// goes straight into the card and into the division below. Its own readable()
+// check catches the one path its callers cannot: a sum of many rows, each of
+// which was readable on its own but whose total crosses the ×100 overflow.
+const yin = (n) => {
+  if (!readable(n)) throw new Error("账单格式不认识：金额超出可显示范围")
+  return Math.round(n * 100) / 100
+}
 
 const sumOf = (records) => yin(records.reduce((n, r) => n + amountOf(r), 0))
 
@@ -781,12 +844,20 @@ export async function MsmoliPlugin(input) {
             return m
           }
           const beforeByRule = byRule(beforeDaily)
+          // The name a rule is shown by: the first row of that key that carries
+          // one. Rows aggregate per (day, type, rule_key, model_tier), so a key
+          // can have several rows and the first can be a tier whose title the
+          // server left blank — taking rows[0]'s title alone would drop the name
+          // from a grant that has one on another row, and the card would read
+          // "+50" with nothing in front of it.
+          const titleOf = (rows, key) =>
+            rows.find((r) => r?.rule_key === key && typeof r.title === "string" && r.title.trim())?.title
           const grew = (rows) => {
             const after = byRule(rows)
             const out = []
             for (const [key, sum] of after) {
               const gain = yin(sum - (beforeByRule.get(key) ?? 0))
-              if (gain > 0) out.push({ key, gain, title: rows.find((r) => r?.rule_key === key)?.title })
+              if (gain > 0) out.push({ key, gain, title: titleOf(rows, key) })
             }
             return out
           }
@@ -828,7 +899,15 @@ export async function MsmoliPlugin(input) {
             const grew1 = grew(rows)
             if (!grew1.length) return null
             const credit = yin(grew1.reduce((n, g) => n + g.gain, 0))
-            const which = grew1.map((g) => `${cardText(g.title, token, 40)} +${g.gain}`).join("，")
+            // A key with no name on any of its rows is shown by its amount
+            // alone; joining a blank title would put "+50" with a leading space
+            // where the name should be.
+            const which = grew1
+              .map((g) => {
+                const name = cardText(g.title, token, 40)
+                return name ? `${name} +${g.gain}` : `+${g.gain}`
+              })
+              .join("，")
             return { credit, which }
           }
 
@@ -890,7 +969,7 @@ export async function MsmoliPlugin(input) {
           const kind = typeof rawAvailable
           if (kind !== "number" && kind !== "string") throw new Error("余额查询失败：available_balance 不是数字")
           const availableN = Number(rawAvailable)
-          if (!Number.isFinite(availableN)) throw new Error("余额查询失败：available_balance 不是数字")
+          if (!readable(availableN)) throw new Error("余额查询失败：available_balance 不是数字")
           // a balance is not a debt: the server's 冲正 direction can put it
           // below zero, and "-5 魔粒可用" is not a thing the card can show
           const available = Math.max(0, yin(availableN))
@@ -949,11 +1028,20 @@ export async function MsmoliPlugin(input) {
           // 加上还剩的。分母为 0 时沿用旧口径：余额也空了才算用尽。
           // 否则卡片会出现 used=0、今日用 348.5、领 0 的组合，进度条说没动，
           // 文字说花掉了一堆。
+          //
+          // 记账里两个数都过了 readable()，比值却可能大到 ×10000 溢出成
+          // Infinity；宿主对非有限的 used 读作 0（host.js 的 num 只认有限数），
+          // 于是「几乎全用光」被画成没动过。算不出百分比就交给宿主当「没说」
+          // （used 省略 = null），文字那行仍然写着真实的数量。
+          const pct = (n, d) => {
+            const v = Math.round((n / d) * 10000) / 100
+            return Number.isFinite(v) ? v : null
+          }
           const used =
             earnedToday > 0
-              ? Math.round((usedToday / earnedToday) * 10000) / 100
+              ? pct(usedToday, earnedToday)
               : usedToday + available > 0
-                ? Math.round((usedToday / (usedToday + available)) * 10000) / 100
+                ? pct(usedToday, usedToday + available)
                 : 100
 
           // 今天还没领到时，把时段里的目标时刻写在卡片上，别让「领 0」

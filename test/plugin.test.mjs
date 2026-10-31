@@ -4452,6 +4452,20 @@ test("a data object without a records key is an empty ledger, not an error", asy
     async () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
   )
   assert.equal(r.outcome, "inactive", "the day is answered on what the empty ledger says")
+  // records that is there and null is the same mercy: the null half of the
+  // check, dropped, turns it into "records 不是列表" — a failure over a shape
+  // that carries exactly as much as a missing key does.
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: null } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.error, undefined, "a null records is an empty ledger too")
+      assert.match(u.windows[0].display, /今日用 0 \/ 领 0/)
+    },
+  )
 })
 
 // ---- 第二十三轮：字符串字面量的宽扫（前六轮扫的是布尔、比较与整数）留下的
@@ -4826,13 +4840,17 @@ test("a host with no auth.set still gets its check-in, with the name simply not 
   // `!client?.auth?.set` is the guard for a client that cannot write: the
   // host passes a client, not necessarily one with every method. Read as
   // `client?.auth.set`, a client without auth throws on `.set`, and the
-  // check-in reports a TypeError instead of claiming.
+  // check-in reports a TypeError instead of claiming. The fixtures that pin
+  // the guard's own edges are `{ auth: {} }` (auth there, set not) and
+  // `{ auth: { set: 1 } }` (set not callable): both must count as "cannot
+  // write" and be walked past — read as `!client?.auth`, the first one calls
+  // a non-function and the check-in fails.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-noset-"))
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
   try {
-    for (const client of [{}, { app: {} }, { app: { log: () => {} } }]) {
+    for (const client of [{}, { app: {} }, { app: { log: () => {} } }, { auth: {} }, { auth: { set: 1 } }]) {
       const p = await MsmoliPlugin({ directory: dir, client })
       await withFetch(
         {
@@ -4844,6 +4862,23 @@ test("a host with no auth.set still gets its check-in, with the name simply not 
           assert.equal(c.outcome, "done", `a client without auth.set is not a failed check-in: ${c.message}`)
         },
       )
+      // and no doomed write is attempted: the guard returns before the call,
+      // so the catch's warn log never fires. Dropped, every check-in on such a
+      // host writes a spurious "account name not written back: … is not a
+      // function" into magpie's log — a failure report for a client that
+      // simply was never able to write.
+      const logs = []
+      const withLog = await MsmoliPlugin({ directory: dir, client: { ...client, app: { log: (o) => logs.push(o) } } })
+      await withFetch(
+        {
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "小红" } } },
+        },
+        async () => {
+          await withLog.auth.checkin(async () => ({ type: "api", key: "ms-noset-0000-0000-000000000009" }))
+        },
+      )
+      assert.equal(logs.length, 0, `no write was attempted, so nothing may be logged: ${JSON.stringify(logs)}`)
     }
   } finally {
     if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -5769,4 +5804,182 @@ test("the plugin builds without an input object", async () => {
     assert.equal(typeof hooks.auth.checkin, "function", `input=${JSON.stringify(arg)}`)
     assert.equal(hooks.auth.provider, "msmoli")
   }
+})
+
+// ── 第三十轮：全维度审查后的修复批次（有限但巨大的数、被截断的回显、
+// 同 key 多行的标题、客户端能否写入的判断）────────────────────────────
+
+test("a finite amount too large to render is refused, not turned into Infinity", async () => {
+  // Number.isFinite 放过了 1e307：它是有限数，但 yin 的 ×100 溢出成 Infinity，
+  // 卡片会写「Infinity 魔粒可用」——一个读不懂的响应被画成一个确定的数。
+  // 「读不懂就失败」这条规则要覆盖「有限但超出可显示范围」。
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: "1e307" } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-huge-bal" }))
+      assert.match(u.error ?? "", /不是数字|没有 available_balance/, `a finite overflow is still unreadable: ${u.error}`)
+      assert.ok(!u.windows, "no card is built from a balance we cannot render")
+    },
+  )
+  // the same door over a ledger row
+  const row = day({ total_amount: "1e307" })
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [row] } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-huge-row" }))
+      assert.match(u.error ?? "", /total_amount 不是数字/)
+      assert.ok(!u.windows)
+    },
+  )
+  // and the check-in, whose credit is summed the same way
+  const r = await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [row] } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+    },
+    async () => auth.checkin(async () => ({ type: "api", key: "ms-huge-chk" })),
+  )
+  assert.equal(r.outcome, "failed", `an unreadable amount must not read as a claim: ${r.message}`)
+  assert.match(r.message, /total_amount 不是数字/)
+})
+
+test("a sum that overflows only after adding is refused too", async () => {
+  // 每一行单独看都读得懂（1e306 乘 100 仍是有限数），两行加起来越过阈值，
+  // yin 在求和那一步溢出。守卫在 amountOf（单行）之外还要在 yin（求和）上。
+  const rows = [
+    day({ total_amount: 1e306 }),
+    day({ rule_key: "aliyun_bindlogin", title: "绑定", total_amount: 1e306 }),
+  ]
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 0 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: rows } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-sum-over" }))
+      assert.ok(u.error, `a sum we cannot render is a failure: ${JSON.stringify(u.windows)}`)
+      assert.ok(!u.windows)
+    },
+  )
+})
+
+test("a percentage that overflows is left unsaid, not shown as not-started", async () => {
+  // 两个数量都读得懂，比值却可能大到 ×10000 溢出。宿主对非有限的 used 读作 0
+  // （num 只认有限数），于是「几乎全用光」被画成没动过。算不出就省略 used
+  // （宿主读作「没说」），文字那行仍写真实数量。
+  const rows = [day({ total_amount: 0.5 }), spend(1e305)]
+  const u = await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 0 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: rows } } },
+    },
+    async () => auth.usage(async () => ({ type: "api", key: "ms-pct-over" })),
+  )
+  assert.equal(u.error, undefined, "the numbers themselves are readable")
+  const w = u.windows[0]
+  assert.equal(w.used, null, `an unrenderable share is omitted, not 0: ${w.used}`)
+  assert.match(w.display, /今日用 1e\+305 \/ 领 0\.5/, "the amounts are still shown")
+})
+
+test("a rule whose first row has no title is still named by a later row", async () => {
+  // 账本按 (day, type, rule_key, model_tier) 聚合，一个 key 可以有多行。取第一
+  // 行的 title，若那一行恰好是服务端没写标题的那条，领取的信息就写成「+50」，
+  // 名字整个丢掉——另一行明明带着名字。
+  const gained = [
+    day({ rule_key: "aliyun_bindlogin", title: "", total_amount: 50 }),
+    day({ rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50 }),
+  ]
+  let reads = 0
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    const p = u.pathname + u.search
+    if (p === "/api/v1/users/login/info") return reply({ body: { Code: 200, Success: true, Data: { NickName: "Mison" } } })
+    reads += 1
+    return reply({ body: { success: true, data: { records: reads === 1 ? [] : gained } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-title-later" }))
+    assert.equal(r.outcome, "claimed")
+    assert.match(r.message, /绑定阿里云账号/, `the name must come from the row that has one: ${r.message}`)
+    assert.doesNotMatch(r.message, /^领取 \d+ 魔粒：\+/, `no nameless entry: ${r.message}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a rule with no title on any row is shown by its amount alone", async () => {
+  // 所有行都没有名字时，信息写成「+100」而不是「 +100」——前面不留一个空位。
+  const gained = [day({ rule_key: "aliyun_bindlogin", title: "", total_amount: 100 })]
+  let reads = 0
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const p = new URL(url).pathname + new URL(url).search
+    if (p === "/api/v1/users/login/info") return reply({ body: { Code: 200, Success: true, Data: { NickName: "Mison" } } })
+    reads += 1
+    return reply({ body: { success: true, data: { records: reads === 1 ? [] : gained } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-title-none" }))
+    assert.equal(r.outcome, "claimed")
+    assert.match(r.message, /领取 100 魔粒：\+100/, `no leading space where the name would be: ${JSON.stringify(r.message)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a fragment of the token echoed back is masked, not just the whole one", async () => {
+  // 服务端（或它前面的代理）回显会话时可能只登出前半段、中段或带前缀的片段，
+  // 那不再等于令牌本身，split() 走过去了。cardText 的 maskEchoes 按「连续子串、
+  // 长度 ≥ MIN_ECHO」把片段也掩掉。
+  const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  for (const [what, frag] of [
+    ["中段", token.slice(6, 30)],
+    ["尾段", token.slice(-16)],
+    ["前段", token.slice(0, 18)],
+  ]) {
+    const r = await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+        "/api/v1/users/login/info": { body: { success: false, message: `bad session ${frag}, sign in again` } },
+      },
+      async () => auth.checkin(async () => ({ type: "api", key: token })),
+    )
+    assert.equal(r.outcome, "failed")
+    assert.ok(!r.message.includes(frag), `${what}的片段回到了卡片上: ${r.message}`)
+    assert.match(r.message, /ms-a…5555/, `${what}应被整串掩码替代: ${r.message}`)
+  }
+  // 账本标题那条路一样
+  const frag = token.slice(6, 30)
+  const row = { gmt_created: today, type: "EARN", rule_key: "daily_active", title: frag, total_amount: 200 }
+  const r = await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [row] } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+    },
+    async () => auth.checkin(async () => ({ type: "api", key: token })),
+  )
+  assert.ok(!r.message.includes(frag), `标题里的片段回到了卡片上: ${r.message}`)
+})
+
+test("a token-shaped run with a character outside the id alphabet is masked", async () => {
+  // 老写法 /ms-[A-Za-z0-9][A-Za-z0-9-]{10,}/ 漏掉下划线、点、波浪号这类字符，
+  // 而插件的 SENDABLE 允许它们（可打印 ASCII 都行）。一个真的带下划线的令牌
+  // 被另一处回显时，形状规则认不出来、原样放行。字符集要与 SENDABLE 对齐。
+  const foreign = "ms-other_key-1234-5678-9012"
+  const r = await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      "/api/v1/users/login/info": { body: { success: false, message: `no key ${foreign} for provider` } },
+    },
+    async () => auth.checkin(async () => ({ type: "api", key: "ms-session-0000-0000-0000-0000000001" })),
+  )
+  assert.ok(!r.message.includes(foreign), `带下划线的令牌形状没被认出来: ${r.message}`)
+  assert.match(r.message, /ms-o…9012/, `它该按形状被掩码: ${r.message}`)
 })

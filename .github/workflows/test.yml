@@ -79,3 +79,21 @@ jobs:
         with:
           node-version: "24"
       - run: node --import ./tools/ticking-clock.mjs --test
+
+  # The check-in target is a hash of the day, and a fixture that pins a date
+  # passes today and expires later — a suite that goes green on its own runs
+  # then fails, or worse, silently stops exercising the branch it was written
+  # for. MSMOLI_FAKE_NOW moves the whole clock a fixed distance, so a fixture
+  # tied to the calendar day it runs breaks here. The offset is picked to land
+  # in a different year and a different weekday from any plausible run.
+  shifted-clock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      - run: node --test
+        env:
+          MSMOLI_FAKE_NOW: "1893456000000"
+

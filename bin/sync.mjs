@@ -338,7 +338,7 @@ export function presetCandidates(providers, from = "") {
 // pasted into the wrong position (`--from ms-…`, or as a bare argument) would
 // otherwise be printed whole, against the one promise this tool makes about a
 // token. It is the same mask a planned command line uses.
-const tokenShaped = /ms-[A-Za-z0-9][A-Za-z0-9-]{10,}/g
+const tokenShaped = /ms-[\x21-\x7e]{11,}/g
 const show = (s) => String(s ?? "").replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(tokenShaped, (m) => mask(m))
 
 // SENDABLE is the plugin's own test (index.mjs's tokenOf): a key with
@@ -367,11 +367,16 @@ const oursOf = (p) => p?.id === PRESET || p?.preset === PRESET || hostOf(p?.chat
 const keyedOf = (p) => typeof p?.key === "string" && Boolean(p.key.trim())
 
 // 插件侧的账号：主键 msmoli 与 msmoli#xxxxxx，按令牌区分。
+//
+// 令牌只从 type === "api" 的条目上读——和插件自己（index.mjs 的 rawKey）同一条
+// 规则。少这一条时，一份把 key 放错位置或类型写歪的 plugin-auth.json，会让本
+// 工具说「插件已用同一把令牌、无需操作」，而插件读不到令牌、卡片永远显示未登录：
+// 一个静默的错误状态，比报错更难发现。
 export function pluginAccounts(auth) {
   const obj = auth && typeof auth === "object" && !Array.isArray(auth) ? auth : {}
   return Object.entries(obj)
     .filter(([k]) => k === ID || k.startsWith(`${ID}#`))
-    .map(([name, v]) => ({ name, token: typeof v?.key === "string" ? v.key.trim() : "" }))
+    .map(([name, v]) => ({ name, token: v?.type === "api" && typeof v.key === "string" ? v.key.trim() : "" }))
 }
 
 // { action: "noop" | "run" | "refuse", lines: string[], cmds: [{ argv, stdin? }] }
@@ -400,6 +405,15 @@ export function planToPlugin({ preset, accounts, force }) {
   if (accounts.length === 0) {
     lines.push(`→ 将把内置预设（${show(preset.id)}）的令牌登录给插件：magpie plugin login ${ID}（令牌走 stdin）`)
     return { action: "run", lines, cmds: [{ argv: ["plugin", "login", ID], stdin: `${preset.key}\n`, secret: preset.key }] }
+  }
+  // Every entry is there but none carries a token the plugin itself would read
+  // (a msmoli entry of the wrong type, or a key that is not a string). "两边
+  // 令牌不同" is a claim we cannot make here — we never read the plugin's side —
+  // and --force would not help: the file is the problem, not the choice.
+  if (accounts.every((a) => !a.token)) {
+    lines.push(`✗ 插件里 ${ID} 的条目读不出令牌（type 不是 api，或 key 不是字符串）。`)
+    lines.push(`  magpie 也不会把它算作登录。${show(accounts[0].name)} 那个条目请先删掉或重新登录，再重跑。`)
+    return { action: "refuse", lines, cmds: [] }
   }
   lines.push(`  插件现有：${accounts.map((a) => `${show(a.name)}（${mask(a.token)}）`).join("、")}`)
   lines.push(`  内置预设：${show(preset.id)}（${mask(preset.key)}）`)
@@ -498,15 +512,53 @@ function hidden(argv, secret, log) {
   log(`$ magpie ${shown.join(" ")}`)
 }
 
+// maskEchoes masks a piece of a secret wherever the text carries one. A split
+// on the exact string catches a byte-for-byte echo; a child (or the vendor
+// behind it) that printed only the front of a token, or framed it, is no
+// longer equal to the secret and split() walked past it. A piece is a run of
+// the text that is a contiguous substring of the secret, at least MIN_ECHO
+// characters long — below that a coincidence is likelier than an echo. It is
+// the same rule index.mjs's cardText carries, and the same reason.
+const MIN_ECHO = 12
+function maskEchoes(s, secret) {
+  if (typeof secret !== "string" || secret.length < MIN_ECHO) return s
+  let out = ""
+  for (let i = 0; i < s.length; ) {
+    let end = i
+    while (end < s.length && secret.includes(s.slice(i, end + 1))) end++
+    if (end - i >= MIN_ECHO) {
+      out += mask(secret)
+      i = end
+    } else {
+      out += s[i]
+      i++
+    }
+  }
+  return out
+}
+
 // scrub hides a token in text that came from a child process. Both paths use
 // it: the answer printed on success, and the failure printed in the error —
 // the failing path is the one most likely to carry the command back verbatim
 // ("no key ms-… for provider"), and hiding it only on success was the gap.
+//
+// It ends in show(), which is the same door the command line goes through:
+// a split only hides the secrets this run knows about, and magpie's output
+// can carry a ms- token this tool never held (another provider's key in the
+// message, a token the user pasted into the wrong field). show() masks the
+// shape and strips control characters, so a forged line or an escape sequence
+// in the child's output cannot reach the terminal either. scrub() alone, with
+// only the known secrets, was the leak the failing path had.
 function scrub(out, ...secrets) {
+  let s = out
   for (const secret of secrets) {
-    if (secret) out = out.split(secret).join(mask(secret))
+    if (secret) s = maskEchoes(s.split(secret).join(mask(secret)), secret)
   }
-  return out
+  // show() per line, not over the whole text: its control-character pass turns
+  // "\n" into a space too, and both callers split on the line breaks to echo
+  // (or quote) the child's answer. A token never spans a line, so the shape
+  // pass loses nothing by running per line either.
+  return s.replace(/\r\n?/g, "\n").split("\n").map(show).join("\n")
 }
 
 function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {

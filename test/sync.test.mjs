@@ -2820,7 +2820,7 @@ test("a providers list with a null entry is read past, not tripped over", async 
   // and the tool dies with a stack trace where it had an answer to give.
   assert.deepEqual(presetCandidates([null, presetOf(A)]), [presetOf(A)])
   assert.deepEqual(presetCandidates([null, presetOf(A)], "modelscope"), [presetOf(A)])
-  assert.deepEqual(pluginAccounts({ msmoli: null, "msmoli#x": { key: B } }), [
+  assert.deepEqual(pluginAccounts({ msmoli: null, "msmoli#x": { type: "api", key: B } }), [
     { name: "msmoli", token: "" },
     { name: "msmoli#x", token: B },
   ])
@@ -3743,5 +3743,126 @@ test("a provider with no id is not displayed as 'undefined'", async () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  }
+})
+
+// ── 第三十轮：与插件同一批修复（账号类型规则、空令牌拒绝、片段掩码）──────
+
+test("a plugin account is one the plugin could actually read: type api, key a string", () => {
+  // 插件自己（index.mjs 的 rawKey）只认 type === "api" 的 key。本工具少这一条
+  // 时，一份把令牌放错类型或位置的 plugin-auth.json 会让它说「已用同一把令牌、
+  // 无需操作」，而插件读不到、卡片永远显示未登录——一个静默的错误状态。
+  const auth = {
+    msmoli: { type: "api", key: A },
+    "msmoli#oauth": { type: "oauth", key: B },
+    "msmoli#nostr": { type: "api", key: 12345 },
+  }
+  assert.deepEqual(pluginAccounts(auth), [
+    { name: "msmoli", token: A },
+    { name: "msmoli#oauth", token: "" },
+    { name: "msmoli#nostr", token: "" },
+  ])
+})
+
+test("a plugin entry whose token cannot be read is a refusal, not 'tokens differ'", () => {
+  // 全部条目都读不出令牌时，「两边令牌不同」是一句我们说不出的话——插件那一侧
+  // 根本没读到。--force 也帮不上：问题在文件，不在选择。
+  const p = planToPlugin({ preset: presetOf(A), accounts: [{ name: "msmoli", token: "" }], force: false })
+  assert.equal(p.action, "refuse")
+  assert.match(p.lines.join("\n"), /条目读不出令牌/)
+  assert.equal(p.cmds.length, 0)
+  // 只要有一个能读，其余照旧走「不同」那条
+  const mixed = planToPlugin({ preset: presetOf(A), accounts: [{ name: "msmoli", token: "" }, { name: "msmoli#x", token: B }], force: false })
+  assert.match(mixed.lines.join("\n"), /两边令牌不同/)
+})
+
+test("a fragment of a secret in the child's output is masked too", async () => {
+  // 子进程（或它背后的厂商）回显时可能只带令牌的一段，那不再等于整串，split()
+  // 走过去了。scrub 的 maskEchoes 按「连续子串、长度 ≥ MIN_ECHO」把片段掩掉。
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-fragmask-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    const frag = A.slice(6, 26)
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 7, stdout: "", stderr: `still holding ${frag}!` }),
+    })
+    const text = out.join("\n")
+    assert.equal(code, 1)
+    assert.ok(!text.includes(frag), `片段漏到了终端:\n${text}`)
+    assert.match(text, /ms-a…5555/, `片段该被整串掩码替代:\n${text}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a token-shaped run with an underscore in the child's output is masked", async () => {
+  // 老写法 /ms-[A-Za-z0-9][A-Za-z0-9-]{10,}/ 漏掉下划线、点、波浪号；而插件
+  // 的 SENDABLE 允许可打印 ASCII 全部。形状规则要对齐，否则一个真带下划线的
+  // 令牌被 magpie 回显时原样放行。
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-underscore-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    const foreign = "ms-foreign_key-1234-5678-9012"
+    const out = []
+    await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 7, stdout: "", stderr: `no key ${foreign} for provider` }),
+    })
+    const text = out.join("\n")
+    assert.ok(!text.includes(foreign), `带下划线的形状没被认出来:\n${text}`)
+    assert.match(text, /ms-f…9012/, `它该按形状被掩码:\n${text}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a secret echoed as a run of the text keeps the lines around it intact", async () => {
+  // scrub 之前整段过 show()，而 show 的控制字符替换会把 \n 也换成空格，两次
+  // 调用都靠 split("\n") 分行回显/引用。改成逐行 show，行结构不能坏。
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-lines-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    const out = []
+    await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 0, stdout: `line one\n  \nline two\n`, stderr: "" }),
+    })
+    assert.ok(out.includes("  line one"), `first line echoed: ${JSON.stringify(out)}`)
+    assert.ok(out.includes("  line two"), `second line echoed: ${JSON.stringify(out)}`)
+    assert.ok(!out.includes("  line one   line two"), "the lines must not be joined by the mask pass")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a secret that is not ms-shaped is masked in the echoed command too", async () => {
+  // hidden() 的 `secret && a === secret` 是掩码用的那一支：只有按位置相等才掩。
+  // 把它拿掉，剩下的 show(a) 只认 ms-… 的形状，一个不以 ms- 开头的真凭据
+  // （--to-preset 写进 argv 的那把，来自插件里存着的任何 key）就原样打印。
+  // 这条是 hidden() 的 secret 分支在「形状规则帮不上忙」时的唯一覆盖。
+  const plain = "plainsecretvalue1234567890"
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-plainsecret-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: plain } }))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-preset", "--force", "--dry-run"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        throw new Error("--dry-run must not spawn")
+      },
+    })
+    const text = out.join("\n")
+    assert.equal(code, 0)
+    assert.ok(!text.includes(plain), `非 ms 形状的凭据被原样打印:\n${text}`)
+    assert.match(text, /plai…7890/, `它该被掩码成自己的两端:\n${text}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })
