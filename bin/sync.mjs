@@ -59,11 +59,25 @@ function parseArgs(argv) {
     if (v === undefined || v === "" || v.startsWith("-")) throw new Error(`缺少值：${argv[i - 1]} 后面要跟一个参数`)
     return v
   }
+  // A value flag given twice is refused, as the two directions are: the
+  // second silently winning dropped the first, and `--magpie A --magpie B`
+  // wrote through B with nothing said. `--dir=x` is read as `--dir x`.
+  const VALUE = { "--dir": "dir", "--magpie": "magpie", "--from": "from" }
+  const seen = new Set()
+  const set = (flag, v) => {
+    if (seen.has(flag)) throw new Error(`${flag} 只能给一次`)
+    seen.add(flag)
+    out[VALUE[flag]] = v
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
-    if (a === "--dir") out.dir = take(++i)
-    else if (a === "--magpie") out.magpie = take(++i)
-    else if (a === "--from") out.from = take(++i)
+    const eq = a.indexOf("=")
+    const flag = eq > 0 ? a.slice(0, eq) : ""
+    if (flag && VALUE[flag]) {
+      const v = a.slice(eq + 1)
+      if (v === "" || v.startsWith("-")) throw new Error(`缺少值：${flag}= 后面要跟一个参数`)
+      set(flag, v)
+    } else if (VALUE[a]) set(a, take(++i))
     else if (a === "--to-plugin" || a === "--to-preset") {
       // 两个方向同时给时后者静默获胜，等于悄悄丢掉前一个：说清楚比择一好
       const want = a === "--to-plugin" ? "plugin" : "preset"
@@ -73,7 +87,7 @@ function parseArgs(argv) {
     else if (a === "--force") out.force = true
     else if (a === "--dry-run") out.dryRun = true
     else if (a === "--status") out.status = true
-    else throw new Error(`不认识的参数：${show(a)}（--help 看用法）`)
+    else throw new Error(`不认识的参数：${arg(a)}（--help 看用法）`)
   }
   return out
 }
@@ -338,8 +352,27 @@ export function presetCandidates(providers, from = "") {
 // pasted into the wrong position (`--from ms-…`, or as a bare argument) would
 // otherwise be printed whole, against the one promise this tool makes about a
 // token. It is the same mask a planned command line uses.
-const tokenShaped = /ms-[\x21-\x7e]{11,}/g
-const show = (s) => String(s ?? "").replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(tokenShaped, (m) => mask(m))
+//
+// The shape is matched before control characters become spaces, and steps
+// over them: a zero-width space or a \x01 inside a token (a chat client
+// pasting one, or a child's echo) turned into a space first cut the token in
+// two, each piece under the floor, and both were printed whole. A line break
+// still ends a run — a token never spans one.
+const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
+const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]){11,}`, "gu")
+const show = (s) =>
+  String(s ?? "")
+    .replace(tokenShaped, (m) => mask(m.replace(/[\p{Cc}\p{Cf}]/gu, "")))
+    .replace(/[\p{Cc}\p{Cf}]/gu, " ")
+
+// arg is show() for a value the user typed: --from, a stray argument, a bare
+// --magpie. A key pasted into one of those positions is printed back, and a
+// key that is not ms-shaped (a custom vendor's, a GitHub token) was printed
+// whole — show() only knows the ms- shape. A run of 16+ letters and digits
+// that has both is what a generated key looks like and no provider id does;
+// a path is the user's own and stays readable.
+const looksSecret = (v) => !/[\\/]/.test(v) && /[A-Za-z0-9]{16,}/.test(v) && (v.match(/[A-Za-z0-9]{16,}/g) ?? []).some((r) => /\d/.test(r) && /[A-Za-z]/.test(r))
+const arg = (v) => (looksSecret(String(v ?? "")) ? mask(String(v)) : show(v))
 
 // SENDABLE is the plugin's own test (index.mjs's tokenOf): a key with
 // anything but visible ASCII in it goes out in a Cookie/Authorization header
@@ -522,13 +555,29 @@ function hidden(argv, secret, log) {
 const MIN_ECHO = 12
 function maskEchoes(s, secret) {
   if (typeof secret !== "string" || secret.length < MIN_ECHO) return s
+  // a control or format character inside the echo is stepped over, for the
+  // reason show()'s shape steps over one — a line break too: this is a piece
+  // of the real secret, and one broken across two lines is still the secret
+  const invisible = (c) => /[\p{Cc}\p{Cf}]/u.test(c)
   let out = ""
   for (let i = 0; i < s.length; ) {
+    let piece = ""
+    let good = i
     let end = i
-    while (end < s.length && secret.includes(s.slice(i, end + 1))) end++
-    if (end - i >= MIN_ECHO) {
+    while (end < s.length) {
+      const c = String.fromCodePoint(s.codePointAt(end))
+      if (invisible(c)) {
+        end += c.length
+        continue
+      }
+      if (!secret.includes(piece + c)) break
+      piece += c
+      end += c.length
+      good = end
+    }
+    if (piece.length >= MIN_ECHO) {
       out += mask(secret)
-      i = end
+      i = good
     } else {
       out += s[i]
       i++
@@ -588,7 +637,9 @@ function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
             : wrapper
               ? "（这是包装脚本，请指向同目录的 magpie.exe）"
               : "（用 --magpie 指定完整路径）"
-      const e = new Error(`跑不动 ${show(bin)}：${r.error.message}${hint}`)
+      // the runtime's message names the path it ran ("spawnSync <path>
+      // ENOENT"), so it goes through the same door as the child's output
+      const e = new Error(`跑不动 ${show(bin)}：${scrub(String(r.error.message ?? ""), ...secrets)}${hint}`)
       if (i > 0) e.recover = RECOVER
       throw e
     }
@@ -614,10 +665,26 @@ function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
 // direction matters too: the preset side is checked on the providers page,
 // the plugin side on the plugins page.
 function unreadableAfter(name, dir, want, log, where = "插件列表") {
-  log(`? 写入已执行，但回读时 ${show(join(dir, name))} 读不出来，无法确认（${mask(want)}）。`)
+  log(`? 写入已执行，但回读时 ${showPath(dir, name)} 读不出来，无法确认（${mask(want)}）。`)
   log(`  先确认 magpie 正常，再看一眼${where}里那把 key 在不在。`)
   return 1
 }
+
+// runnable is whether spawnSync would start something at bin. Windows runs a
+// path with no extension as that path plus .com or .exe (libuv's search, as
+// CreateProcess does), which existsSync does not try.
+const runnable = (bin, os, exists) =>
+  exists(bin) || (os === "win32" && !/\.[^\\/.]+$/.test(bin) && [".com", ".exe"].some((x) => exists(bin + x)))
+
+// showPath is a file inside the folder the user typed. The folder goes through
+// arg() — a token pasted into --dir must not ride along inside the joined path
+// — and the file's own name is ours, printed as is.
+const showPath = (dir, name) => `${arg(String(dir ?? "").replace(/[\\/]+$/, ""))}${sep}${name}`
+
+// shaped is a file magpie wrote: an object, or not there at all. One that parses
+// to an array, a string or a bare null is state we cannot read — before a
+// write, and in the read-back after one.
+const shaped = (v) => v === undefined || (v !== null && typeof v === "object" && !Array.isArray(v))
 
 // ---- main
 
@@ -649,7 +716,7 @@ export async function main({
   // does), so "./magpie" and "bin/magpie" are paths a user named, and the
   // portable magpie's own folder invites exactly that spelling.
   if (args.magpie && !/[\\/]/.test(args.magpie)) {
-    log(`✗ --magpie 不接受裸名（${show(args.magpie)}）：它会按 PATH 解析，PATH 上第一个 magpie 会拿到令牌。`)
+    log(`✗ --magpie 不接受裸名（${arg(args.magpie)}）：它会按 PATH 解析，PATH 上第一个 magpie 会拿到令牌。`)
     log(`  给一个路径，绝对或相对都行：/Applications/magpie.app/Contents/MacOS/magpie 或 ./magpie。`)
     return 1
   }
@@ -661,17 +728,18 @@ export async function main({
     return 1
   }
   if (!looksLikeMagpie(dir, exists)) {
-    log(`✗ ${show(dir)} 里没有 magpie 的配置文件（providers.json / plugins.json / plugin-auth.json）。`)
+    log(`✗ ${arg(dir)} 里没有 magpie 的配置文件（providers.json / plugins.json / plugin-auth.json）。`)
     return 1
   }
-  log(`magpie 配置目录：${show(dir)}`)
+  // arg(), not show(): a token pasted into --dir is echoed here
+  log(`magpie 配置目录：${arg(dir)}`)
 
   const providersRaw = readJson(join(dir, "providers.json"), exists)
   // "there but unreadable" is not "not configured": telling the user to add a
   // provider that already exists invites overwriting a file that may be
   // recoverable. Same distinction the auth file below has had since the fix.
   if (providersRaw === null) {
-    log(`✗ ${show(join(dir, "providers.json"))} 存在但读不出来（可能正在被写或已损坏）。`)
+    log(`✗ ${showPath(dir, "providers.json")} 存在但读不出来（可能正在被写或已损坏）。`)
     log(`  不猜它的内容：先确认 magpie 正常，或备份后重试。`)
     return 1
   }
@@ -680,20 +748,19 @@ export async function main({
   // A file that parses but is not the shape magpie writes (an array, a
   // string, a bare null) is state we cannot read, not "nobody is signed in":
   // a login over it would add a second account over one we could not see.
-  const shaped = (v) => v === undefined || (v !== null && typeof v === "object" && !Array.isArray(v))
   if (authRaw === null || !shaped(authRaw)) {
-    log(`✗ ${show(join(dir, "plugin-auth.json"))} 存在但读不出来（可能正在被写或已损坏）。`)
+    log(`✗ ${showPath(dir, "plugin-auth.json")} 存在但读不出来（可能正在被写或已损坏）。`)
     log(`  不猜它的内容：先确认 magpie 正常，或备份后重试。`)
     return 1
   }
   if (providersRaw !== undefined && !shaped(providersRaw)) {
-    log(`✗ ${show(join(dir, "providers.json"))} 存在但不是 magpie 写的形状。`)
+    log(`✗ ${showPath(dir, "providers.json")} 存在但不是 magpie 写的形状。`)
     log(`  不猜它的内容：先确认 magpie 正常，或备份后重试。`)
     return 1
   }
   // `providers` present but not a list is the same unreadable state one level in
   if (providers !== undefined && providers !== null && !Array.isArray(providers)) {
-    log(`✗ ${show(join(dir, "providers.json"))} 的 providers 不是列表。`)
+    log(`✗ ${showPath(dir, "providers.json")} 的 providers 不是列表。`)
     log(`  不猜它的内容：先确认 magpie 正常，或备份后重试。`)
     return 1
   }
@@ -730,14 +797,14 @@ export async function main({
       const any = all.filter((p) => p?.id === args.from)
       const bare = any.filter((p) => oursOf(p) && !keyedOf(p))
       if (bare.length) {
-        log(`✗ "${show(args.from)}" 在，但还没有 key，没有可同步的令牌。`)
-        log(`  用 magpie provider key ${show(args.from)} <key> 写入。`)
+        log(`✗ "${arg(args.from)}" 在，但还没有 key，没有可同步的令牌。`)
+        log(`  用 magpie provider key ${arg(args.from)} <key> 写入。`)
       } else if (any.length) {
-        log(`✗ "${show(args.from)}" 在，但它不是 ModelScope：chat 不指向 ${HOST}，id/preset 也不是 ${PRESET}。`)
+        log(`✗ "${arg(args.from)}" 在，但它不是 ModelScope：chat 不指向 ${HOST}，id/preset 也不是 ${PRESET}。`)
         log(`  这个工具只同步内置的 ModelScope 预设与插件登录态之间的令牌。`)
       } else {
-        log(`✗ 内置侧没有 id 为 "${show(args.from)}" 的 provider。`)
-        log(`  用 --status 看现有的，或先 magpie provider add ${show(args.from)} <key>。`)
+        log(`✗ 内置侧没有 id 为 "${arg(args.from)}" 的 provider。`)
+        log(`  用 --status 看现有的，或先 magpie provider add ${arg(args.from)} <key>。`)
       }
     } else {
       const bare = all.filter((p) => oursOf(p) && !keyedOf(p))
@@ -780,9 +847,13 @@ export async function main({
   // is, and magpie's CLI takes no --dir. Given both, the two must be the same
   // folder: reading a fixture while writing the real config is how a rehearsal
   // came to sign a test token into the user's own magpie. Only a run that
-  // writes is stopped here, and only a binary that is there can write —
-  // --status and --dry-run are reads.
-  if (!args.dryRun && args.dir && bin && exists(bin)) {
+  // writes is stopped here, and only a binary that can run can write —
+  // --status and --dry-run are reads. "Can run" is what spawnSync finds, not
+  // what existsSync sees: on Windows a "C:\\…\\magpie" with no extension runs
+  // the magpie.exe beside it, and a check gated on exists(bin) alone skipped
+  // itself there — a fixture's --dir was read while the real magpie wrote its
+  // own folder.
+  if (!args.dryRun && args.dir && bin && runnable(bin, os, exists)) {
     const binDir = findConfigDir({ env, home, os, exists, binPath: bin })
     // "" is a mismatch too: the binary has no magpie folder of ours to write
     // to, so it would make one — and that one is not the folder named. Compared
@@ -815,7 +886,7 @@ export async function main({
   if (want) {
     if (args.to === "preset") {
       const raw = readJson(join(dir, "providers.json"), exists)
-      if (raw === null) return unreadableAfter("providers.json", dir, want, log, "供应商列表")
+      if (raw === null || !shaped(raw)) return unreadableAfter("providers.json", dir, want, log, "供应商列表")
       const after = presetCandidates(raw?.providers, preset.id)
       if (!after.some((p) => p.key === want)) {
         log(`✗ 写入后回读没找到目标 key（${mask(want)}）——检查 magpie 是否在正常运行。`)
@@ -823,7 +894,7 @@ export async function main({
       }
     } else {
       const raw = readJson(join(dir, "plugin-auth.json"), exists)
-      if (raw === null) return unreadableAfter("plugin-auth.json", dir, want, log)
+      if (raw === null || !shaped(raw)) return unreadableAfter("plugin-auth.json", dir, want, log)
       const after = pluginAccounts(raw)
       // 回读要数账号：logout 没真删（退出码 0 却没动手）时，login 会把新
       // 令牌加成第二个账号，而「有一个账号拿着目标令牌」照样成立——那正是

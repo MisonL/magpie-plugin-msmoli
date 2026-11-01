@@ -366,7 +366,7 @@ test("usage reads the balance and the day's ledger, and never the sign-in endpoi
   }
   await withFetch(
     {
-      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 1.5, total_balance: 1.5, frozen_amount: 0 } } },
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 0, total_balance: 0, frozen_amount: 0 } } },
       "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body },
     },
     async (fetch) => {
@@ -375,14 +375,15 @@ test("usage reads the balance and the day's ledger, and never the sign-in endpoi
       assert.equal(w.name, "魔粒")
       assert.equal(w.amount, 330)
       assert.equal(w.limit, 250)
-      // 330 spent of 250 granted: over 100 means overspent, not capped
+      // 330 spent of 250 granted with nothing left: over 100 means overspent,
+      // not capped
       assert.ok(w.used > 100, `used should exceed 100, got ${w.used}`)
       // and the exact number is the ratio to two decimals — 33000/250, the
       // scale written `* 10001` reads 132.01 next to the same 330 and 250
       assert.equal(w.used, Math.round((330 / 250) * 10000) / 100)
       // the window runs a day; span written 86401 drifts a second a day
       assert.equal(w.span, 86400, "the window's span is the day it runs")
-      assert.match(w.display, /余额 1\.5/)
+      assert.match(w.display, /余额 0/)
       assert.equal(fetch.calls.some((c) => c.includes("login/info")), false)
     },
   )
@@ -1982,13 +1983,13 @@ test("a login/info that refuses in its own words, or in none at all", async () =
   }
 })
 
-test("the name cache holds exactly eight accounts: the eighth stays, the ninth evicts the first", async () => {
+test("the name cache holds exactly 64 accounts: the 64th stays, the 65th evicts the first", async () => {
   // login/info is the claim, so the name is only ever read at check-in; the
   // cache is capped so a long-lived host does not grow one entry per account
-  // seen forever. Ten accounts only prove that *some* eviction happens — a
-  // cap of 7 or 9 passes that too. Eight in, none out; the ninth takes the
-  // oldest and leaves the rest.
-  const tokens = Array.from({ length: 9 }, (_, i) => `ms-lru-0000-0000-0000-000000000${String(i).padStart(2, "0")}`)
+  // seen forever. The cap is 64, not 8: at 8 a ninth signed-in account pushed
+  // the first one's name out and its card went back to the key's tail. 64 in,
+  // none out; the 65th takes the oldest and leaves the rest.
+  const tokens = Array.from({ length: 65 }, (_, i) => `ms-lru-0000-0000-0000-000000000${String(i).padStart(2, "0")}`)
   const checkin = async (i) => {
     globalThis.fetch = fakeFetch({
       "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
@@ -2003,12 +2004,12 @@ test("the name cache holds exactly eight accounts: the eighth stays, the ninth e
     })
     return (await auth.usage(async () => ({ type: "api", key: tokens[i] }))).user
   }
-  for (let i = 0; i < 8; i++) await checkin(i)
-  for (let i = 0; i < 8; i++) assert.equal(await nameOf(i), `user${i}`, `the eighth check-in evicts nothing: ${i}`)
-  await checkin(8)
-  assert.equal(await nameOf(0), "", "the ninth check-in takes the oldest")
+  for (let i = 0; i < 64; i++) await checkin(i)
+  for (let i = 0; i < 64; i++) assert.equal(await nameOf(i), `user${i}`, `the 64th check-in evicts nothing: ${i}`)
+  await checkin(64)
+  assert.equal(await nameOf(0), "", "the 65th check-in takes the oldest")
   assert.equal(await nameOf(1), "user1", "and only the oldest")
-  assert.equal(await nameOf(8), "user8", "the newest is kept")
+  assert.equal(await nameOf(64), "user64", "the newest is kept")
 })
 
 test("a usage read that meets a dead token marks the sign-in expired, at either step", async () => {
@@ -4987,7 +4988,7 @@ test("a timeout or a dead network is recognised however the runtime capitalises 
   try {
     for (const [text, want, why] of [
       ["Timeout", /请求超时（8 秒）/, "a capitalised timeout is still a timeout"],
-      ["Fetch failed", /请求失败：网络不通、被代理拦截，或被重定向到了别的站点/, "capitalised fetch wording is still the network"],
+      ["Fetch failed", /请求失败：网络不通、被代理拦截，或遇到了重定向/, "capitalised fetch wording is still the network"],
     ]) {
       globalThis.fetch = async () => {
         throw new Error(text)
@@ -5148,7 +5149,9 @@ test("a nickname that is a middle slice of the token, or that carries it, is ref
       const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
       await withFetch(
         {
-          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+          // unclaimed, so the touch runs and its nickname is what is judged:
+          // a claimed day with a name already cached skips the touch
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
           "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
         },
         async () => {
@@ -5982,4 +5985,278 @@ test("a token-shaped run with a character outside the id alphabet is masked", as
   )
   assert.ok(!r.message.includes(foreign), `带下划线的令牌形状没被认出来: ${r.message}`)
   assert.match(r.message, /ms-o…9012/, `它该按形状被掩码: ${r.message}`)
+})
+
+// ── 第三十一轮：复查批次（代理的报错、不听 signal 的 fetch、不可见字符切开的
+// 回显、下午时段的 inactive、已领时的触达、回写的时机与冷却、用量分母）────
+
+// withNameDir runs fn with a plugin that reads its config from a fresh folder
+// (window off, no providers.json: aliasOf answers "no alias") and records what
+// it writes back.
+const withNameDir = async (prefix, fn) => {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  try {
+    return await withDirectory(dir, async () => {
+      const writes = []
+      const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+      return await fn(p, writes, dir)
+    })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test("a proxy that will not connect is named as the proxy, not as a timeout", async () => {
+  // magpie 设了代理时用它自己的 fetch，代理失败抛的是普通 Error（Go 的原话
+  // "proxyconnect tcp: …"），不是 TypeError：卡片上原样一句英文；带 i/o
+  // timeout 的那种又被 /timeout/ 认成「请求超时（8 秒）」，把人推去查网络。
+  const real = globalThis.fetch
+  try {
+    for (const why of ["dial tcp 127.0.0.1:7890: i/o timeout", "dial tcp 127.0.0.1:7890: connect: connection refused"]) {
+      globalThis.fetch = async () => {
+        throw new Error(`proxyconnect tcp: ${why}`)
+      }
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.match(u.error, /代理连不上/, `usage: ${u.error}`)
+      assert.doesNotMatch(u.error, /超时|proxyconnect/, `usage: ${u.error}`)
+      const c = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(c.outcome, "failed")
+      assert.match(c.message, /代理连不上/, `checkin: ${c.message}`)
+    }
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a fetch that never listens to its signal still gives up at the cap", { timeout: 8000 }, async (t) => {
+  // 宿主的代理 fetch 用自己的计时器拨 CONNECT，不理插件传进去的 signal。只靠
+  // signal 时，钩子就一直等着它：8 秒的单次上限在这条路径上不成立。
+  if (!withMockTimers(t)) return
+  const real = globalThis.fetch
+  try {
+    t.mock.timers.enable({ apis: ["setTimeout"] })
+  } catch {
+    t.mock.timers.enable(["setTimeout"])
+  }
+  globalThis.fetch = () => new Promise(() => {})
+  try {
+    const pending = auth.usage(async () => ({ type: "api", key: "ms-test" }))
+    await new Promise((resolve) => setImmediate(resolve))
+    t.mock.timers.tick(8001)
+    const u = await pending
+    assert.match(u.error ?? "", /请求超时（8 秒）/, JSON.stringify(u))
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("an echoed token cut by an invisible character is masked whole on the card", async () => {
+  // maskEchoes 按连续子串找片段，零宽空格或 \x01 把回显的令牌切成两段，前段
+  // 不到 MIN_ECHO；text() 随后把那个字符换成空格，令牌前段上了卡片。没有令牌
+  // 在手的出口（hostText）也一样：形状被切开就认不出来。
+  const token = "ms-cut00000-1111-2222-3333-444455556666"
+  for (const cut of ["​", "\x01", "﻿"]) {
+    const echoed = `${token.slice(0, 11)}${cut}${token.slice(11)}`
+    const u = await withFetch(
+      { "/openapi/v1/magicubes/balance": { status: 500, body: { success: false, message: `bad session ${echoed}` } } },
+      () => auth.usage(async () => ({ type: "api", key: token })),
+    )
+    assert.ok(!u.error.includes(token.slice(0, 11)), `${JSON.stringify(cut)}: ${u.error}`)
+    assert.match(u.error, /bad session ms-c…6666/, `${JSON.stringify(cut)}: ${u.error}`)
+    const h = await auth.usage(async () => {
+      throw new Error(`no key ${echoed} for provider`)
+    })
+    assert.ok(!h.error.includes(token.slice(0, 11)), `hostText ${JSON.stringify(cut)}: ${h.error}`)
+    assert.match(h.error, /no key ms-c…6666 for provider/, `hostText: ${h.error}`)
+  }
+  // a line break still ends a token: the line after it is not swallowed
+  const two = await withFetch(
+    { "/openapi/v1/magicubes/balance": { status: 500, body: { success: false, message: `${token}\nms-notatoken` } } },
+    () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.match(two.error, /ms-c…6666 ms-notatoken/, two.error)
+})
+
+test("an afternoon inactive asks once more in half an hour, then settles", async () => {
+  // 12 点起宿主把 inactive 当天了结，不再暂定重问：下午时段里账本晚几秒写出来，
+  // 当天就被记成「账号可能不在活动范围」。插件自己用 until 要一次半小时后的
+  // 重问；只要一次——真不在活动范围的账号仍要当天了结。
+  const empty = {
+    "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+    "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: {} } },
+  }
+  await withWindow(false, `${today} 14:00:00`, async () => {
+    const at = Date.now()
+    const first = await withFetch(empty, () => auth.checkin(async () => ({ type: "api", key: "ms-afternoon-0001" })))
+    assert.equal(first.outcome, "inactive")
+    assert.equal(Date.parse(first.until), at + 30 * 60 * 1000, `until is half an hour on: ${first.until}`)
+    assert.match(first.message, /半小时后再核对/)
+    const second = await withFetch(empty, () => auth.checkin(async () => ({ type: "api", key: "ms-afternoon-0001" })))
+    assert.equal(second.outcome, "inactive")
+    assert.equal(second.until, undefined, "the second inactive settles the day")
+    assert.match(second.message, /账号可能不在活动范围/)
+  })
+  // before noon the host's own provisional asks again: no until is said
+  await withWindow(false, `${today} 11:59:00`, async () => {
+    const r = await withFetch(empty, () => auth.checkin(async () => ({ type: "api", key: "ms-afternoon-0002" })))
+    assert.equal(r.outcome, "inactive")
+    assert.equal(r.until, undefined, "the host's provisional covers the morning")
+  })
+})
+
+test("a day already claimed does not touch login/info again once the name is known", async () => {
+  // 宿主在 12 点前把没见过领取的 done 每半小时重问一次；触达在「已领」判断
+  // 之前时，每一问都再记一次登录——网站上领过的账号一个上午多出十来次。
+  const token = "ms-claimedskip-0000-0000-000000000001"
+  const responses = {
+    "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+    "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Alice" } } },
+  }
+  const first = await withFetch(responses, async (fetch) => {
+    const r = await auth.checkin(async () => ({ type: "api", key: token }))
+    return { r, touched: fetch.calls.some((c) => c.includes("login/info")) }
+  })
+  assert.equal(first.r.outcome, "done")
+  assert.ok(first.touched, "the first ask touches: the name is not known yet")
+  const again = await withFetch(responses, async (fetch) => {
+    const r = await auth.checkin(async () => ({ type: "api", key: token }))
+    return { r, touched: fetch.calls.some((c) => c.includes("login/info")) }
+  })
+  assert.equal(again.r.outcome, "done")
+  assert.equal(again.r.credit, 200)
+  assert.equal(again.touched, false, "claimed and named: nothing left for the touch to do")
+})
+
+test("the name write-back waits for the answer, so its lock cannot spend the budget", async () => {
+  // 宿主的 auth.set 同步拿 plugin-auth.json 的锁（lockAuth，被占时最长约 20 秒）。
+  // 回写夹在触达和对账之间时，这段等待算进 25 秒预算，已经到账的签到被答成
+  // 「预算已用完」。
+  const real = Date.now
+  let skew = 0
+  Date.now = () => real() + skew
+  try {
+    await withNameDir("msmoli-lockwait-", async (_, writes, dir) => {
+      const order = []
+      let txns = 0
+      const real2 = globalThis.fetch
+      globalThis.fetch = async (url) => {
+        const path = new URL(url).pathname
+        order.push(path)
+        if (path.endsWith("login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "Lock" } } })
+        txns++
+        return reply({ body: { success: true, data: { records: txns === 1 ? [] : [day()] } } })
+      }
+      const client = await MsmoliPlugin({
+        directory: dir,
+        client: {
+          auth: {
+            set: async (o) => {
+              order.push("auth.set")
+              writes.push(o)
+              skew += 30_000 // a lock held by another process, waited out synchronously
+            },
+          },
+        },
+      })
+      try {
+        const r = await client.auth.checkin(async () => ({ type: "api", key: "ms-lockwait-0000-0000-000000000001" }))
+        assert.equal(r.outcome, "claimed", `the claim landed and is answered: ${r.message}`)
+        assert.equal(writes.length, 1, "the name is still written back")
+        assert.equal(order.at(-1), "auth.set", `the write comes after every read: ${order.join(" → ")}`)
+      } finally {
+        globalThis.fetch = real2
+      }
+    })
+  } finally {
+    Date.now = real
+  }
+})
+
+test("a sign-in that lost its accountId gets the name again, after a cool-down", async () => {
+  // 回写记录是进程级的「写过了」：同一把令牌登出再登录，新的登录没有
+  // accountId，插件却再也不写，卡片一直显示「API key …」直到 magpie 重启。
+  // 改成按时间：一小时内不重写，过了再写。
+  const real = Date.now
+  let skew = 0
+  Date.now = () => real() + skew
+  try {
+    await withNameDir("msmoli-cooldown-", async (p, writes) => {
+      const token = "ms-cooldown-0000-0000-000000000001"
+      const responses = {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Bob" } } },
+      }
+      const ask = () => withFetch(responses, () => p.auth.checkin(async () => ({ type: "api", key: token })))
+      await ask()
+      assert.equal(writes.length, 1)
+      await ask()
+      assert.equal(writes.length, 1, "within the hour nothing is written again")
+      skew += 61 * 60 * 1000
+      await ask()
+      assert.equal(writes.length, 2, "an hour on, a sign-in still without the name gets it again")
+      assert.equal(writes[1].body.accountId, "Bob")
+    })
+  } finally {
+    Date.now = real
+  }
+})
+
+test("spending yesterday's leftover is not drawn as overspent while the balance holds", async () => {
+  // 每日发放 24 小时过期：昨天 15:00 领的今天 15:00 才失效。分母只算今天领的，
+  // 「昨天 250 + 今天 250、上午用 300」会被画成 120% 的超额，旁边写着余额 200。
+  const u = await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 200 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records: [day(), day({ rule_key: "aliyun_bindlogin", total_amount: 50 }), spend(300)] } },
+      },
+    },
+    () => auth.usage(async () => ({ type: "api", key: "ms-test" })),
+  )
+  const w = u.windows[0]
+  assert.equal(w.amount, 300)
+  assert.equal(w.limit, 250)
+  assert.equal(w.used, 60, `300 of the 500 at hand today: ${w.used}`)
+})
+
+test("a body that never arrives and ignores the signal still gives up at the cap", { timeout: 8000 }, async (t) => {
+  // the read is raced against the abort as the request is: a response whose
+  // stream neither delivers nor listens held the hook past 8 seconds
+  if (!withMockTimers(t)) return
+  const real = globalThis.fetch
+  try {
+    t.mock.timers.enable({ apis: ["setTimeout"] })
+  } catch {
+    t.mock.timers.enable(["setTimeout"])
+  }
+  globalThis.fetch = async () => ({
+    status: 200,
+    headers: { get: () => null },
+    body: { getReader: () => ({ read: () => new Promise(() => {}), cancel: async () => {}, releaseLock() {} }) },
+  })
+  try {
+    const pending = auth.usage(async () => ({ type: "api", key: "ms-test" }))
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve))
+    t.mock.timers.tick(8001)
+    const u = await pending
+    assert.match(u.error ?? "", /请求超时（8 秒）/, JSON.stringify(u))
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a key echoed across a line break is still the key, and a shape does not run on past one", async () => {
+  // maskEchoes 认的是真令牌的片段：被换行切成两半、每半都不到 MIN_ECHO 的回显
+  // 仍是那把令牌。形状测试只认形状，不跨行——跨行会把下一行的字吞进掩码。
+  const token = "ms-split000-1111-2222-3333-444455556666"
+  const u = await withFetch(
+    { "/openapi/v1/magicubes/balance": { status: 500, body: { success: false, message: `a ${token.slice(0, 11)}\n${token.slice(11, 22)} b` } } },
+    () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.ok(!u.error.includes(token.slice(0, 11)) && !u.error.includes(token.slice(11, 22)), `split echo leaked: ${u.error}`)
+  const h = await auth.usage(async () => {
+    throw new Error("ms-shortone\nabcdefghijklmnop end")
+  })
+  assert.match(h.error, /ms-shortone abcdefghijklmnop end/, `a short ms- word and the next line are not a token: ${h.error}`)
 })

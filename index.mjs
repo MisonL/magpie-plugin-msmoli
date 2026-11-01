@@ -105,7 +105,16 @@ const handleOf = (token) => fnv(token).toString(16)
 // Node, a whole sentence about passing `verbose: true` on Bun; both measured
 // against a real socket). An error of our own — a budget spent, a body over
 // the cap — is already in the user's words and passes through.
+//
+// magpie's own fetch, behind a proxy, fails in Go's words — a plain Error
+// "proxyconnect tcp: dial tcp 127.0.0.1:7890: i/o timeout" (host.js), not a
+// TypeError — so it is named before the timeout test: its "i/o timeout" is the
+// proxy's dial, and "请求超时（8 秒）" would send the user after the network
+// when the proxy is what is down.
 function saidFailure(e, ctl, budget) {
+  if (e !== ctl.signal.reason && /^proxyconnect\b/i.test(String(e?.message ?? ""))) {
+    return new Error("请求失败：代理连不上（检查 magpie 的代理设置）")
+  }
   if (e === ctl.signal.reason || /timeout/i.test(String(e?.message ?? ""))) {
     // Ceiling, not round: the budget can be down to a few hundred
     // milliseconds when the hook's own deadline is what cut it short, and
@@ -113,7 +122,7 @@ function saidFailure(e, ctl, budget) {
     return new Error(`请求超时（${Math.max(1, Math.ceil(budget / 1000))} 秒）`)
   }
   if (e?.name === "TypeError" || /fetch failed/i.test(String(e?.message ?? ""))) {
-    return new Error("请求失败：网络不通、被代理拦截，或被重定向到了别的站点")
+    return new Error("请求失败：网络不通、被代理拦截，或遇到了重定向")
   }
   return e
 }
@@ -124,22 +133,34 @@ async function json(token, path, deadline = Infinity) {
   const budget = Math.min(TIMEOUT_MS, left)
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(new Error("timeout")), budget)
+  // The cap holds even for a fetch that does not listen to its signal: magpie
+  // puts its own fetch in when a proxy is set, and its CONNECT dial runs on a
+  // timer of its own (host.js's proxyRefuses). Raced against the abort, the
+  // hook answers at the budget whatever the fetch underneath is still doing.
+  const aborted = new Promise((_, reject) => {
+    ctl.signal.addEventListener("abort", () => reject(ctl.signal.reason), { once: true })
+  })
+  aborted.catch(() => {})
   try {
-    const res = await fetch(SITE + path, {
-      // a redirect that leaves modelscope.cn must not carry the session
-      // cookie off-site; the runtimes happen not to forward it, but say so
-      redirect: "error",
-      headers: {
-        Cookie: "m_session_id=" + token,
-        "User-Agent": UA,
-        Referer: SITE + "/",
-        Accept: "application/json",
-      },
-      signal: ctl.signal,
-    })
+    const res = await Promise.race([
+      aborted,
+      fetch(SITE + path, {
+        // every redirect is refused, the site's own included: one that left
+        // modelscope.cn would carry the session cookie off-site (the runtimes
+        // happen not to forward it), and ModelScope's endpoints answer in place
+        redirect: "error",
+        headers: {
+          Cookie: "m_session_id=" + token,
+          "User-Agent": UA,
+          Referer: SITE + "/",
+          Accept: "application/json",
+        },
+        signal: ctl.signal,
+      }),
+    ])
     // The read is inside the same try on purpose: the request answering is not
     // the same as its body arriving, and the timer above covers both.
-    const text = await readBounded(res)
+    const text = await Promise.race([aborted, readBounded(res)])
     let body = null
     try {
       body = text ? JSON.parse(text) : {}
@@ -328,9 +349,11 @@ const WINDOW_DEFAULT = ["08:30", "10:00"]
 // LAST is the latest minute the window's end is capped at. The host asks
 // again 30 minutes after a failure, and a new Beijing day starts afresh with
 // a new target, so what a target needs is an ask *after* it landing on the
-// same day. A target at 23:29 gets one ask, at 23:30 — and if that ask fails
-// the day is lost with it. Capping the end at 23:00 leaves two: one at the
-// target's own minute, one at 23:30 as a retry.
+// same day. The host does not ask at the target's minute: its look runs every
+// 30 minutes on a phase of its own, so the first ask past a target can come up
+// to half an hour late, and the retry after a failure half an hour after that.
+// Capping the end at 23:00 keeps both inside the day for any target before it;
+// a later cap could leave a target with one ask, or none.
 const LAST = 23 * 60
 const DEFAULT_START = 8 * 60 + 30
 const DEFAULT_END = 10 * 60
@@ -443,8 +466,10 @@ function plan(win, token, day) {
 // token on disk for. The map is keyed by the token itself, not by its hash:
 // two tokens colliding in 32 bits would otherwise share a name and the card
 // would show one account under the other's name.
+// NAMES_MAX bounds the map, not the accounts: at 8 a ninth signed-in account
+// pushed the first one's name out, and its card went back to the key's tail.
 const names = new Map()
-const NAMES_MAX = 8
+const NAMES_MAX = 64
 
 function rememberName(token, name) {
   if (!name) return
@@ -453,9 +478,14 @@ function rememberName(token, name) {
   while (names.size > NAMES_MAX) names.delete(names.keys().next().value)
 }
 
-// named holds what this process has already written back, so a name is
-// saved once and not on every ask.
-const named = new Set()
+// named holds when this process last wrote a name back, by token, so a name is
+// not written on every ask. It is a time, not a flag: signing out and in again
+// with the same token gives a sign-in with no accountId, and a flag kept for
+// the life of the process left that account showing "API key …" until magpie
+// restarted. A name the sign-in already carries is never written; one it lacks
+// is written again once NAME_AGAIN_MS has passed.
+const named = new Map()
+const NAME_AGAIN_MS = 60 * 60 * 1000
 
 // labelOf is what magpie shows this account as now, which is the string an
 // alias is kept under: the accountId already on the sign-in, else the key's
@@ -530,16 +560,35 @@ const maskToken = (token) =>
 // one. maskToken is length-preserving in neither direction here, which is
 // fine: what it leaves behind (at most nine characters) is under MIN_ECHO, so
 // the scan does not match its own output.
+//
+// A control or format character — which text() turns into a space — is
+// stepped over: a zero-width space pasted into an echoed token (chat clients
+// add them), or a \x01 inside one, cut it into pieces each under MIN_ECHO,
+// and both pieces reached the card. A line break is stepped over too: what is
+// matched is a piece of the real key, not a shape, so a key broken across two
+// lines is still the key, and masking it whole is the point.
 const MIN_ECHO = 12
 const maskEchoes = (s, token) => {
   if (typeof token !== "string" || token.length < MIN_ECHO) return s
   let out = ""
   for (let i = 0; i < s.length; ) {
+    let piece = ""
+    let good = i
     let end = i
-    while (end < s.length && token.includes(s.slice(i, end + 1))) end++
-    if (end - i >= MIN_ECHO) {
+    while (end < s.length) {
+      const c = String.fromCodePoint(s.codePointAt(end))
+      if (invisible(c)) {
+        end += c.length
+        continue
+      }
+      if (!token.includes(piece + c)) break
+      piece += c
+      end += c.length
+      good = end
+    }
+    if (piece.length >= MIN_ECHO) {
       out += maskToken(token)
-      i = end
+      i = good
     } else {
       out += s[i]
       i++
@@ -548,14 +597,22 @@ const maskEchoes = (s, token) => {
   return out
 }
 
+// invisible is a control or format character: what a token pasted out of a
+// chat client carries, and what an echo may have added inside one. INV is the
+// same class for the shape test, less the line breaks: a shape is all that is
+// known there, and run on across a line it would mask the next line's words.
+const invisible = (c) => /[\p{Cc}\p{Cf}]/u.test(c)
+const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
+
 // tokenShaped is a ModelScope key seen in someone else's text. Every key
 // ModelScope issues starts with "ms-", and tokenOf only lets visible ASCII
 // out (SENDABLE), so the run it matches is the same character set — a key
 // with an underscore in it goes out, and a pattern that stopped at
 // [A-Za-z0-9-] would leave that one on the card whole. It is the shape, not
 // the key, that is known here; the length floor keeps a short "ms-" word
-// ("ms-dos") out of it.
-const tokenShaped = /ms-[\x21-\x7e]{11,}/g
+// ("ms-dos") out of it. An invisible character between two of its characters
+// does not end the run, for the reason maskEchoes steps over one.
+const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]){11,}`, "gu")
 
 // cardText is what a host error becomes before it reaches the account card or
 // the terminal. The host's message is not our text: magpie's own CLI scrubs
@@ -609,13 +666,17 @@ async function rememberAccountName(client, token, name, auth, dir) {
   // written back" on every check-in, a failure report for a client that never
   // had a chance to succeed.
   if (!name || typeof client?.auth?.set !== "function") return
-  if (named.has(token) || auth?.accountId === name) return
+  if (auth?.accountId === name) return
+  const at = named.get(token)
+  if (at !== undefined && Date.now() - at < NAME_AGAIN_MS) return
   // an account the user has named keeps that name: writing the nickname over
   // it would re-key their alias to a label the account no longer has. A
   // providers.json that can't be read says the same thing — don't write over
   // a state we can't see.
   if (aliasOf(dir, labelOf(auth, token)) !== "") return
-  named.add(token)
+  named.delete(token)
+  named.set(token, Date.now())
+  while (named.size > NAMES_MAX) named.delete(named.keys().next().value)
   try {
     // auth.set replaces the whole sign-in, so what the host handed us is the
     // base: a field we do not know about is kept, not dropped
@@ -688,12 +749,28 @@ const gate = (res, body, parsed, token, what, risk = RISK) => {
 }
 
 // todayEarn are today's credit grants, by the day ModelScope records them.
+// The day is read at each call, on purpose: a check-in that crosses midnight
+// between its reads reports what its touch granted on the new day, which is
+// true, where diffing both reads against the old day would answer inactive.
 async function todayEarn(token, deadline) {
   const { res, body, parsed } = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
   gate(res, body, parsed, token, "账单查询失败")
   const day = todayCN()
   return recordsOf(body).filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day))
 }
+
+// SURE_HOUR is magpie's checkinSureHour (workbuddy_checkin.go): before noon,
+// Beijing, a done or inactive for an account magpie hasn't seen claim today is
+// provisional and asked again every 30 minutes; from noon on it settles the
+// day. AGAIN_MS is that same half hour, said by the plugin itself after noon.
+const SURE_HOUR = 12
+const AGAIN_MS = 30 * 60 * 1000
+
+// deferred holds, by token, the Beijing day an `inactive` was answered with an
+// `until` after noon. One deferral a day: the ask it buys reads the ledger a
+// half hour later, which is the wait the immediate re-read cannot buy, and an
+// account really not in the campaign must still settle.
+const deferred = new Map()
 
 // blankOf is a field that carries no number in it at all: absent, null, or
 // nothing but whitespace. The empty string was already refused at both
@@ -800,10 +877,10 @@ export async function MsmoliPlugin(input) {
         // time has failed, as far as the host is concerned, and it asks again
         const deadline = Date.now() + CHECKIN_BUDGET_MS
 
+        const today = todayCN()
         const win = windowOf(configOf(configDir))
         if (win) {
-          const day = todayCN()
-          const p = plan(win, token, day)
+          const p = plan(win, token, today)
           if (!p.due) {
             // The host shows one line under a failed state, and "failed" is
             // the only outcome it retries, so this is the whole message the
@@ -827,6 +904,14 @@ export async function MsmoliPlugin(input) {
           }
         }
 
+        // The nickname is written back after the answer is made, not between
+        // the touch and the reads that reconcile it: magpie's auth.set takes
+        // plugin-auth.json's lock synchronously (host.js's lockAuth, up to
+        // twice its 10s stale time when another process holds it), and that
+        // wait came out of this hook's 25s — a claim that had landed was then
+        // answered "预算已用完" and shown as failed for half an hour.
+        let name = ""
+        const answer = await (async () => {
         try {
           const before = await todayEarn(token, deadline)
           const beforeDaily = before.filter((r) => DAILY_RULES.includes(r?.rule_key))
@@ -862,21 +947,30 @@ export async function MsmoliPlugin(input) {
             return out
           }
 
-          const { res, body, parsed } = await json(token, LOGIN_INFO, deadline)
-          // 403 是风控，不是令牌坏了：账号可能是好的，只是这次请求被拒
-          gate(res, body, parsed, token, "登录接口失败", `${RISK}，稍后会自动重试`)
+          // Claimed today and the name already known: the touch has nothing
+          // left to do. magpie asks a `done` again every half hour before noon
+          // when it has not seen the claim itself (provisional), and each ask
+          // touching login/info was one more recorded sign-in — up to a dozen
+          // a morning for an account claimed on the website.
+          const known = names.get(token) ?? ""
+          if (claimed && known) {
+            name = known
+          } else {
+            const { res, body, parsed } = await json(token, LOGIN_INFO, deadline)
+            // 403 是风控，不是令牌坏了：账号可能是好的，只是这次请求被拒
+            gate(res, body, parsed, token, "登录接口失败", `${RISK}，稍后会自动重试`)
 
-          const me = dataOf(body)
-          // A name is a string. Anything else — a number, an object, a list —
-          // would reach text() as "12345" or "[object Object]" and be written
-          // back as the account's name, and magpie's card would show that
-          // instead of the key's tail. NickName wins when it is a name; Name
-          // is the fallback it always was.
-          const named = (v) => (typeof v === "string" && v.trim() ? v : "")
-          const candidate = text(named(me.NickName) || named(me.Name), 40)
-          const name = unusableName(candidate, token) ? "" : candidate
-          rememberName(token, name)
-          await rememberAccountName(client, token, name, auth, configDir)
+            const me = dataOf(body)
+            // A name is a string. Anything else — a number, an object, a list —
+            // would reach text() as "12345" or "[object Object]" and be written
+            // back as the account's name, and magpie's card would show that
+            // instead of the key's tail. NickName wins when it is a name; Name
+            // is the fallback it always was.
+            const str = (v) => (typeof v === "string" && v.trim() ? v : "")
+            const candidate = text(str(me.NickName) || str(me.Name), 40)
+            name = unusableName(candidate, token) ? "" : candidate
+            rememberName(token, name)
+          }
 
           // done 用触发**之前**那一页的合计：今天已经领过，领到的就是那时
           // 账本上的数。用触发之后那一页的话，两次读之间账本一变（行被挤到
@@ -916,16 +1010,34 @@ export async function MsmoliPlugin(input) {
           // 触达了却没有到账记录：可能是账本还没写出来（发放是异步的），
           // 也可能这个账号本来就不在活动范围。再读一次账本确认，别把刚写
           // 出来的发放丢掉。这一次重读买不到「等一会儿」——发放若真是几秒
-          // 后才写出来，紧接着的重读也读不到；补上那一段的是宿主：北京时间
-          // 12 点前，done/inactive 这类还没见到领取的回答会被当作暂定答案
-          // 每 30 分钟重问一次（checkin.go 的 provisional，由
-          // checkinSureHour 决定），到那时账本已经写出来了。
+          // 后才写出来，紧接着的重读也读不到。北京时间 12 点前补上那一段的
+          // 是宿主：还没见到领取的 done/inactive 是暂定答案，每 30 分钟重问
+          // （provisional，由 checkinSureHour 决定）。12 点起宿主就当天了结，
+          // 所以下午的时段由插件自己用 until 要一次半小时后的重问。
           const later = gained((await todayEarn(token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key)))
           if (later) return { outcome: "claimed", credit: later.credit, message: `领取 ${later.credit} 魔粒：${later.which}` }
+          const hourCN = Math.floor(minuteCN() / 60)
+          if (hourCN >= SURE_HOUR && deferred.get(token) !== today) {
+            for (const [k, d] of deferred) if (d !== today) deferred.delete(k)
+            deferred.set(token, today)
+            return {
+              outcome: "inactive",
+              message: "登录已触达，账本里还没有今天的到账；半小时后再核对一次",
+              until: new Date(Date.now() + AGAIN_MS).toISOString(),
+            }
+          }
           return { outcome: "inactive", message: "登录已触达，但今天没有到账记录（账号可能不在活动范围）" }
         } catch (e) {
           return { outcome: "failed", message: cardText(whyOf(e), token) || "签到失败", ...(signedOut(e) ? { signIn: "expired" } : {}) }
         }
+        })()
+        // best-effort, and never a reason for the hook to reject: the write
+        // catches its own failures, and anything it could still throw (an
+        // unreadable providers.json read) must not undo the answer above
+        try {
+          await rememberAccountName(client, token, name, auth, configDir)
+        } catch {}
+        return answer
       },
 
       // 魔粒余额与今日消耗，给账号卡片看。
@@ -1037,8 +1149,12 @@ export async function MsmoliPlugin(input) {
             const v = Math.round((n / d) * 10000) / 100
             return Number.isFinite(v) ? v : null
           }
+          // 用掉的超过今天领的、余额却还有：花的是昨天那份还没过期的魔粒，
+          // 不是超额。那时分母同样换成「今天手里有多少」——否则昨天 15:00
+          // 领 250、今天领 250、上午用掉 300，卡片会画成 120% 的超额，旁边
+          // 写着余额 200。超额只在余额也空了时才成立。
           const used =
-            earnedToday > 0
+            earnedToday > 0 && (usedToday <= earnedToday || available === 0)
               ? pct(usedToday, earnedToday)
               : usedToday + available > 0
                 ? pct(usedToday, usedToday + available)

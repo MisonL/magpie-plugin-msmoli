@@ -3866,3 +3866,244 @@ test("a secret that is not ms-shaped is masked in the echoed command too", async
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ── 第三十一轮：复查批次（不可见字符切开令牌、运行时报错回显路径、写入守卫
+// 在 Windows 扩展名下跳过、非 ms 形状的值、回读的形状、重复参数）──────────
+
+// both files written: tests that stub exists() say they are there
+const fixture = (prefix, providers = [presetOf(A)], auth = {}) => {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers }))
+  writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify(auth))
+  return dir
+}
+
+test("a token cut by an invisible character is still masked where it is printed", async () => {
+  // show() 先把控制/格式字符换成空格、再按形状掩码：零宽空格（聊天软件复制
+  // 令牌时常夹带）或 \x01 把令牌切成两段，每段都不够长度下限，整串原样上终端。
+  const dir = fixture("msmoli-zwsp-")
+  try {
+    for (const cut of ["\u200b", "\x01", "\u2060"]) {
+      const pasted = A.slice(0, 13) + cut + A.slice(13)
+      const out = []
+      await main({ argv: ["--dir", dir, "--status", "--from", pasted], log: (s) => out.push(s) })
+      const text = out.join("\n")
+      for (const piece of [A.slice(0, 13), A.slice(13)]) {
+        assert.ok(!text.includes(piece), `${JSON.stringify(cut)} 切开的令牌，片段 ${piece} 上了终端:\n${text}`)
+      }
+      assert.match(text, /ms-a…5555/, `它该被整串掩码:\n${text}`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a secret echoed with an invisible character inside it is masked whole", async () => {
+  // scrub 的 maskEchoes 按连续子串找片段：子进程回显里令牌中间夹一个 \x01，
+  // 前 11 个字符不到 MIN_ECHO，原样留下。不可见字符要被跨过。
+  const dir = fixture("msmoli-echocut-")
+  try {
+    const out = []
+    await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 7, stdout: "", stderr: `key ${A.slice(0, 11)}\u0001${A.slice(11)} rejected\nnext line` }),
+    })
+    const text = out.join("\n")
+    assert.ok(!text.includes(A.slice(0, 11)), `令牌前段上了终端:\n${text}`)
+    assert.match(text, /key ms-a…5555 rejected/, `整串该掩成一处:\n${text}`)
+    assert.match(text, /\nnext line/, `换行仍然分行，不被跨过:\n${text}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the runtime's own failure message is masked like the child's output", async () => {
+  // spawnSync 的 ENOENT 把整条路径写进 message（"spawnSync <path> ENOENT"），
+  // 那半句没过 show()：一个带斜杠的令牌形路径整串上了终端，控制字符也照发。
+  const dir = fixture("msmoli-enoent-")
+  try {
+    // no run in common with the preset's A: maskEchoes would mask a shared
+    // tail as a piece of A, which hides the shape test this is about
+    const foreign = "ms-ZZZZ9999yyyy8888xxxx777766661234"
+    const tokenPath = `/tmp/${foreign}`
+    const out = []
+    await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", tokenPath],
+      log: (s) => out.push(s),
+      exists: (p) => p.startsWith(dir),
+      spawn: (b) => ({ error: Object.assign(new Error(`spawnSync ${b} ENOENT\x1b[2J`), { code: "ENOENT" }) }),
+    })
+    const text = out.join("\n")
+    assert.ok(!text.includes(foreign), `运行时报错把令牌形路径整串打出来了:\n${text}`)
+    assert.ok(!text.includes("\x1b"), "运行时报错里的控制字符不该到终端")
+    assert.match(text, /spawnSync \/tmp\/ms-Z…1234 ENOENT/, `其余照常:\n${text}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the outgoing key is masked in a spawn failure that names it too", async () => {
+  // --to-preset 的 provider key 会替换掉预设现有的 key：旧的那把也是真凭据，
+  // 被换掉时一条主机报错可能回显它。它是自建 vendor 的 key，不是 ms- 形状——
+  // 形状测试认不出它，运行时的报错路径此前又只滤当步的 secret，整串漏出去。
+  const old = "ghs_zzzz9999yyyy8888xxxx77776666"
+  const dir = fixture("msmoli-alsofail-", [{ id: "modelscope", preset: "modelscope", key: old }], { msmoli: { type: "api", key: B } })
+  try {
+    const out = []
+    await main({
+      argv: ["--dir", dir, "--to-preset", "--force", "--magpie", "/nonexistent"],
+      exists: (p) => p.startsWith(dir),
+      spawn: () => ({ error: Object.assign(new Error(`spawnSync /x/${old} ENOENT`), { code: "ENOENT" }) }),
+      log: (s) => out.push(s),
+    })
+    const text = out.join("\n")
+    assert.ok(!text.includes(old), `被替换掉的旧 key 在运行时报错里漏了:\n${text}`)
+    assert.ok(!text.includes(B), `当步的 key 也漏了:\n${text}`)
+    assert.match(text, /spawnSync \/x\/ghs_…6666 ENOENT/, `其余照常:\n${text}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a key that is not ms-shaped is masked where a typed value is echoed", async () => {
+  // show() 只认 ms- 形状。粘错位置的别家 key（ghs_…、sk-…）在 --from、
+  // 未知参数、裸 --magpie 三处被整串回显。一段 16 位以上、字母数字都有的
+  // 串，就是生成出来的 key 的样子，provider id 不长这样。
+  const dir = fixture("msmoli-nonms-")
+  const key = "ghs_abcdefghijklmnopqrstuvwxyz012345"
+  try {
+    for (const argv of [["--dir", dir, "--status", "--from", key], ["--dir", dir, "--magpie", key]]) {
+      const out = []
+      await main({ argv, log: (s) => out.push(s) })
+      const text = out.join("\n")
+      assert.ok(!text.includes(key), `${argv.join(" ")} 把 key 整串回显了:\n${text}`)
+      assert.match(text, /ghs_…2345/, `它该被掩码:\n${text}`)
+    }
+    await assert.rejects(main({ argv: [key], log: () => {} }), (e) => !e.message.includes(key) && /ghs_…2345/.test(e.message))
+    // --dir's echo too, on both lines that print it: the "no config files
+    // here" one, and the one after the folder is accepted
+    const dirOut = []
+    await main({ argv: ["--dir", key, "--status"], log: (s) => dirOut.push(s) })
+    assert.ok(!dirOut.join("\n").includes(key), `--dir 把 key 整串回显了:\n${dirOut.join("\n")}`)
+    assert.match(dirOut.join("\n"), /ghs_…2345 里没有 magpie 的配置文件/)
+    const okOut = []
+    await main({
+      argv: ["--dir", key, "--status"],
+      exists: (p) => p === join(key, "providers.json"),
+      log: (s) => okOut.push(s),
+    })
+    assert.ok(!okOut.join("\n").includes(key), `配置目录行把 key 整串回显了:\n${okOut.join("\n")}`)
+    assert.match(okOut.join("\n"), /magpie 配置目录：ghs_…2345/)
+    // 一个真 id 照样读得出来：带连字符的名字、纯字母的长名字都不像 key
+    for (const id of ["modelscope-backup-2025", "my-modelscope-provider", "abcdefghijklmnopqrstuvwxyz"]) {
+      const out = []
+      await main({ argv: ["--dir", dir, "--status", "--from", id], log: (s) => out.push(s) })
+      assert.ok(out.join("\n").includes(id), `provider id ${id} 不该被当成 key 掩掉`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("on Windows, a --magpie path without .exe is still checked against --dir", async () => {
+  // spawnSync 在 Windows 上把没有扩展名的路径补成 .exe 去跑，existsSync 不补。
+  // 守卫只认 exists(bin) 时就跳过了自己：读的是夹具，写的是真 magpie 的目录。
+  const dir = fixture("msmoli-winext-")
+  try {
+    const exe = "C:\\Tools\\magpie"
+    const calls = []
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", exe],
+      os: "win32",
+      env: {},
+      home: "C:\\Users\\u",
+      exists: (p) => p.startsWith(dir) || p === exe + ".exe",
+      spawn: (...a) => (calls.push(a), { status: 0, stdout: "", stderr: "" }),
+      log: (s) => out.push(s),
+    })
+    assert.equal(code, 1)
+    assert.deepEqual(calls, [], "不同目录时一条命令都不该发")
+    assert.match(out.join("\n"), /--dir 与 --magpie 指向不同的配置目录/)
+    // 一个真不存在的二进制照旧放过守卫：它跑不起来，写不了任何地方
+    const none = []
+    await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent/magpie"],
+      exists: (p) => p.startsWith(dir),
+      spawn: (...a) => (none.push(a), { error: Object.assign(new Error("spawnSync ENOENT"), { code: "ENOENT" }) }),
+      log: () => {},
+    })
+    assert.equal(none.length, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a read-back that is the wrong shape is 'cannot read', not 'not found'", async () => {
+  // 写前的检查认形状（[]、"x"、null 都算读不出来），回读只认 null：一份变成
+  // [] 的 plugin-auth.json 被报成「没找到目标令牌，检查 magpie 是否在运行」。
+  for (const [to, file, junk, auth] of [
+    ["--to-plugin", "plugin-auth.json", [], {}],
+    ["--to-preset", "providers.json", "x", { msmoli: { type: "api", key: B } }],
+  ]) {
+    const dir = fixture("msmoli-rbshape-", [presetOf(A)], auth)
+    try {
+      const out = []
+      const code = await main({
+        argv: ["--dir", dir, to, "--force", "--magpie", "/nonexistent"],
+        exists: (p) => p.startsWith(dir),
+        spawn: () => (writeFileSync(join(dir, file), JSON.stringify(junk)), { status: 0, stdout: "", stderr: "" }),
+        log: (s) => out.push(s),
+      })
+      const text = out.join("\n")
+      assert.equal(code, 1)
+      assert.match(text, new RegExp(`${file.replace(".", "\\.")} 读不出来`), `${to}:\n${text}`)
+      assert.doesNotMatch(text, /没找到目标/, `${to}:\n${text}`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test("a value flag given twice is refused, and --flag=value is read", async () => {
+  // 两个方向同时给会被拒，三个带值的参数却静默以后者为准：--magpie A
+  // --magpie B 写进了 B。--dir=x 之前被当成未知参数。
+  for (const argv of [
+    ["--dir", "/a", "--dir", "/b"],
+    ["--magpie", "/a/magpie", "--magpie", "/b/magpie"],
+    ["--from", "x", "--from=y"],
+  ]) {
+    await assert.rejects(main({ argv, log: () => {} }), /只能给一次/, argv.join(" "))
+  }
+  await assert.rejects(main({ argv: ["--dir="], log: () => {} }), /缺少值/)
+  const dir = fixture("msmoli-eqflag-")
+  try {
+    const out = []
+    const code = await main({ argv: [`--dir=${dir}`, "--status"], log: (s) => out.push(s) })
+    assert.equal(code, 0, out.join("\n"))
+    assert.match(out.join("\n"), new RegExp(`magpie 配置目录：.*${dir.split(sep).pop()}`))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a path is never taken for a key, and a secret split across lines is masked", async () => {
+  // 路径是用户自己的，照样可读：一条带长串字母数字的路径不是 key。被换行切开
+  // 的回显仍是那把令牌，每半不够 MIN_ECHO 也要整串掩掉。
+  const path = "/tmp/abcdefgh12345678ijklmnop/x"
+  await assert.rejects(main({ argv: [path], log: () => {} }), (e) => e.message.includes(path))
+  const dir = fixture("msmoli-splitecho-")
+  try {
+    const out = []
+    await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 7, stdout: "", stderr: `got ${A.slice(0, 11)}\n${A.slice(11, 22)} end` }),
+    })
+    const text = out.join("\n")
+    assert.ok(!text.includes(A.slice(0, 11)) && !text.includes(A.slice(11, 22)), `被换行切开的令牌漏了:\n${text}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

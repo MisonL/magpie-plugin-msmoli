@@ -94,6 +94,10 @@ to replace a single existing account. `--to-preset` goes the other way (needs
 `--force`: that key is what chat uses). If more than one provider could be the
 built-in side (say, a relay of the same host), the tool refuses to guess and
 `--from <id>` picks one; `--dry-run` prints the commands without running them.
+A value flag given twice (`--dir a --dir b`) is refused, not silently last-wins,
+and `--dir=<folder>` is read as well. `--from` and a stray argument are echoed
+back masked when the value looks like a key — a token pasted into the wrong
+position is never printed whole, whatever its shape.
 
 Turn the check-in on: Settings → Usage → Plugins → the `msmoli` row, or in
 `settings.json` (in magpie's own folder, `~/.config/magpie` for an installed
@@ -132,13 +136,20 @@ this one reads the day's ledger around it:
 2. touch `login/info`
 3. read the ledger again
 
+A `claimed` needs a grant the ledger did not already show around the touch. If
+the touch went through and the ledger still shows nothing, the plugin asks
+magpie to look again half an hour later (`until`), once — from Beijing noon on
+magpie would otherwise settle `inactive` for the day, and a grant written a few
+seconds late was recorded as "the account may not be in the campaign". Before
+noon magpie's own provisional re-ask (every 30 minutes) already covers it.
+
 Four outcomes follow:
 
 | Outcome | Meaning |
 |---|---|
 | `done` | already claimed today, with the day's total |
 | `claimed` | this run claimed it, with the amount — a grant the ledger did not already show, so a row that was there before the touch is never counted as this run's |
-| `inactive` | the sign-in went through but nothing was granted |
+| `inactive` | the sign-in went through but nothing was granted (from noon on, asked once more in 30 minutes before it stands for the day) |
 | `failed` | nothing was claimed — including "not yet time", explained below |
 
 The endpoints it uses, all on `modelscope.cn` with `Cookie: m_session_id=ms-…`
@@ -184,10 +195,11 @@ One string works the same way: `{ "checkinWindow": "08:30-10:00" }`.
 `false` turns the window off (claim whenever magpie asks); so does `"off"`.
 An unusable value — `08:30`–`08:00`, a date that isn't a clock time — falls
 back to the default rather than never claiming. An end past **23:00** is
-capped there: the host asks every 30 minutes, so a target needs asks after it
-that still land on the same day. A target in the last half hour would get
-fewer, and if those fail the day's credits go with them; capping at 23:00
-keeps at least two. A window that sits entirely past 23:00 falls back to the
+capped there: the host does not ask at the target's minute — its own look runs
+every 30 minutes on a phase of its own, so the first ask past a target can come
+up to half an hour late, and the retry after a failure half an hour after that.
+A target needs both to still land on the same day. Capping at 23:00 leaves any
+target that room; later would leave some with one ask, or none. A window that sits entirely past 23:00 falls back to the
 default window too, since there would be nowhere left to put the target. The
 file is read on every ask, so a change takes effect without restarting
 magpie.
@@ -195,7 +207,8 @@ magpie.
 How it fits magpie's schedule: magpie asks once when the Beijing day turns,
 then every 30 minutes — always after a `failed`, and also after a
 `done`/`inactive`/`ineligible` it hasn't seen a claim for yet, up to noon
-Beijing (a provisional answer: the vendor's day may not have turned). So
+Beijing (a provisional answer: the vendor's day may not have turned; from noon
+on the plugin's own `until` buys the same re-ask when the ledger lagged). So
 before the window's moment the plugin answers `failed` with the time it will
 run, and sends **no request at all**. `failed` is still the one outcome that
 guarantees a re-ask; the others only get one while the day is unproven.
@@ -382,7 +395,7 @@ token has the token masked before it reaches the card or magpie's log.
 | `failed` with HTTP 401 | the token was revoked — make a new one and sign in again |
 | `failed` with HTTP 403 | ModelScope's risk control refused the request; the token is fine. It retries in 30 minutes |
 | Before the window the card reads failed, with a line naming the claim time: `09:56 后自动领取（magpie 每半小时问一次，无需操作）` | expected — the card leads with when it will claim; see "When it claims" above |
-| Always `inactive` | the sign-in works but nothing shows in today's ledger: the account may not be eligible, or the grant hasn't been written yet (a claim made elsewhere shows as `done`). Before Beijing noon magpie asks again every 30 minutes, so a late grant is picked up; from noon on this answer stands for the day |
+| Always `inactive` | the sign-in works but nothing shows in today's ledger: the account may not be eligible, or the grant hasn't been written yet (a claim made elsewhere shows as `done`). Before Beijing noon magpie asks again every 30 minutes; from noon on the plugin asks once more itself, half an hour later ("半小时后再核对一次"), and only the second `inactive` stands for the day |
 | Chat through the `modelscope` preset answers `429 insufficient balance` in the Routing log | the account's daily 250 魔粒 are spent — a flagship call costs 2, so ~125 calls run the day dry and the vendor refuses the rest. Not this plugin: it registers no models. If you want magpie to *see* the balance on the preset's card too, give the preset the same reading — Balance URL `https://modelscope.cn/openapi/v1/magicubes/balance`, Balance field `data.available_balance` in its editor (the same token answers it; read `1.50` on 2026-10-28). Whether the gateway then holds a drained key before spending a request on it is not verified — the safe path is still the 429's own 30-minute rest |
 | Two accounts of one ModelScope nickname, and only one of them checks in | magpie before 2026-10-20 kept a plugin's check-in per display name rather than per sign-in, so namesakes collapsed into one. Update magpie: the fix landed upstream on 2026-10-20 (magpie-community/plugins#254) |
 | Edits to this plugin do nothing | path plugins are referenced in place; restart magpie |
