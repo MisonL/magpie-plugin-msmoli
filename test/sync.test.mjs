@@ -4333,3 +4333,93 @@ test("an id that is another vendor's key is masked in the ambiguity, bare and re
     rmSync(dir2, { recursive: true, force: true })
   }
 })
+
+// ── 第三十四轮：含分隔符的密钥（AWS secret 形状）────────────────────────
+
+// 最长「原样出现在输出里」的连续子串。判据用 12，与 mask/min 的门槛同源：
+// 短于 12 的偶然重合不算泄漏，12 及以上就是有人能拿到的实料。
+const longestKept = (text, secret) => {
+  let best = ""
+  for (let i = 0; i < secret.length; i++)
+    for (let j = i + 1; j <= secret.length; j++) {
+      const piece = secret.slice(i, j)
+      if (text.includes(piece) && piece.length > best.length) best = piece
+    }
+  return best
+}
+
+test("a secret with separators in it is masked whole, not just its longest run", async () => {
+  // 判据只按「连续的字母数字段」掩码，于是 AWS secret（wJalr…/K7MDENG/bPxRfi…）
+  // 里只有 18 字符那段被掩，前 26 个字符原样上终端——而它的分段只有 13/7/18 位，
+  // 「16+ 位的段」整条断言看不见。凡是分段成词、又不是路径形状的值，整串掩掉。
+  const aws = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  const dir = fixture("msmoli-sepkey-")
+  try {
+    for (const argv of [
+      ["--dir", dir, "--status", "--from", aws],
+      ["--dir", dir, "--to-plugin", "--dry-run", "--magpie", aws],
+      ["--dir", dir, "--from=" + aws, "--status"],
+    ]) {
+      const out = []
+      await main({ argv, log: (s) => out.push(s), exists: (p) => p.startsWith(dir) }).catch((e) => out.push(e.message))
+      const text = out.join("\n")
+      const kept = longestKept(text, aws)
+      assert.ok(kept.length < 12, `${argv.join(" ")}：原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}：\n${text}`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a value that starts like a path keeps its shape even when its parts are long", async () => {
+  // 反向：带分隔符不等于密钥。以 / ~ . 、盘符或 UNC 起头的值是路径，保留形状、
+  // 只掩其中像密钥的那一段——否则 --dir 一类的回显会变成 "Docu…oject"。
+  const dir = fixture("msmoli-tilde-")
+  try {
+    // 路径本身可读（组件都在 16 位以下、不混大小写）；里面像密钥的那一段仍被掩
+    const readable = [
+      "/Users/mison/Documents/NewProject",
+      "~/.config/magpie",
+      "./relative/dir/name",
+      "C:\\Users\\QDM\\AppData",
+      "/var/folders/hq/q19jry150l16mrrbkh7wm0_m0000gn/T/msmoli-shapes-OTapSg",
+      "Documents/NewProject",
+      "work/magpie-plugin-msmoli",
+      "data",
+    ]
+    for (const p of readable) {
+      const out = []
+      await main({ argv: ["--dir", dir, "--status", "--from", p], log: (s) => out.push(s) })
+      assert.ok(out.join("\n").includes(p), `${p} 的路径形状被掩掉了：\n${out.join("\n")}`)
+    }
+    // PATHY 那一臂自身：以 / 起头的值就算有两段 12+ 位混合大小写的组件，也是
+    // 路径不是密钥（去掉 !PATHY 后这两条会变成 "（N 字符）"）
+    for (const p of ["/Documents/NewProject", "/SomeLongDirectoryName/AnotherLongName"]) {
+      const o = []
+      await main({ argv: ["--dir", dir, "--status", "--from", p], log: (s) => o.push(s) })
+      const text = o.join("\n")
+      // 路径的结构在：最后一个组件整段可读，只有前面那个长 camelCase 组件按
+      // 既有规则被掩。整串被当成 key 时整个值只剩 "/Som…Name"，两个组件都看不见。
+      assert.ok(text.includes("/" + p.split("/").at(-1)), `${p} 以 / 起头，后一个组件该可读：\n${text}`)
+    }
+    // 普通词组成的相对路径：两段都长（12+），但不混大小写，不该被当成密钥
+    for (const p of ["documents/mynewprojectfolder", "photographs/vacationphotos", "microservices/documentation"]) {
+      const o = []
+      await main({ argv: ["--dir", dir, "--status", "--from", p], log: (s) => o.push(s) })
+      assert.ok(o.join("\n").includes(p), `${p} 是小写路径组件，不该被掩：\n${o.join("\n")}`)
+    }
+    // 嵌在路径里的令牌：路径留着，令牌那段掩掉
+    const withToken = "/tmp/ghp_16C7e42F292c6912E7710c838347Ae178B4a"
+    const o = []
+    await main({ argv: ["--dir", dir, "--status", "--from", withToken], log: (s) => o.push(s) })
+    assert.match(o.join("\n"), /\/tmp\/ghp_16C7…8B4a/, `路径里的令牌该只掩那一段：\n${o.join("\n")}`)
+    // 已知边界（第三十二轮就有的取舍）：一个 16+ 位、大小写混排的单个路径组件
+    // 与一把 key 的「一段」无法区分，会被掩。这里钉住它，免得将来当成新缺陷。
+    const camel = "/Users/mison/Documents/SomeLongDirectoryName"
+    const c = []
+    await main({ argv: ["--dir", dir, "--status", "--from", camel], log: (s) => c.push(s) })
+    assert.match(c.join("\n"), /Some…Name/, `camеlCase 组件按既有规则被掩：\n${c.join("\n")}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

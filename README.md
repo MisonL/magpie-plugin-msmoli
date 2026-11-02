@@ -100,8 +100,11 @@ back masked when the value looks like a key — a token pasted into the wrong
 position is never printed whole, whatever its shape. That covers the shapes
 `ms-…` does not: a GitHub or Slack token, an AWS secret (which carries `/`), a
 UUID, a base64 run with `+/=`. A value that is one word and one key is masked
-whole; a path keeps its shape and only the key-like run inside it is masked, so
-`--dir /tmp/ghp_16C7…` still names the folder it read. The folder is reported
+whole — including one split by a separator, as an AWS secret is; the two parts
+of 12+ characters with mixed case are what marks it. A value that starts like a
+path (`/`, `~`, `.`, a drive letter, a UNC root) keeps its shape, and only the
+key-like run inside it is masked, so `--dir /tmp/ghp_16C7…` still names the
+folder it read. The folder is reported
 the same way on every line that names it, and magpie's own output goes through
 the same door — a key of another provider in the child's error message is
 masked there too, not only the `ms-` shape. A provider id and an account name
@@ -387,8 +390,11 @@ nothing is lost.
 `data` that is a list rather than an object, a balance with no
 `available_balance` or one that is not a number — each is a failure with the
 reason, because "0 魔粒可用" is a definite answer that would be false. The same
-goes for the server's own text: a message or a grant's title that contains the
-token has the token masked before it reaches the card or magpie's log.
+goes for the server's own text: a message or a grant's title carrying a key —
+this account's token, or one of another vendor's, which this plugin never held
+and therefore cannot compare against — has it masked before the text reaches
+the card or magpie's log. What counts as a key there is the same rule `--from`
+uses, so a ledger title or a server message of ordinary words is untouched.
 - `MAGPIE_MSMOLI_CONFIG` overrides the config file's path. It exists so the test
   suite never touches a real file; it works in production too.
 - The other 170 魔粒 a day come from liking 10 items (20), posting AIGC works

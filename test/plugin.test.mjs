@@ -1060,8 +1060,8 @@ test("two tokens are two accounts: own target, own name, no bleed", async () => 
       return reply({ body: { success: true, data: { records: [] } } })
     }
     try {
-      await two.auth.checkin(async () => ({ type: "api", key: A }))
-      const ua = await two.auth.usage(async () => ({ type: "api", key: A }))
+      await two.auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+      const ua = await two.auth.usage(async () => ({ type: "api", key: "ms-test" }))
       const ub = await two.auth.usage(async () => ({ type: "api", key: B }))
       assert.equal(ua.user, "alice", "the account that checked in has its name")
       assert.equal(ub.user, "", "the other account must not borrow it")
@@ -6311,4 +6311,116 @@ test("masking a long echo keeps every character in place, invisible ones include
     () => auth.usage(async () => ({ type: "api", key: token })),
   )
   assert.match(two.error, /ms-a…5555 and ms-a…5555/, `两处各掩一次: ${two.error}`)
+})
+
+// ── 第三十四轮：卡片上的「别家」密钥 ─────────────────────────────────────
+
+// 最长「原样出现在文本里」的连续子串；12 与 mask 的门槛同源
+const longestKeptIn = (text, secret) => {
+  let best = ""
+  for (let i = 0; i < secret.length; i++)
+    for (let j = i + 1; j <= secret.length; j++) {
+      const piece = secret.slice(i, j)
+      if (text.includes(piece) && piece.length > best.length) best = piece
+    }
+  return best
+}
+
+test("a key the plugin does not hold is masked on the card too", async () => {
+  // cardText 的三道里，前两道都围着「本账号的令牌」转，第三道只认 ms- 形状。
+  // 于是账本 title（服务端可控）里带一把别家的 key 时整段上卡片：实测 ghp 保留
+  // 34/40、AWS 34/40、AKIA 20/20、hex 32/32。卡片的承诺是 key 不上卡片，
+  // 别家的 key 也是 key。
+  const foreign = {
+    ghp: "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+    aws: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    xoxb: "xoxb-" + "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx",
+    akia: "AKIAIOSFODNN7EXAMPLE",
+    hex: "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+    uuid: "550e8400-e29b-41d4-a716-446655440000",
+    // 16 characters is exactly where the mixed-case rule starts: one shorter
+    // and it is a word, one longer and the floor proves nothing
+    sixteen: "AbCdEfGhIjKlMnOp",
+  }
+  for (const [name, key] of Object.entries(foreign)) {
+    const ledger = { success: true, data: { records: [day({ title: `bonus ${key}` })], total: 1 } }
+    const r = await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: ledger },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      },
+      () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+    )
+    const msg = r.message ?? r.error ?? ""
+    const kept = longestKeptIn(msg, key)
+    assert.ok(kept.length < 12, `${name}：卡片上原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}：${msg}`)
+    assert.match(msg, /bonus /, `${name}：卡片该只剩标题，别把整条吞了：${msg}`)
+  }
+})
+
+test("a real ledger title is not mistaken for a key", async () => {
+  // 反向：判据要宽到能掩 AWS secret，就不能窄到把正常标题也掩了。这些是
+  // ModelScope 账本里真会出现的形状（中文标题、rule_key、模型名、日期）。
+  const titles = [
+    "每日签到",
+    "社区任务奖励",
+    "daily_active",
+    "api_inference",
+    "Qwen3-Max 调用返还",
+    "限时活动：ModelScope 周年庆",
+    "gift_infocomplement_daily",
+    "退款：重复扣费 12.5 魔粒",
+    "bonus for uid 12345678",
+  ]
+  for (const title of titles) {
+    const ledger = { success: true, data: { records: [day({ title })], total: 1 } }
+    const r = await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: ledger },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      },
+      () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+    )
+    assert.ok((r.message ?? "").includes(title), `真实标题被误掩：${title} → ${r.message}`)
+  }
+  // 一个以 / 起头的值就算带着两段 12+ 位混合大小写的组件，也是路径不是 key：
+  // 路径结尾那段照旧可读（整串被当成 key 时只剩 "/Use…Name"）
+  // 卡片把标题截到 40 码点，所以用一条能整条放下的短路径
+  const pathy = "/SomeLongDirName/AnotherLongNm"
+  const ledger = { success: true, data: { records: [day({ title: pathy })], total: 1 } }
+  const r = await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: ledger },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+  )
+  assert.ok((r.message ?? "").includes("/AnotherLongNm"), `以 / 起头的值不该整串被掩：${r.message}`)
+  // 盘符与 UNC 也算路径起头（PATHY 的另外两臂）
+  for (const [v, keep] of [["C:\\SomeLongDirName\\AnotherLongNm", "AnotherLongNm"], ["\\\\srv\\SomeLongDirName\\AnotherLongNm", "AnotherLongNm"]]) {
+    const led = { success: true, data: { records: [day({ title: v })], total: 1 } }
+    const r2 = await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: led },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      },
+      () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+    )
+    assert.ok((r2.message ?? "").includes(keep), `${v} 是路径起头，不该整串被掩：${r2.message}`)
+  }
+  // 服务端自己的报错原话也走同一道门：这些是 magpie 会原样带上卡片的措辞，
+  // 没有一个是 key 的形状，一个字都不该被掩
+  for (const said of [
+    "系统繁忙，请稍后重试",
+    "请求过于频繁",
+    "invalid token",
+    "user not found: mison",
+    "daily limit exceeded for account 12345678",
+    "Unusual activity detected, please try again later",
+  ]) {
+    const r3 = await withFetch({ "/openapi/v1/magicubes/transactions?page=1&page_size=50": { status: 500, body: { message: said } } }, () =>
+      auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+    )
+    assert.ok((r3.message ?? "").includes(said), `服务端原话被误掩：${said} → ${r3.message}`)
+  }
 })

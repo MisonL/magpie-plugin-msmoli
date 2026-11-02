@@ -388,7 +388,25 @@ const keyRun = (r) =>
   (r.length >= 16 && /\d/.test(r) && /[A-Z]/.test(r))
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 // one word, and something in it looks like a key
-const isKey = (v) => !/[\s\\/]/.test(v) && (UUID.test(v) || /[+=]/.test(v) || (v.match(RUN) ?? []).some(keyRun))
+const PATHY = /^(?:[~/.]|[A-Za-z]:[\\/]|\\\\)/
+const isKey = (v) => {
+  if (/\s/.test(v)) return false
+  // no separator: the whole value is one word, and one key-like run in it is
+  // enough (a generated key has no separator at all). PATHY's leading "." is
+  // for paths (./x, ../x): a key never begins with one
+  if (!/[\\/]/.test(v)) return UUID.test(v) || /[+=]/.test(v) || (v.match(RUN) ?? []).some(keyRun)
+  // with a separator it is a key only when it does not *start* like a path: an
+  // AWS secret (wJalr…/K7MDENG/…) carries slashes but begins with a word, and
+  // the shape mask reached only the one long run inside it, leaving 26 of its
+  // 40 characters on the terminal. A value that starts like a path (a leading
+  // / ~ . , a drive letter, a UNC root) is one — /tmp/ghp_16C7… keeps its
+  // shape with the key-like run inside it masked.
+  // two segments of 12+ characters mixing cases: a secret's own alphabet, and
+  // something a pair of ordinary path components does not produce (NewProject
+  // is one such component, not two)
+  const segs = v.split(/[\\/]/).filter((seg) => seg.length >= 12 && /[a-z]/.test(seg) && /[A-Z]/.test(seg))
+  return !PATHY.test(v) && segs.length >= 2
+}
 const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
 const arg = (v) => {
   const s = String(v ?? "")

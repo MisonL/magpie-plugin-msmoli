@@ -629,6 +629,60 @@ const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
 // does not end the run, for the reason maskEchoes steps over one.
 const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]){11,}`, "gu")
 
+// keyShaped catches a key this plugin does not hold. tokenShaped knows only
+// the ms- prefix, so a server — or a proxy in front of it — that echoes
+// another vendor's credential into a message or a ledger title put it on the
+// card whole. Measured before this was written: 34 of the 40 characters of a
+// ghp_ token, all 20 of an AWS access-key id, all 32 of a hex digest. The
+// card's promise is that a key never reaches it, and a key of somebody else's
+// is still somebody's key.
+//
+// The shape rules are the ones bin/sync.mjs applies to a typed value, so the
+// two halves of this tool agree about what "looks like a key" means: a run of
+// 16+ characters mixing cases, 32+ mixing digits and letters, or 16+ carrying
+// digits and capitals; a UUID; a value carrying the base64 symbols. A word
+// does not qualify — which is what keeps "每日签到", a model tier or a rule_key
+// readable on the card.
+const RUN = /[A-Za-z0-9]+/g
+const keyRun = (r) =>
+  (r.length >= 16 && /[a-z]/.test(r) && /[A-Z]/.test(r)) ||
+  (r.length >= 32 && /\d/.test(r) && /[A-Za-z]/.test(r)) ||
+  (r.length >= 16 && /\d/.test(r) && /[A-Z]/.test(r))
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
+// under 12 characters there is no key to hide and maskToken would have to
+// print "…" for what is only a short word
+const PATHY = /^(?:[~/.]|[A-Za-z]:[\\/]|\\\\)/
+const isKeyWord = (w) => {
+  if (w.length < 12) return false
+  if (!/[\\/]/.test(w)) return UUID.test(w) || /[+=]/.test(w) || (w.match(RUN) ?? []).some(keyRun)
+  // with a separator it is one key only when it does not start like a path and
+  // carries two parts of 12+ characters mixing cases: that is an AWS secret
+  // (wJalr…/K7MDENG/bPxRfi…), and a pair of ordinary folder names is not
+  const parts = w.split(/[\\/]/).filter((seg) => seg.length >= 12 && /[a-z]/.test(seg) && /[A-Z]/.test(seg))
+  return !PATHY.test(w) && parts.length >= 2
+}
+
+// maskKeys walks the words of a piece of text: one word that is itself a key
+// goes, and inside a word that is not, only the key-like runs and UUIDs go.
+// Punctuation that cannot be part of a key stays where it was, so a card
+// reads "（bonus ghp_16C7…8B4a）" rather than losing its brackets.
+const maskKeys = (s) =>
+  s.replace(/[^\s]+/g, (word) => {
+    const lead = (word.match(/^[^A-Za-z0-9+/=_.-]*/) ?? [""])[0]
+    const tail = (word.slice(lead.length).match(/[^A-Za-z0-9+/=_.-]*$/) ?? [""])[0]
+    const body = word.slice(lead.length, word.length - tail.length)
+    if (!body) return word
+    // the decision runs on the whole word, not the stripped body: a UNC path
+    // begins with two backslashes, and \ is not in the identity set — stripped
+    // as "lead", the rest looked like a relative path with two long camelCase
+    // folders and was masked whole (the same test on the word sees PATHY)
+    const masked = isKeyWord(word)
+      ? maskToken(body)
+      : body.replace(RUN, (r) => (keyRun(r) ? maskToken(r) : r)).replace(UUID_ANY, (m) => maskToken(m))
+    return lead + masked + tail
+  })
+
 // cardText is what a host error becomes before it reaches the account card or
 // the terminal. The host's message is not our text: magpie's own CLI scrubs
 // tokens out of "no key ms-… for provider" for the same reason, and a message
@@ -645,12 +699,14 @@ const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]
 // Three passes, in this order. The key itself, whatever its shape or length:
 // a split on the exact string masks it whole. Then a piece of it (maskEchoes)
 // for the echo that is no longer equal to it — cut short, or framed. Then,
-// when there is no key in hand, whatever is merely token-shaped: that last
-// pass is all hostText has, and all a message from magpie carries.
+// when there is no key in hand, whatever is merely token-shaped: that pass is
+// all hostText has, and all a message from magpie carries. Fourth, whatever
+// looks like a key of ANOTHER vendor (keyShaped) — the server's own words are
+// not vetted by the shape of ours.
 const cardText = (value, token, max = 200) => {
   let s = String(value ?? "")
   if (typeof token === "string" && token) s = s.split(token).join(maskToken(token))
-  return text(maskEchoes(s, token).replace(tokenShaped, (m) => maskToken(m)), max)
+  return text(maskKeys(maskEchoes(s, token).replace(tokenShaped, (m) => maskToken(m))), max)
 }
 
 // hostText is cardText for the two exits where there is no token to split on:
