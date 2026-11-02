@@ -104,7 +104,9 @@ whole; a path keeps its shape and only the key-like run inside it is masked, so
 `--dir /tmp/ghp_16C7…` still names the folder it read. The folder is reported
 the same way on every line that names it, and magpie's own output goes through
 the same door — a key of another provider in the child's error message is
-masked there too, not only the `ms-` shape.
+masked there too, not only the `ms-` shape. A provider id and an account name
+are read out of magpie's own files and go through the same door: a key pasted
+into either field is masked on every line the tool names it.
 
 Turn the check-in on: Settings → Usage → Plugins → the `msmoli` row, or in
 `settings.json` (in magpie's own folder, `~/.config/magpie` for an installed

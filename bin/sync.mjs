@@ -458,11 +458,11 @@ export function planToPlugin({ preset, accounts, force }) {
     // vendor found by --from or by its chat host is named "my-ms", and
     // telling them to fix "modelscope" sends them to a provider that isn't
     // there — or, on a machine that has both, to the wrong one.
-    lines.push(`  先修好内置那边的 key（magpie provider key ${show(preset.id)} <key>）。`)
+    lines.push(`  先修好内置那边的 key（magpie provider key ${arg(preset.id)} <key>）。`)
     return { action: "refuse", lines, cmds: [] }
   }
   if (accounts.length === 0) {
-    lines.push(`→ 将把内置预设（${show(preset.id)}）的令牌登录给插件：magpie plugin login ${ID}（令牌走 stdin）`)
+    lines.push(`→ 将把内置预设（${arg(preset.id)}）的令牌登录给插件：magpie plugin login ${ID}（令牌走 stdin）`)
     return { action: "run", lines, cmds: [{ argv: ["plugin", "login", ID], stdin: `${preset.key}\n`, secret: preset.key }] }
   }
   // Every entry is there but none carries a token the plugin itself would read
@@ -471,11 +471,11 @@ export function planToPlugin({ preset, accounts, force }) {
   // and --force would not help: the file is the problem, not the choice.
   if (accounts.every((a) => !a.token)) {
     lines.push(`✗ 插件里 ${ID} 的条目读不出令牌（type 不是 api，或 key 不是字符串）。`)
-    lines.push(`  magpie 也不会把它算作登录。${show(accounts[0].name)} 那个条目请先删掉或重新登录，再重跑。`)
+    lines.push(`  magpie 也不会把它算作登录。${arg(accounts[0].name)} 那个条目请先删掉或重新登录，再重跑。`)
     return { action: "refuse", lines, cmds: [] }
   }
-  lines.push(`  插件现有：${accounts.map((a) => `${show(a.name)}（${mask(a.token)}）`).join("、")}`)
-  lines.push(`  内置预设：${show(preset.id)}（${mask(preset.key)}）`)
+  lines.push(`  插件现有：${accounts.map((a) => `${arg(a.name)}（${mask(a.token)}）`).join("、")}`)
+  lines.push(`  内置预设：${arg(preset.id)}（${mask(preset.key)}）`)
   if (!force) {
     lines.push(`✗ 两边令牌不同，未做改动。`)
     lines.push(`  直接 login 会新增第二个账号（宿主按令牌分账号），logout 会登出该 provider 的全部账号，`)
@@ -487,7 +487,7 @@ export function planToPlugin({ preset, accounts, force }) {
     lines.push(`  请先在 magpie 里删掉多余账号，或手动执行。`)
     return { action: "refuse", lines, cmds: [] }
   }
-  lines.push(`→ 将先 logout（登出 ${show(accounts[0].name)}）再 login 内置那把。当天已签到的记录会重来，昵称下次签到时写回。`)
+  lines.push(`→ 将先 logout（登出 ${arg(accounts[0].name)}）再 login 内置那把。当天已签到的记录会重来，昵称下次签到时写回。`)
   return {
     action: "run",
     lines,
@@ -512,7 +512,7 @@ export function planToPreset({ preset, accounts, force }) {
     // same pair of files.
     const same = preset && accounts.find((a) => a.token && a.token === preset.key)
     if (same) {
-      lines.push(`✓ 插件的 ${show(same.name)} 已与内置预设用同一把令牌（${mask(same.token)}），无需操作。`)
+      lines.push(`✓ 插件的 ${arg(same.name)} 已与内置预设用同一把令牌（${mask(same.token)}），无需操作。`)
       return { action: "noop", lines, cmds: [] }
     }
     lines.push(`✗ 插件主账号（${ID}）没有登录，没有可同步的令牌。`)
@@ -529,7 +529,7 @@ export function planToPreset({ preset, accounts, force }) {
     return { action: "noop", lines, cmds: [] }
   }
   lines.push(`  插件主账号：${ID}（${mask(main.token)}）`)
-  lines.push(`  内置预设：${show(preset.id)}，现有 key（${mask(preset.key)}）会被整条替换。`)
+  lines.push(`  内置预设：${arg(preset.id)}，现有 key（${mask(preset.key)}）会被整条替换。`)
   // The plugin refuses a key with anything but visible ASCII in it (tokenOf,
   // it would go out in an Authorization header). Writing such a key into the
   // preset would break chat requests while this tool reported success.
@@ -541,14 +541,14 @@ export function planToPreset({ preset, accounts, force }) {
   // provider key 的第一个参数是 id：一个以 "-" 开头的 id 会被 magpie 的 CLI
   // 当成 flag（`provider key --help <token>` 只打印帮助、不写 key）。
   if (typeof preset.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(preset.id)) {
-    lines.push(`✗ 这个 provider id 不是 magpie 接受的形状（${show(preset.id)}），不能用 provider key 写入。`)
+    lines.push(`✗ 这个 provider id 不是 magpie 接受的形状（${arg(preset.id)}），不能用 provider key 写入。`)
     return { action: "refuse", lines, cmds: [] }
   }
   if (!force) {
     lines.push(`✗ 内置这把 key 是聊天请求正在用的，替换会让那边跟着换。确认的话加 --force 重跑。`)
     return { action: "refuse", lines, cmds: [] }
   }
-  lines.push(`→ 将执行 magpie provider key ${show(preset.id)}（令牌是该命令的参数，进程列表里短暂可见）。`)
+  lines.push(`→ 将执行 magpie provider key ${arg(preset.id)}（令牌是该命令的参数，进程列表里短暂可见）。`)
   // Both keys are secrets here, not just the new one: the command replaces
   // the old key, and a host that says what it replaced ("cannot use key
   // ms-… for modelscope") echoes a real credential of the user's. The
@@ -567,7 +567,7 @@ function hidden(argv, secret, log) {
   // token-shaped (a token pasted into the wrong field), and this line is the
   // one place a command's arguments are printed whole. The plan line above
   // already goes through show(); the echo must not be the leak.
-  const shown = argv.map((a) => (secret && a === secret ? mask(secret) : show(a)))
+  const shown = argv.map((a) => (secret && a === secret ? mask(secret) : arg(a)))
   log(`$ magpie ${shown.join(" ")}`)
 }
 
@@ -678,7 +678,7 @@ function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
               : "（用 --magpie 指定完整路径）"
       // the runtime's message names the path it ran ("spawnSync <path>
       // ENOENT"), so it goes through the same door as the child's output
-      const e = new Error(`跑不动 ${show(bin)}：${scrub(String(r.error.message ?? ""), ...secrets)}${hint}`)
+      const e = new Error(`跑不动 ${arg(bin)}：${scrub(String(r.error.message ?? ""), ...secrets)}${hint}`)
       if (i > 0) e.recover = RECOVER
       throw e
     }
@@ -806,16 +806,16 @@ export async function main({
   const accounts = pluginAccounts(authRaw)
   const cands = presetCandidates(providers, args.from)
 
-  log(`  内置 ModelScope：${cands.length === 1 ? `${show(cands[0].id)}（${mask(cands[0].key)}）` : cands.length ? "多个候选" : "未配置"}`)
-  log(`  签到插件 msmoli：${accounts.length ? accounts.map((a) => `${show(a.name)}（${mask(a.token)}）`).join("、") : "未登录"}`)
+  log(`  内置 ModelScope：${cands.length === 1 ? `${arg(cands[0].id)}（${mask(cands[0].key)}）` : cands.length ? "多个候选" : "未配置"}`)
+  log(`  签到插件 msmoli：${accounts.length ? accounts.map((a) => `${arg(a.name)}（${mask(a.token)}）`).join("、") : "未登录"}`)
 
   if (cands.length > 1) {
     // --from matches by id, so two providers sharing one id leave it no way
     // to pick: say that rather than telling the user to use --from again.
     const ids = new Set(cands.map((p) => p?.id))
-    log(`✗ 内置侧有 ${cands.length} 个候选（${cands.map((p) => show(p.id)).join("、")}），不确定用哪个。`)
+    log(`✗ 内置侧有 ${cands.length} 个候选（${cands.map((p) => arg(p.id)).join("、")}），不确定用哪个。`)
     if (ids.size === 1) {
-      log(`  它们用的是同一个 id（${show(cands[0]?.id)}），--from 也分不开；请在 magpie 里删掉多余的那个 provider。`)
+      log(`  它们用的是同一个 id（${arg(cands[0]?.id)}），--from 也分不开；请在 magpie 里删掉多余的那个 provider。`)
     } else {
       log(`  用 --from <id> 指定。`)
     }
@@ -848,8 +848,8 @@ export async function main({
     } else {
       const bare = all.filter((p) => oursOf(p) && !keyedOf(p))
       if (bare.length) {
-        log(`✗ 内置侧的 ${show(bare[0].id)} 在，但还没有 key，没有可同步的令牌。`)
-        log(`  用 magpie provider key ${show(bare[0].id)} <key> 写入，或在 magpie 的「供应商」页填上。`)
+        log(`✗ 内置侧的 ${arg(bare[0].id)} 在，但还没有 key，没有可同步的令牌。`)
+        log(`  用 magpie provider key ${arg(bare[0].id)} <key> 写入，或在 magpie 的「供应商」页填上。`)
       } else {
         log(`✗ 内置侧没有带 key 的 ModelScope 预设。`)
         log(`  先在 magpie 的「供应商」页添加 ModelScope，或 magpie provider add ${PRESET} <key>。`)
@@ -939,7 +939,7 @@ export async function main({
       // 令牌加成第二个账号，而「有一个账号拿着目标令牌」照样成立——那正是
       // planToPlugin 明说 --force 不适用、工具却亲手造出来的状态。
       if (plan.cmds.length > 1 && after.length > 1) {
-        log(`✗ 回读发现插件现在有 ${after.length} 个账号（${after.map((a) => show(a.name)).join("、")}）。`)
+        log(`✗ 回读发现插件现在有 ${after.length} 个账号（${after.map((a) => arg(a.name)).join("、")}）。`)
         log(`  旧账号没被登出，login 追加了一个。请在 magpie 里删掉多余账号后重试。`)
         return 1
       }

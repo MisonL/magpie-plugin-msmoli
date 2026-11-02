@@ -4234,3 +4234,102 @@ test("a child's output of a hundred thousand control characters is scrubbed in o
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ── 第三十三轮：id 字段里粘进来的别家 key ──────────────────────────────
+
+test("a provider id that is another vendor's key is masked wherever it is named", async () => {
+  // id 与账号名同样来自本机文件、也会被回显，但它们此前只过 show()：show 只认 ms-
+  // 形状，一把 ghp_/AWS/xoxb 形状的 key 粘进 id 字段就会被整串打印（--status 的
+  // 「内置 ModelScope：」那行、计划行、以及 provider key 命令回显）。
+  const foreign = "ghp_16C7e42F292c6912E7710c838347Ae178B4a"
+  const dir = fixture("msmoli-idkey-", [{ id: foreign, preset: "modelscope", key: A }], { msmoli: { type: "api", key: B } })
+  try {
+    for (const argv of [["--dir", dir, "--status"], ["--dir", dir, "--to-plugin", "--dry-run"]]) {
+      const out = []
+      await main({ argv, log: (s) => out.push(s) })
+      const text = out.join("\n")
+      assert.ok(!text.includes(foreign), `${argv.join(" ")}：id 整串上了终端：\n${text}`)
+      assert.match(text, /ghp_…8B4a/, `${argv.join(" ")}：id 该按形状掩掉：\n${text}`)
+    }
+    const out = []
+    await main({ argv: ["--dir", dir, "--to-preset", "--force", "--dry-run"], log: (s) => out.push(s) })
+    const text = out.join("\n")
+    assert.ok(!text.includes(foreign), `--to-preset：id 整串上了终端：\n${text}`)
+    assert.match(text, /provider key ghp_…8B4a/, `命令回显也该掩：\n${text}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  // 正常形状的 id 与路径照旧可读
+  const dir2 = fixture("msmoli-okid-", [{ id: "modelscope-backup-2025-east", preset: "modelscope", key: A }])
+  try {
+    const o = []
+    await main({ argv: ["--dir", dir2, "--status"], log: (s) => o.push(s) })
+    const t = o.join("\n")
+    assert.ok(t.includes("modelscope-backup-2025-east"), `正常 id 不该被掩：\n${t}`)
+    assert.ok(t.includes(dir2), `配置目录不该被掩：\n${t}`)
+  } finally {
+    rmSync(dir2, { recursive: true, force: true })
+  }
+})
+
+test("an id that is another vendor's key is masked in the ambiguity, bare and read-back lines too", async () => {
+  // 同一个缺陷的另外三个出口：候选歧义提示（两个候选共用同一个 id）、自有 provider
+  // 但还没有 key 的提示、以及回读发现多账号时把账号名排出来那一行。id 与账号名
+  // 都来自本机文件，粘进去的别家 key 在这里同样只能是掩过的。
+  const foreign = "ghp_16C7e42F292c6912E7710c838347Ae178B4a"
+  const second = "ghp_ZZZZ9999yyyy8888xxxx777766661111"
+  const dir = fixture("msmoli-idkey2-", [
+    { id: foreign, preset: "modelscope", key: A },
+    { id: foreign, preset: "modelscope", key: B },
+  ])
+  try {
+    const out = []
+    await main({ argv: ["--dir", dir, "--status"], log: (s) => out.push(s) })
+    const text = out.join("\n")
+    assert.match(text, /多个候选/, `该走到歧义分支：\n${text}`)
+    assert.ok(!text.includes(foreign), `歧义提示里 id 整串上了终端：\n${text}`)
+    assert.match(text, /ghp_…8B4a/, `该按形状掩：\n${text}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  const bare = fixture("msmoli-idkey3-", [{ id: foreign, preset: "modelscope", key: "" }])
+  try {
+    const out = []
+    await main({ argv: ["--dir", bare, "--status"], log: (s) => out.push(s) })
+    const text = out.join("\n")
+    assert.match(text, /还没有 key/, `该走到「还没有 key」分支：\n${text}`)
+    assert.ok(!text.includes(foreign), `「还没有 key」那行 id 整串上了终端：\n${text}`)
+  } finally {
+    rmSync(bare, { recursive: true, force: true })
+  }
+  const dir2 = fixture("msmoli-idkey4-", [{ id: "modelscope", preset: "modelscope", key: A }], {
+    msmoli: { type: "api", key: B, accountId: foreign },
+  })
+  try {
+    const out = []
+    await main({
+      // --magpie /nonexistent 让 runnable 为假、跳过「--dir 与 --magpie 目录不一致」
+      // 那道守卫；不给它则会先撞上本机真实的 magpie 目录（实测就是死在那一行）
+      argv: ["--dir", dir2, "--to-plugin", "--force", "--magpie", "/nonexistent"],
+      spawn: (b, a) => {
+        if (a[0] === "plugin" && a[1] === "login") {
+          writeFileSync(
+            join(dir2, "plugin-auth.json"),
+            JSON.stringify({
+              msmoli: { type: "api", key: A, accountId: foreign },
+              "msmoli#dup": { type: "api", key: B, accountId: second },
+            }),
+          )
+        }
+        return { status: 0, stdout: "", stderr: "" }
+      },
+      log: (s) => out.push(s),
+    })
+    const text = out.join("\n")
+    assert.match(text, /回读发现插件现在有 2 个账号/, `该走到回读多账号分支：\n${text}`)
+    assert.ok(!text.includes(foreign), `回读那行的账号名整串上了终端：\n${text}`)
+    assert.ok(!text.includes(second), `第二个账号名也整串上了终端：\n${text}`)
+  } finally {
+    rmSync(dir2, { recursive: true, force: true })
+  }
+})

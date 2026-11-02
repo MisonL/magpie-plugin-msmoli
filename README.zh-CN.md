@@ -86,7 +86,8 @@ node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --t
   key 的值整串掩掉；路径保留形状，只掩其中像密钥的那一段，于是 `--dir
   /tmp/ghp_16C7…` 仍看得出读的是哪个目录。同一个目录在点名的每一行都同样掩，
   magpie 自己的输出也走同一道门——子进程报错里带着别家的 key 一样会被掩，
-  不再只认 `ms-` 这一种形状。
+  不再只认 `ms-` 这一种形状。provider id 与账号名同样读自 magpie 自己的文件、
+  也过这道门：粘进这两个字段的 key，在工具点名它的每一行都是掩过的。
 
 把签到打开：设置 → 用量 → 插件 → `msmoli` 那一行，或者改 `settings.json`
 （在 magpie 自己的目录里，安装版是 `~/.config/magpie`）：
