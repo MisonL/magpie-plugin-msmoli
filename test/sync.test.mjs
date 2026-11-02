@@ -4107,3 +4107,130 @@ test("a path is never taken for a key, and a secret split across lines is masked
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ── 第三十二轮：复查批次（逐段掩码、密钥形状补齐、两行一致、空白值）──────
+
+test("a key of any shape is masked in a typed value, and a path keeps its shape", async () => {
+  // 第三十一轮的形状只认「不含路径分隔符、且有 16+ 位字母数字混排」，于是
+  // 含 / 的 AWS secret、xoxb、UUID 整串漏出；而 path 里嵌的令牌也一样。
+  const dir = fixture("msmoli-shapes-")
+  try {
+    const keys = [
+      "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      "xoxb-" + "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx",
+      "550e8400-e29b-41d4-a716-446655440000",
+      "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+      "sk-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2",
+      "AKIAIOSFODNN7EXAMPLE",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+      "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+      "AbCdEf0123456789+/xYzAbCdEf0123456789==",
+      "/tmp/ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+      "/var/data/550e8400-e29b-41d4-a716-446655440000",
+    ]
+    for (const k of keys) {
+      for (const argv of [["--dir", dir, "--status", "--from", k], ["--dir", dir, "--magpie", k], [k]]) {
+        const out = []
+        await main({ argv, log: (s) => out.push(s) }).catch((e) => out.push(e.message))
+        const text = out.join("\n")
+        // 每一段「像密钥」的连续串都不该整段出现
+        for (const run of k.match(/[A-Za-z0-9]{16,}/g) ?? []) {
+          assert.ok(!text.includes(run), `${k} 的 ${run} 漏了：\n${text}`)
+        }
+        assert.ok(!text.includes(k), `${k} 整串漏了：\n${text}`)
+      }
+    }
+    // 一个路径读出的是路径：掩掉的是其中像密钥的那一段，目录本身照旧
+    const out = []
+    await main({ argv: ["--dir", dir, "--status", "--from", "/tmp/ghp_16C7e42F292c6912E7710c838347Ae178B4a"], log: (s) => out.push(s) })
+    assert.match(out.join("\n"), /\/tmp\/ghp_16C7…8B4a/, `路径形状保留：\n${out.join("\n")}`)
+    // 正常 id 与路径照旧可读
+    for (const good of ["modelscope20261031", "modelscope-backup-2025-east", "C:\\Tools\\magpie", "/tmp/msmoli-fixtures"]) {
+      const o = []
+      await main({ argv: ["--dir", dir, "--status", "--from", good], log: (s) => o.push(s) })
+      assert.ok(o.join("\n").includes(good), `${good} 不该被掩：\n${o.join("\n")}`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the folder the report names is masked the same way on every line it names it", async () => {
+  // 配置目录行走的是 arg()，两行后的「读的是」「会写到」却曾是 show()：同一个
+  // 值一处掩、一处整串。让 --dir 与 --magpie 的目录错开来，才走得到那两行。
+  const home = mkdtempSync(join(tmpdir(), "msmoli-home-"))
+  const parent = mkdtempSync(join(tmpdir(), "msmoli-two-line-"))
+  const keyed = join(parent, "ghs_abcdefghijklmnopqrstuvwxyz012345")
+  try {
+    mkdirSync(keyed)
+    writeFileSync(join(keyed, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(keyed, "plugin-auth.json"), JSON.stringify({}))
+    const fakebin = join(home, "magpie")
+    writeFileSync(fakebin, "")
+    const out = []
+    await main({
+      argv: ["--dir", keyed, "--to-plugin", "--magpie", fakebin],
+      env: {},
+      home,
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+    })
+    const text = out.join("\n")
+    assert.ok(!text.includes("ghs_abcdefghijklmnopqrstuvwxyz012345"), `某一整行漏了整串：\n${text}`)
+    assert.match(text, /读的是：.*ghs_abcd…2345/, `读的是那行也掩：\n${text}`)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(parent, { recursive: true, force: true })
+  }
+})
+
+test("a value of nothing but spaces is a missing value, not a folder named ' '", async () => {
+  // `--dir " "` 被当成合法值，报错行变成「✗   里没有…」，读起来像 bug。
+  for (const argv of [["--dir", " ", "--status"], ["--from", "  "], ["--dir=  ", "--status"]]) {
+    await assert.rejects(main({ argv, log: () => {} }), /缺少值/, argv.join(" "))
+  }
+})
+
+test("a child's echo of a key that is not the one this run holds is still masked", async () => {
+  // scrub 结尾的 show() 只认 ms- 形状：magpie 报错里回显别家令牌（ghp_…）时
+  // 原样上终端。逐段掩码把已知形状之外的长串也盖上。
+  const dir = fixture("msmoli-otherkey-")
+  try {
+    const foreign = "ghp_16C7e42F292c6912E7710c838347Ae178B4a"
+    const out = []
+    await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 7, stdout: "", stderr: `bad key ${foreign} refused` }),
+    })
+    const text = out.join("\n")
+    assert.ok(!text.includes(foreign), `别家令牌整串漏了：\n${text}`)
+    assert.match(text, /ghp_16C7…8B4a/, `该按形状掩掉：\n${text}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a child's output of a hundred thousand control characters is scrubbed in one pass", async () => {
+  // 第三十一轮把 maskEchoes 改成「逐位跳过不可见字符」，在成串的控制字符上
+  // 退化成 O(n²)：20 000 个 \x01 要 79 秒，子进程一句脏输出就能拖死整轮。
+  // 两段式（先收集可见字符，在可见序列上扫一遍，再映射回原串）是线性的。
+  const dir = fixture("msmoli-scrubperf-")
+  try {
+    const body = "\x01".repeat(100_000) + A
+    const t0 = performance.now()
+    const out = []
+    await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 7, stdout: "", stderr: `bad ${body} refused` }),
+    })
+    const ms = performance.now() - t0
+    assert.ok(ms < 5000, `一次扫描就该扫完，实际 ${ms.toFixed(0)}ms`)
+    const text = out.join("\n")
+    assert.ok(!text.includes(A), `令牌漏了：\n${text.slice(0, 300)}`)
+    assert.match(text, /ms-a…5555/, `令牌该被掩：\n${text.slice(0, 300)}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

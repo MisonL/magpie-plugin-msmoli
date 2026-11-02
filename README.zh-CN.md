@@ -81,7 +81,12 @@ node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --t
   `--from <id>` 指定；`--dry-run` 只打印要执行的命令，不真跑。带值的参数给两次
   （`--dir a --dir b`）会被拒绝，不会静默以后者为准；`--dir=<目录>` 也认。
   `--from` 和多余的参数回显时，看起来像密钥的值会先掩码——粘错位置的令牌
-  不管什么形状都不会被完整打印。
+  不管什么形状都不会被完整打印。这补上了 `ms-…` 之外的那几种：GitHub / Slack
+  令牌、带 `/` 的 AWS secret、UUID、含 `+/=` 的 base64。整体是一个词且就是一把
+  key 的值整串掩掉；路径保留形状，只掩其中像密钥的那一段，于是 `--dir
+  /tmp/ghp_16C7…` 仍看得出读的是哪个目录。同一个目录在点名的每一行都同样掩，
+  magpie 自己的输出也走同一道门——子进程报错里带着别家的 key 一样会被掩，
+  不再只认 `ms-` 这一种形状。
 
 把签到打开：设置 → 用量 → 插件 → `msmoli` 那一行，或者改 `settings.json`
 （在 magpie 自己的目录里，安装版是 `~/.config/magpie`）：

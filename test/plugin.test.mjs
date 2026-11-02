@@ -6260,3 +6260,55 @@ test("a key echoed across a line break is still the key, and a shape does not ru
   })
   assert.match(h.error, /ms-shortone abcdefghijklmnop end/, `a short ms- word and the next line are not a token: ${h.error}`)
 })
+
+test("a body full of control characters is masked in one pass, not one pass per character", async () => {
+  // 第三十一轮的逐码点扫描遇到不可见字符只推进末端、不推进起点，凑不出匹配时
+  // 起点只前进一格：一段不可见字符的每个位置都要重扫一遍它自己。256 KiB 的
+  // 换行（代理的错误页、服务器回显）要跑几分钟，而在 25 秒预算的钩子里——
+  // 宿主的事件循环也一起卡住。
+  const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  for (const ch of ["\n", "​", "\x01"]) {
+    const at = Date.now()
+    const u = await withFetch(
+      { "/openapi/v1/magicubes/balance": { status: 500, body: { success: false, message: `${ch.repeat(100_000)}${token}` } } },
+      () => auth.usage(async () => ({ type: "api", key: token })),
+    )
+    const ms = Date.now() - at
+    assert.ok(ms < 5000, `${JSON.stringify(ch)}×100000 用了 ${ms}ms：扫描又变成按位置重扫了`)
+    assert.doesNotMatch(u.error, /ms-aaaa/, `${JSON.stringify(ch)}: 令牌没被掩掉`)
+  }
+})
+
+test("masking a long echo keeps every character in place, invisible ones included", async () => {
+  // 逐字符重建（而不是切片拼接）最容易在这里出错：不可见字符掉的、行结构
+  // 并掉的、令牌前后文字少一格的，都在这里现形。
+  const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const cases = [
+    ["all", `${token}`],
+    ["framed", `a ${token} b`],
+    ["zwsp", `a ${token.slice(0, 11)}​${token.slice(11)} b`],
+    ["ctrl", `a ${token.slice(0, 11)}\x01${token.slice(11)} b`],
+    ["lines", `x ${token.slice(0, 20)}\n${token.slice(20)} y`],
+    ["three", `x ${token.slice(0, 11)}\n${token.slice(11, 22)}\x01${token.slice(22)} y`],
+    ["twice", `${token} and ${token}`],
+    ["short-run kept", `ms-dos and ${token.slice(0, 5)} tail`],
+  ]
+  for (const [name, msg] of cases) {
+    const u = await withFetch(
+      { "/openapi/v1/magicubes/balance": { status: 500, body: { success: false, message: msg } } },
+      () => auth.usage(async () => ({ type: "api", key: token })),
+    )
+    const out = u.error
+    assert.ok(!/ms-aaaa1111/.test(out), `${name}: 令牌前段漏了 ${out}`)
+    // the text around it survives, read as one line by the card
+    for (const keep of msg.replace(/[\p{Cc}\p{Cf}]/gu, " ").match(/[a-z]+/g) ?? []) {
+      if (["ms", "aaaa", "bbbb", "cccc", "msdos"].includes(keep)) continue
+      assert.ok(out.includes(keep), `${name}: 周围文字 ${keep} 丢了：${JSON.stringify(out)}`)
+    }
+  }
+  const two = await withFetch(
+    { "/openapi/v1/magicubes/balance": { status: 500, body: { success: false, message: `${token} and ${token}` } } },
+    () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.match(two.error, /ms-a…5555 and ms-a…5555/, `两处各掩一次: ${two.error}`)
+})

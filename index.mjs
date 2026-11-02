@@ -567,34 +567,49 @@ const maskToken = (token) =>
 // and both pieces reached the card. A line break is stepped over too: what is
 // matched is a piece of the real key, not a shape, so a key broken across two
 // lines is still the key, and masking it whole is the point.
+//
+// The matching runs over the visible characters alone, in one pass. Stepping
+// over a character as the scan went — and restarting one position later when
+// the run came up short — made a run of them cost its own length at every
+// position it contained: a 256 KiB body of newlines (a proxy's page, or a
+// server echoing one) took minutes, inside a hook whose whole budget is 25
+// seconds, and the plugin host's event loop with it. Collected first, the
+// same text is scanned once and the spans are put back where they were.
 const MIN_ECHO = 12
 const maskEchoes = (s, token) => {
   if (typeof token !== "string" || token.length < MIN_ECHO) return s
-  let out = ""
+  const vis = []
+  const at = []
   for (let i = 0; i < s.length; ) {
+    const c = String.fromCodePoint(s.codePointAt(i))
+    if (!invisible(c)) {
+      vis.push(c)
+      at.push(i)
+    }
+    i += c.length
+  }
+  let out = ""
+  let from = 0
+  for (let k = 0; k < vis.length; ) {
     let piece = ""
-    let good = i
-    let end = i
-    while (end < s.length) {
-      const c = String.fromCodePoint(s.codePointAt(end))
-      if (invisible(c)) {
-        end += c.length
-        continue
-      }
-      if (!token.includes(piece + c)) break
-      piece += c
-      end += c.length
-      good = end
+    let v = k
+    while (v < vis.length && token.includes(piece + vis[v])) {
+      piece += vis[v]
+      v++
     }
     if (piece.length >= MIN_ECHO) {
+      // the span of the whole run, invisible characters inside it included,
+      // and the ones between it and the last character written before it
       out += maskToken(token)
-      i = good
+      from = at[v - 1] + vis[v - 1].length
+      k = v
     } else {
-      out += s[i]
-      i++
+      out += s.slice(from, at[k] + vis[k].length)
+      from = at[k] + vis[k].length
+      k++
     }
   }
-  return out
+  return out + s.slice(from)
 }
 
 // invisible is a control or format character: what a token pasted out of a

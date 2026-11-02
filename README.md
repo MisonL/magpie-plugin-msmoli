@@ -97,7 +97,14 @@ built-in side (say, a relay of the same host), the tool refuses to guess and
 A value flag given twice (`--dir a --dir b`) is refused, not silently last-wins,
 and `--dir=<folder>` is read as well. `--from` and a stray argument are echoed
 back masked when the value looks like a key — a token pasted into the wrong
-position is never printed whole, whatever its shape.
+position is never printed whole, whatever its shape. That covers the shapes
+`ms-…` does not: a GitHub or Slack token, an AWS secret (which carries `/`), a
+UUID, a base64 run with `+/=`. A value that is one word and one key is masked
+whole; a path keeps its shape and only the key-like run inside it is masked, so
+`--dir /tmp/ghp_16C7…` still names the folder it read. The folder is reported
+the same way on every line that names it, and magpie's own output goes through
+the same door — a key of another provider in the child's error message is
+masked there too, not only the `ms-` shape.
 
 Turn the check-in on: Settings → Usage → Plugins → the `msmoli` row, or in
 `settings.json` (in magpie's own folder, `~/.config/magpie` for an installed

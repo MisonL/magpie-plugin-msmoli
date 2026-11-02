@@ -56,7 +56,7 @@ function parseArgs(argv) {
     const v = argv[i]
     // A single "-h" or "-x" is a flag too: `--dir -h` must not put "-h" in
     // the folder position and silently look there.
-    if (v === undefined || v === "" || v.startsWith("-")) throw new Error(`缺少值：${argv[i - 1]} 后面要跟一个参数`)
+    if (v === undefined || v.trim() === "" || v.startsWith("-")) throw new Error(`缺少值：${argv[i - 1]} 后面要跟一个参数`)
     return v
   }
   // A value flag given twice is refused, as the two directions are: the
@@ -75,7 +75,7 @@ function parseArgs(argv) {
     const flag = eq > 0 ? a.slice(0, eq) : ""
     if (flag && VALUE[flag]) {
       const v = a.slice(eq + 1)
-      if (v === "" || v.startsWith("-")) throw new Error(`缺少值：${flag}= 后面要跟一个参数`)
+      if (v.trim() === "" || v.startsWith("-")) throw new Error(`缺少值：${flag}= 后面要跟一个参数`)
       set(flag, v)
     } else if (VALUE[a]) set(a, take(++i))
     else if (a === "--to-plugin" || a === "--to-preset") {
@@ -359,6 +359,7 @@ export function presetCandidates(providers, from = "") {
 // two, each piece under the floor, and both were printed whole. A line break
 // still ends a run — a token never spans one.
 const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
+const invisible = (c) => /[\p{Cc}\p{Cf}]/u.test(c)
 const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]){11,}`, "gu")
 const show = (s) =>
   String(s ?? "")
@@ -366,13 +367,38 @@ const show = (s) =>
     .replace(/[\p{Cc}\p{Cf}]/gu, " ")
 
 // arg is show() for a value the user typed: --from, a stray argument, a bare
-// --magpie. A key pasted into one of those positions is printed back, and a
-// key that is not ms-shaped (a custom vendor's, a GitHub token) was printed
-// whole — show() only knows the ms- shape. A run of 16+ letters and digits
-// that has both is what a generated key looks like and no provider id does;
-// a path is the user's own and stays readable.
-const looksSecret = (v) => !/[\\/]/.test(v) && /[A-Za-z0-9]{16,}/.test(v) && (v.match(/[A-Za-z0-9]{16,}/g) ?? []).some((r) => /\d/.test(r) && /[A-Za-z]/.test(r))
-const arg = (v) => (looksSecret(String(v ?? "")) ? mask(String(v)) : show(v))
+// --magpie, --dir. A key pasted into one of those positions is printed back,
+// and a key that is not ms-shaped (a custom vendor's, a GitHub token, an AWS
+// secret) was printed whole — show() only knows the ms- shape, and a value
+// with a path separator in it was skipped outright, which let an AWS secret
+// and a token standing inside a path through.
+//
+// A value that is one word and one key is masked whole. Anything else — a
+// path, a sentence — keeps its shape and only the key-like runs inside it are
+// masked, so /tmp/ghp_16C7… shows the folder that was read: a key-like run is
+// 16+ characters mixing cases (a generated key does; a word does not) or 32+
+// mixing letters and digits (hex digests and the like; a short directory name
+// is neither), and a UUID or a value carrying the base64 symbols is its own
+// shape. Under 16, a provider id with a date in it (modelscope20261031) reads
+// as an id, not as a key.
+const RUN = /[A-Za-z0-9]+/g
+const keyRun = (r) =>
+  (r.length >= 16 && /[a-z]/.test(r) && /[A-Z]/.test(r)) ||
+  (r.length >= 32 && /\d/.test(r) && /[A-Za-z]/.test(r)) ||
+  (r.length >= 16 && /\d/.test(r) && /[A-Z]/.test(r))
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+// one word, and something in it looks like a key
+const isKey = (v) => !/[\s\\/]/.test(v) && (UUID.test(v) || /[+=]/.test(v) || (v.match(RUN) ?? []).some(keyRun))
+const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
+const arg = (v) => {
+  const s = String(v ?? "")
+  if (isKey(s)) return mask(s)
+  // show() first, so a ms- token keeps its shape for its own masking and a
+  // control character inside one does not split the runs seen below
+  return show(s)
+    .replace(RUN, (r) => (keyRun(r) ? mask(r) : r))
+    .replace(UUID_ANY, (m) => mask(m))
+}
 
 // SENDABLE is the plugin's own test (index.mjs's tokenOf): a key with
 // anything but visible ASCII in it goes out in a Cookie/Authorization header
@@ -558,32 +584,42 @@ function maskEchoes(s, secret) {
   // a control or format character inside the echo is stepped over, for the
   // reason show()'s shape steps over one — a line break too: this is a piece
   // of the real secret, and one broken across two lines is still the secret
-  const invisible = (c) => /[\p{Cc}\p{Cf}]/u.test(c)
-  let out = ""
+  //
+  // The matching runs over the visible characters alone, in one pass, and the
+  // spans are put back afterwards. Stepping over a character as the scan went
+  // — and restarting one position later when the run came up short — cost a
+  // run of them its own length at every position it held: a child's output of
+  // 20 000 control characters took 79 seconds.
+  const vis = []
+  const at = []
   for (let i = 0; i < s.length; ) {
+    const c = String.fromCodePoint(s.codePointAt(i))
+    if (!invisible(c)) {
+      vis.push(c)
+      at.push(i)
+    }
+    i += c.length
+  }
+  let out = ""
+  let from = 0
+  for (let k = 0; k < vis.length; ) {
     let piece = ""
-    let good = i
-    let end = i
-    while (end < s.length) {
-      const c = String.fromCodePoint(s.codePointAt(end))
-      if (invisible(c)) {
-        end += c.length
-        continue
-      }
-      if (!secret.includes(piece + c)) break
-      piece += c
-      end += c.length
-      good = end
+    let v = k
+    while (v < vis.length && secret.includes(piece + vis[v])) {
+      piece += vis[v]
+      v++
     }
     if (piece.length >= MIN_ECHO) {
       out += mask(secret)
-      i = good
+      from = at[v - 1] + vis[v - 1].length
+      k = v
     } else {
-      out += s[i]
-      i++
+      out += s.slice(from, at[k] + vis[k].length)
+      from = at[k] + vis[k].length
+      k++
     }
   }
-  return out
+  return out + s.slice(from)
 }
 
 // scrub hides a token in text that came from a child process. Both paths use
@@ -591,23 +627,26 @@ function maskEchoes(s, secret) {
 // the failing path is the one most likely to carry the command back verbatim
 // ("no key ms-… for provider"), and hiding it only on success was the gap.
 //
-// It ends in show(), which is the same door the command line goes through:
+// It ends in arg(), which is the same door the command line goes through:
 // a split only hides the secrets this run knows about, and magpie's output
-// can carry a ms- token this tool never held (another provider's key in the
-// message, a token the user pasted into the wrong field). show() masks the
-// shape and strips control characters, so a forged line or an escape sequence
-// in the child's output cannot reach the terminal either. scrub() alone, with
-// only the known secrets, was the leak the failing path had.
+// can carry a token this tool never held (another provider's key in the
+// message, a token the user pasted into the wrong field). show() alone was
+// not enough — it masks only the ms- shape, so a child echoing a custom
+// vendor's key (a ghp_… GitHub token, an AWS secret) printed it whole. arg()
+// masks the shape and strips control characters, so a forged line or an
+// escape sequence in the child's output cannot reach the terminal either.
+// scrub() alone, with only the known secrets, was the leak the failing path
+// had.
 function scrub(out, ...secrets) {
   let s = out
   for (const secret of secrets) {
     if (secret) s = maskEchoes(s.split(secret).join(mask(secret)), secret)
   }
-  // show() per line, not over the whole text: its control-character pass turns
+  // arg() per line, not over the whole text: its control-character pass turns
   // "\n" into a space too, and both callers split on the line breaks to echo
   // (or quote) the child's answer. A token never spans a line, so the shape
   // pass loses nothing by running per line either.
-  return s.replace(/\r\n?/g, "\n").split("\n").map(show).join("\n")
+  return s.replace(/\r\n?/g, "\n").split("\n").map(arg).join("\n")
 }
 
 function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
@@ -861,8 +900,8 @@ export async function main({
     // trailing slash, and "/private/tmp/data" and "/tmp/data" are one folder.
     if (!sameFolder(binDir, args.dir)) {
       log(`✗ --dir 与 --magpie 指向不同的配置目录，而写入只会落在 magpie 自己的那个。`)
-      log(`  读的是：${show(args.dir)}`)
-      log(`  magpie 会写到：${binDir ? show(binDir) : "它自己的默认目录（这里找不到现成的）"}`)
+      log(`  读的是：${arg(args.dir)}`)
+      log(`  magpie 会写到：${binDir ? arg(binDir) : "它自己的默认目录（这里找不到现成的）"}`)
       log(`  magpie 的命令行没有 --dir。两处用同一个目录，或去掉 --magpie 让它自动探测。`)
       return 1
     }
