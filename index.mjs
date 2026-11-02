@@ -639,23 +639,55 @@ const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]
 //
 // The shape rules are the ones bin/sync.mjs applies to a typed value, so the
 // two halves of this tool agree about what "looks like a key" means: a run of
-// 16+ characters mixing cases, 32+ mixing digits and letters, or 16+ carrying
-// digits and capitals; a UUID; a value carrying the base64 symbols. A word
-// does not qualify — which is what keeps "每日签到", a model tier or a rule_key
-// readable on the card.
+// 16+ characters mixing cases, 32+ mixing digits and letters, 16+ carrying
+// digits and capitals, 16+ of hex holding both a letter and a digit; a UUID;
+// and a word whose own separators cut it into pieces none of which is over the
+// floor but which together are — a key written as nUJqxrpd9Bc7-GvG7J--o… or
+// AbCdEfGh.IjKlMnOp… (measured on the card before that arm was added: all 34
+// of the first, all 35 of the second). A word does not qualify — which is what
+// keeps "每日签到", a model tier or a rule_key readable on the card.
 const RUN = /[A-Za-z0-9]+/g
 const keyRun = (r) =>
   (r.length >= 16 && /[a-z]/.test(r) && /[A-Z]/.test(r)) ||
   (r.length >= 32 && /\d/.test(r) && /[A-Za-z]/.test(r)) ||
-  (r.length >= 16 && /\d/.test(r) && /[A-Z]/.test(r))
+  (r.length >= 16 && /\d/.test(r) && /[A-Z]/.test(r)) ||
+  // 16+ of hex with both a letter and a digit in it: a digest, a session id, a
+  // fragment of a key. Not a word (abcdefgh… carries letters that are not hex,
+  // modelscope20261031 carries more than hex), and not a number
+  (r.length >= 16 && /^[0-9a-fA-F]+$/.test(r) && /\d/.test(r) && /[a-fA-F]/.test(r))
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
 // under 12 characters there is no key to hide and maskToken would have to
 // print "…" for what is only a short word
 const PATHY = /^(?:[~/.]|[A-Za-z]:[\\/]|\\\\)/
+const compact = (w) => w.replace(/[^A-Za-z0-9]/g, "")
+const splitDigest = (w, c) => {
+  const pieces = w.match(RUN) ?? []
+  return (
+    c.length >= 32 &&
+    /\d/.test(c) &&
+    /[A-Za-z]/.test(c) &&
+    pieces.some((r) => r.length >= 12) &&
+    pieces.every((r) => r.length < 32)
+  )
+}
 const isKeyWord = (w) => {
   if (w.length < 12) return false
-  if (!/[\\/]/.test(w)) return UUID.test(w) || /[+=]/.test(w) || (w.match(RUN) ?? []).some(keyRun)
+  if (!/[\\/]/.test(w)) {
+    if (UUID.test(w) || (w.match(RUN) ?? []).some(keyRun)) return true
+    // the base64 symbols are a key's own alphabet, but not on their own: a
+    // query's retry=true, an id=12345 carried one, and the title went out as
+    // "…". One of them beside a long mixed run is what a key's body carries,
+    // and that run is key-shaped already; a bare "ab=" is not
+    // the separators out: a key cut into pieces by - _ . is still one key, and
+    // the pieces together are long and mix cases where a name's are lowercase
+    // words. A word with no separator is not judged here — the run test above
+    // has already seen all of it
+    const c = compact(w)
+    if (c === w) return false
+    if (c.length >= 20 && /[a-z]/.test(c) && /[A-Z]/.test(c)) return true
+    return splitDigest(w, c)
+  }
   // with a separator it is one key only when it does not start like a path and
   // carries two parts of 12+ characters mixing cases: that is an AWS secret
   // (wJalr…/K7MDENG/bPxRfi…), and a pair of ordinary folder names is not

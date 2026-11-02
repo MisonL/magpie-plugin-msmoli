@@ -376,47 +376,109 @@ const show = (s) =>
 // A value that is one word and one key is masked whole. Anything else — a
 // path, a sentence — keeps its shape and only the key-like runs inside it are
 // masked, so /tmp/ghp_16C7… shows the folder that was read: a key-like run is
-// 16+ characters mixing cases (a generated key does; a word does not) or 32+
-// mixing letters and digits (hex digests and the like; a short directory name
-// is neither), and a UUID or a value carrying the base64 symbols is its own
+// 16+ characters mixing cases (a generated key does; a word does not), 32+
+// mixing letters and digits, 16+ carrying digits and capitals, or 16+ of hex
+// holding both a letter and a digit (a digest, a session id); a UUID is its own
 // shape. Under 16, a provider id with a date in it (modelscope20261031) reads
 // as an id, not as a key.
+//
+// The judgement runs per word, not on the value as a whole. Measured before
+// this was written, with the judgement only on the whole value: a hyphenated
+// token (nUJqxrpd9Bc7-GvG7J--o…) kept all 42 of its characters,
+// AbCdEfGh.IjKlMnOp… all 35, 9f8e7d6c5b4a3928-1706f5e4d3c2b1a0 all 33, and a
+// key pasted with a trailing space (the shape a copy out of a terminal or a
+// chat window leaves) kept 28 of its 121 — the value had whitespace in it, so
+// the whole-value judgement answered "not a key" and the runs did the rest,
+// leaving the literal prefix sk-ant-api03-Eyai1pkJrF_Kbwt. Per word, that
+// word is the key and is masked whole.
+//
+// A key placed *inside* a path (~/keys/sk-ant-…) still shows there: the path
+// keeps its shape (see PATHY below), and taking a component away to mask one
+// part would be the wrong trade for a folder the user typed.
 const RUN = /[A-Za-z0-9]+/g
 const keyRun = (r) =>
   (r.length >= 16 && /[a-z]/.test(r) && /[A-Z]/.test(r)) ||
   (r.length >= 32 && /\d/.test(r) && /[A-Za-z]/.test(r)) ||
-  (r.length >= 16 && /\d/.test(r) && /[A-Z]/.test(r))
+  (r.length >= 16 && /\d/.test(r) && /[A-Z]/.test(r)) ||
+  // 16+ of hex with both a letter and a digit in it: a digest, a session id, a
+  // fragment of a key. Not a word (abcdefgh… carries letters that are not hex,
+  // modelscope20261031 carries more than hex), and not a number
+  (r.length >= 16 && /^[0-9a-fA-F]+$/.test(r) && /\d/.test(r) && /[a-fA-F]/.test(r))
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 // one word, and something in it looks like a key
 const PATHY = /^(?:[~/.]|[A-Za-z]:[\\/]|\\\\)/
-const isKey = (v) => {
-  if (/\s/.test(v)) return false
-  // no separator: the whole value is one word, and one key-like run in it is
-  // enough (a generated key has no separator at all). PATHY's leading "." is
-  // for paths (./x, ../x): a key never begins with one
-  if (!/[\\/]/.test(v)) return UUID.test(v) || /[+=]/.test(v) || (v.match(RUN) ?? []).some(keyRun)
+// a word's letters and digits, its separators and the punctuation around it
+// taken out: a value typed at a shell can arrive quoted, and a child's line
+// can carry the word with a full stop after it
+const compact = (w) => w.replace(/[^A-Za-z0-9]/g, "")
+// a hex digest written with separators (a1b2c3d4-e5f6-7890-abcd-ef1234567890):
+// its pieces are each under the 32-character floor on their own, one of them
+// 12+, and none of them is a long word — a run of 32+ letters is a word that
+// happens to sit next to a number, not a key cut up
+const splitDigest = (w, c) => {
+  const pieces = w.match(RUN) ?? []
+  return (
+    c.length >= 32 &&
+    /\d/.test(c) &&
+    /[A-Za-z]/.test(c) &&
+    pieces.some((r) => r.length >= 12) &&
+    pieces.every((r) => r.length < 32)
+  )
+}
+// the judgement takes one word — arg() hands it the whitespace-delimited piece,
+// so there is no whitespace in it and no value of nothing but spaces to answer
+// for. It was written for a whole value once, and a value with a trailing space
+// in it answered "not a key": that is the frame this round closed
+const isKey = (word) => {
+  if (!/[\\/]/.test(word)) {
+    // no separator: the whole word is one key, and one key-like run in it is
+    // enough (a generated key has no separator at all). PATHY's leading "." is
+    // for paths (./x, ../x): a key never begins with one
+    if (UUID.test(word) || (word.match(RUN) ?? []).some(keyRun)) return true
+    // the base64 symbols are a key's own alphabet, but not on their own: a
+    // query's retry=true, an id=12345 carried one, and the value went out as
+    // "（10 字符）". One of them beside a long mixed run is what a key's body
+    // carries, and that run is key-shaped already; a bare "ab=" is not
+    // a word cut up by - _ . into pieces none of which clears the floor is
+    // still one key when the pieces together clear it. Mixing cases is the
+    // shape of a generated key and of no name (documentsnewproject has none;
+    // between separators a name is lowercase letters), and 32+ with digits and
+    // one 12+ piece is a hex digest written with separators (a version or a
+    // date has no such piece). A word with no separator is not judged here:
+    // the run test above has already seen all of it
+    const c = compact(word)
+    if (c === word) return false
+    if (c.length >= 20 && /[a-z]/.test(c) && /[A-Z]/.test(c)) return true
+    return splitDigest(word, c)
+  }
   // with a separator it is a key only when it does not *start* like a path: an
   // AWS secret (wJalr…/K7MDENG/…) carries slashes but begins with a word, and
   // the shape mask reached only the one long run inside it, leaving 26 of its
   // 40 characters on the terminal. A value that starts like a path (a leading
   // / ~ . , a drive letter, a UNC root) is one — /tmp/ghp_16C7… keeps its
-  // shape with the key-like run inside it masked.
-  // two segments of 12+ characters mixing cases: a secret's own alphabet, and
-  // something a pair of ordinary path components does not produce (NewProject
-  // is one such component, not two)
-  const segs = v.split(/[\\/]/).filter((seg) => seg.length >= 12 && /[a-z]/.test(seg) && /[A-Z]/.test(seg))
-  return !PATHY.test(v) && segs.length >= 2
+  // shape with the key-like run inside it masked, and a key appended behind
+  // such a prefix (…/keys/sk-ant-api03-…) is read as part of that path. It is
+  // the one place a key can still show: a path's name is the user's, and a
+  // component that is only piecewise key-like cannot be told from a folder
+  // without taking the folder away. Two segments of 12+ characters mixing
+  // cases is the whole of this arm, and it is what keeps
+  // /Users/mison/Documents/SomeLongDirectoryName a path
+  const segs = word.split(/[\\/]/).filter((seg) => seg.length >= 12 && /[a-z]/.test(seg) && /[A-Z]/.test(seg))
+  return !PATHY.test(word) && segs.length >= 2
 }
 const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
-const arg = (v) => {
-  const s = String(v ?? "")
-  if (isKey(s)) return mask(s)
-  // show() first, so a ms- token keeps its shape for its own masking and a
-  // control character inside one does not split the runs seen below
-  return show(s)
-    .replace(RUN, (r) => (keyRun(r) ? mask(r) : r))
-    .replace(UUID_ANY, (m) => mask(m))
-}
+// arg is the door every echoed value goes through. It works word by word, in
+// the visible characters: a control or format character has already become a
+// space, so a zero-width space pasted into a token is a word edge, and a word
+// that is a key is judged and masked as that word. One word that is a key goes
+// whole — revealed at its own ends (mask), not at the ends of each run — and
+// inside a word that is not, only the key-like runs and UUIDs go. show() masks
+// an ms- token first, so its shape survives for the pass below even when it is
+// one fragment among others.
+const arg = (v) =>
+  show(v).replace(/[^\s]+/g, (w) =>
+    isKey(w) ? mask(w) : w.replace(RUN, (r) => (keyRun(r) ? mask(r) : r)).replace(UUID_ANY, (m) => mask(m)),
+  )
 
 // SENDABLE is the plugin's own test (index.mjs's tokenOf): a key with
 // anything but visible ASCII in it goes out in a Cookie/Authorization header

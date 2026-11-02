@@ -3996,7 +3996,9 @@ test("a key that is not ms-shaped is masked where a typed value is echoed", asyn
     assert.ok(!okOut.join("\n").includes(key), `配置目录行把 key 整串回显了:\n${okOut.join("\n")}`)
     assert.match(okOut.join("\n"), /magpie 配置目录：ghs_…2345/)
     // 一个真 id 照样读得出来：带连字符的名字、纯字母的长名字都不像 key
-    for (const id of ["modelscope-backup-2025", "my-modelscope-provider", "abcdefghijklmnopqrstuvwxyz"]) {
+    // （modelscope20261031 这类的 16 位小写字母数字串也一样：它就是一个 id，
+    //  第三十二轮就这么定了——下限之下的纯小写串是名字，不是 key）
+    for (const id of ["modelscope-backup-2025", "my-modelscope-provider", "abcdefghijklmnopqrstuvwxyz", "modelscope20261031"]) {
       const out = []
       await main({ argv: ["--dir", dir, "--status", "--from", id], log: (s) => out.push(s) })
       assert.ok(out.join("\n").includes(id), `provider id ${id} 不该被当成 key 掩掉`)
@@ -4193,7 +4195,9 @@ test("a value of nothing but spaces is a missing value, not a folder named ' '",
 
 test("a child's echo of a key that is not the one this run holds is still masked", async () => {
   // scrub 结尾的 show() 只认 ms- 形状：magpie 报错里回显别家令牌（ghp_…）时
-  // 原样上终端。逐段掩码把已知形状之外的长串也盖上。
+  // 原样上终端。逐段掩码把已知形状之外的长串也盖上。第三十五轮起，一个词就是
+  // 一把 key 时按整词掩，露出的是它自己的两端（ghp_…8B4a），不再是那一段长串的
+  // 两端——少露了中间那 4 个字符。
   const dir = fixture("msmoli-otherkey-")
   try {
     const foreign = "ghp_16C7e42F292c6912E7710c838347Ae178B4a"
@@ -4205,7 +4209,7 @@ test("a child's echo of a key that is not the one this run holds is still masked
     })
     const text = out.join("\n")
     assert.ok(!text.includes(foreign), `别家令牌整串漏了：\n${text}`)
-    assert.match(text, /ghp_16C7…8B4a/, `该按形状掩掉：\n${text}`)
+    assert.match(text, /ghp_…8B4a/, `该按形状掩掉：\n${text}`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -4419,6 +4423,156 @@ test("a value that starts like a path keeps its shape even when its parts are lo
     const c = []
     await main({ argv: ["--dir", dir, "--status", "--from", camel], log: (s) => c.push(s) })
     assert.match(c.join("\n"), /Some…Name/, `camеlCase 组件按既有规则被掩：\n${c.join("\n")}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ── 第三十五轮：带空白的值与被分隔符拆成短段的 key ──────────────────────
+
+test("a key pasted with a trailing space, or quoted inside a line, is masked whole", async () => {
+  // 判据跑在整个值上，isKey 一见到空白就返回 false：「key 后面粘了个空格」
+  // （从终端或聊天窗口复制最常见的样子）于是整串掉进按段掩码，只有够长的那
+  // 一段被掩，前面 sk-ant-api03-Eyai1pkJrF 这 28 个字符原样上终端。子进程那句
+  // "no key … for provider" 同理。逐词判据：那个词就是 key，整词掩掉。
+  const dir = fixture("msmoli-wordkey-")
+  const keys = [
+    "sk-ant-api03-Eyai1pkJrF_KbwtQm3Zx8Vd2Nc7Rt5Hs9Lg4Pf6Ba1Ue0YjXLkIhGwSnTvMoDrQpCsAzBxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz",
+    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "xoxb-" + "435186639673-1944724303225-OQaLmNbVcXzAsDwErTyUiOp",
+    "github_pat_11ABCDEFG0123456789_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrSt",
+    "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+    "sk_live_" + "51AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+  ]
+  try {
+    for (const key of keys) {
+      for (const value of [key, `${key} `, `${key}\n`, `no key ${key} for provider`, `"${key}"`]) {
+        const out = []
+        await main({ argv: ["--dir", dir, "--status", "--from", value], log: (s) => out.push(s) })
+        const kept = longestKept(out.join("\n"), key)
+        assert.ok(kept.length < 12, `${JSON.stringify(value.slice(0, 30))}…：原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}\n${out.join("\n")}`)
+      }
+    }
+    // 子进程把 key 夹在一句话里回显时，走的是同一道门（arg 逐词）
+    for (const key of [keys[0], keys[1]]) {
+      const out = []
+      await main({
+        argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+        log: (s) => out.push(s),
+        spawn: () => ({ status: 7, stdout: "", stderr: `magpie: no key ${key} for provider` }),
+      })
+      const kept = longestKept(out.join("\n"), key)
+      assert.ok(kept.length < 12, `子进程回显：原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}\n${out.join("\n")}`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a key split into short pieces by separators is masked whole", async () => {
+  // 判据按「连续的字母数字段」掩码：一把被 - _ . 拆成几段、每段都不够 16 位的
+  // key（nUJqxrpd9Bc7-GvG7J--o…、AbCdEfGh.IjKlMnOp.…、9f8e7d6c5b4a3928-1706…）
+  // 没有任何一段合格，整串原样上终端（裸参数位实测 42/42、35/35、33/33）。
+  const dir = fixture("msmoli-fragkey-")
+  const keys = [
+    "nUJqxrpd9Bc7-GvG7J--onUJqxrpd9Bc7-GvG7J--o",
+    "AbCdEfGh.IjKlMnOp.QrStUvWx.Yz012345",
+    "deadbeef-cafebabe-0123456789abcdef",
+    "9f8e7d6c5b4a3928-1706f5e4d3c2b1a0",
+    // 一段 16 位纯 hex（字母与数字都有）：摘要、会话 id。跟 provider id 的日期
+    // 形状（modelscope20261031）不同，它整段都在 0-9a-f 里
+    "56b3f97586dedd63",
+    // 32 位以上、小写字母加数字、被分隔符拆开，每一段都不到 32——只按段看哪段
+    // 都不合格（不是 hex，也没有大写），合起来才是一把
+    "a1b2c3d4e5f6g7h8i9j0k1l2-o3p4q5r6s7t8u9v0w1",
+  ]
+  // 一段 16 位、小写字母与数字混排、不全是 hex 的串不在里面：它与 provider id
+  // 的日期形状（modelscope20261031）在字符上无法区分，下限之下是名字——第三十二
+  // 轮定下的取舍，反向测试钉着它。这里测的是被分隔符拆开、自身每一段都不够格
+  // 的那种，以及整段落在 hex 字母表里的那种
+  try {
+    for (const key of keys) {
+      for (const value of [key, `${key} `, `no key ${key} refused`, `"${key}"`]) {
+        const out = []
+        await main({ argv: ["--dir", dir, "--status", "--from", value], log: (s) => out.push(s) })
+        const kept = longestKept(out.join("\n"), key)
+        assert.ok(kept.length < 12, `${JSON.stringify(value.slice(0, 30))}…：原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}\n${out.join("\n")}`)
+      }
+      // 裸参数位（不认识的参数那条）
+      await assert.rejects(
+        main({ argv: [key], log: () => {} }),
+        (e) => !e.message.includes(key) && longestKept(e.message, key).length < 12,
+        `裸参数位整串回显了 key\n${key}`,
+      )
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the new whole-word floor still leaves ordinary names readable", async () => {
+  // 反向：判据从「一段」换成「整词去分隔符」，可能把普通词也带进来。这些是
+  // provider id / 目录名 / 服务端措辞里真会出现的形状，一个字都不该被掩。
+  const dir = fixture("msmoli-wordok-")
+  try {
+    const good = [
+      "modelscope-backup-2025-east",
+      "modelscope20261031",
+      "my-modelscope-provider",
+      "abcdefghijklmnopqrstuvwxyz",
+      "magpie-plugin-msmoli",
+      "Qwen3-Max",
+      "daily_active",
+      "api_inference",
+      "Documents/NewProject",
+      "documents/mynewprojectfolder",
+      "feature/MSMOLI-1234-fix-checkin",
+      "work/magpie-plugin-msmoli",
+      "1.2.3-beta.4",
+    ]
+    for (const value of good) {
+      const out = []
+      await main({ argv: ["--dir", dir, "--status", "--from", value], log: (s) => out.push(s) })
+      assert.ok(out.join("\n").includes(value), `${value} 不该被当成 key 掩掉：\n${out.join("\n")}`)
+    }
+    // 路径里的长组件照旧只掩那一段：路径形状保留
+    const p = "/Users/mison/Documents/SomeLongDirectoryName"
+    const out = []
+    await main({ argv: ["--dir", dir, "--status", "--from", p], log: (s) => out.push(s) })
+    assert.match(out.join("\n"), /Some…Name/, `路径组件该按段掩：\n${out.join("\n")}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a child's plain key=value words are not masked, and a base64 body still is", async () => {
+  // 「含 +/= 就是 key」单独成一条时，子进程的 host=https://… 这种词被整词掩成
+  // 「（10 字符）」，--from 的 v1.2.3+sha.abc 同理。base64 本体没有被放过：
+  // 它带着 16+ 位的字母数字长串，那一段本身就合格，而且整词仍按形状掩。
+  const dir = fixture("msmoli-eqword-")
+  try {
+    const out = []
+    await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 7, stdout: "", stderr: "Error: host=https://www.modelscope.cn retry=true id=12345 code=ENOENT" }),
+    })
+    const text = out.join("\n")
+    for (const keep of ["host=https://www.modelscope.cn", "retry=true", "id=12345", "code=ENOENT"]) {
+      assert.ok(text.includes(keep), `${keep} 被误掩：\n${text}`)
+    }
+    for (const v of ["v1.2.3+sha.abc", "id=12345", "id=1234567890", "retry=true"]) {
+      const o = []
+      await main({ argv: ["--dir", dir, "--status", "--from", v], log: (s) => o.push(s) })
+      assert.ok(o.join("\n").includes(v), `${v} 被误掩：\n${o.join("\n")}`)
+    }
+    // 而一段带 +/= 的 base64 本体仍是 key 的形状
+    const b64 = "AbCdEf0123456789+/xYzAbCdEf0123456789=="
+    const o = []
+    await main({ argv: ["--dir", dir, "--status", "--from", b64], log: (s) => o.push(s) })
+    const shown = o.join("\n")
+    assert.ok(longestKept(shown, b64).length < 12, `base64 本体漏了 ${JSON.stringify(longestKept(shown, b64))}:\n${shown}`)
+    assert.ok(shown.includes("AbCd…89=="), `base64 该整词掩：\n${shown}`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

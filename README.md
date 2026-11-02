@@ -99,12 +99,18 @@ and `--dir=<folder>` is read as well. `--from` and a stray argument are echoed
 back masked when the value looks like a key — a token pasted into the wrong
 position is never printed whole, whatever its shape. That covers the shapes
 `ms-…` does not: a GitHub or Slack token, an AWS secret (which carries `/`), a
-UUID, a base64 run with `+/=`. A value that is one word and one key is masked
-whole — including one split by a separator, as an AWS secret is; the two parts
-of 12+ characters with mixed case are what marks it. A value that starts like a
-path (`/`, `~`, `.`, a drive letter, a UNC root) keeps its shape, and only the
-key-like run inside it is masked, so `--dir /tmp/ghp_16C7…` still names the
-folder it read. The folder is reported
+UUID, a hex digest, a run long enough to be a base64 body. The judgement runs
+word by word,
+so a key with a space or a newline pasted onto it — the shape a copy out of a
+terminal or a chat window leaves — or quoted inside a line is still the key it
+is. A word that is one key is masked whole, ends and all, including one split with
+separators — a hex digest with dashes, a key written as `AbCdEfGh.IjKlMnOp…` —
+and an AWS secret, whose two parts of 12+ characters with mixed case mark it. A
+word that starts like a path (`/`, `~`, `.`, a drive letter, a UNC root) keeps
+its shape, and only the key-like run inside it is masked, so `--dir
+/tmp/ghp_16C7…` still names the folder it read; a key pasted in *behind* a path
+prefix (`~/keys/sk-ant-…`) reads as part of that path, which is what keeping a
+path's shape costs. The folder is reported
 the same way on every line that names it, and magpie's own output goes through
 the same door — a key of another provider in the child's error message is
 masked there too, not only the `ms-` shape. A provider id and an account name

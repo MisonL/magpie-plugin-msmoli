@@ -6424,3 +6424,53 @@ test("a real ledger title is not mistaken for a key", async () => {
     assert.ok((r3.message ?? "").includes(said), `服务端原话被误掩：${said} → ${r3.message}`)
   }
 })
+
+// ── 第三十五轮：被分隔符拆成短段的 key，与框在文字里的 key ──────────────
+
+test("a key split into short pieces is masked on the card too", async () => {
+  // keyShaped 按「连续的字母数字段」判：一把被 - _ . 拆成几段、每段都不到 16 位
+  // 的 key 没有一段合格，整把上卡片（实测 42/42、35/35）。合起来判：去掉分隔符
+  // 后整把够长、又混着大小写，或是一段带分隔符的 hex 摘要。
+  const keys = [
+    "nUJqxrpd9Bc7-GvG7J--onUJqxrpd9Bc7-GvG7J--o",
+    "AbCdEfGh.IjKlMnOp.QrStUvWx.Yz012345",
+    "deadbeef-cafebabe-0123456789abcdef",
+    "9f8e7d6c5b4a3928-1706f5e4d3c2b1a0",
+    "56b3f97586dedd63",
+    "a1b2c3d4e5f6g7h8i9j0k1l2-o3p4q5r6s7t8u9v0w1",
+  ]
+  // 16 位小写字母数字串、不全是 hex 的（modelscope20261031 那种）不在里面：
+  // 与 provider id 的日期形状不可区分，第三十二轮起就按名字处理，反向测试钉着它
+  for (const key of keys) {
+    for (const title of [`bonus ${key}`, `bonus: ${key}.`, key]) {
+      const ledger = { success: true, data: { records: [day({ title })], total: 1 } }
+      const r = await withFetch(
+        {
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: ledger },
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+        },
+        () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+      )
+      const msg = r.message ?? r.error ?? ""
+      const kept = longestKeptIn(msg, key)
+      assert.ok(kept.length < 12, `${JSON.stringify(title.slice(0, 24))}…：卡片上原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}：${msg}`)
+    }
+  }
+})
+
+test("a server's key=value words are not masked on the card", async () => {
+  // 与 bin/sync.mjs 同一条：「含 +/= 就整词算 key」会把 retry=true、id=12345
+  // 这样的词整词掩掉，卡片上只剩一个「…」。key 的 base64 本体带着 16+ 位长串，
+  // 不受影响。
+  for (const said of [
+    "request failed: retry=true, id=12345, host=https://www.modelscope.cn",
+    "bonus: retry=true.",
+    "quota for id=88888 used up",
+    "bonus for id=1234567890 today",
+  ]) {
+    const r3 = await withFetch({ "/openapi/v1/magicubes/transactions?page=1&page_size=50": { status: 500, body: { message: said } } }, () =>
+      auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+    )
+    assert.ok((r3.message ?? "").includes(said), `服务端原话被误掩：${r3.message}`)
+  }
+})
