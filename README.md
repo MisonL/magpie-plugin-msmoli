@@ -99,8 +99,8 @@ and `--dir=<folder>` is read as well. `--from` and a stray argument are echoed
 back masked when the value looks like a key — a token pasted into the wrong
 position is never printed whole, whatever its shape. That covers the shapes
 `ms-…` does not: a GitHub or Slack token, an AWS secret (which carries `/`), a
-UUID, a hex digest, a base64 body — long, or short enough that only its `+` or
-its trailing `=` gives it away. The judgement runs
+UUID, a hex digest, a base64 body — long, or short enough that only its trailing
+`=` (or a `+` beside a case mix) gives it away. The judgement runs
 word by word,
 so a key with a space or a newline pasted onto it — the shape a copy out of a
 terminal or a chat window leaves — or quoted inside a line is still the key it
