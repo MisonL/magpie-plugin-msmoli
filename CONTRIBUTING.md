@@ -105,6 +105,22 @@ Three invariants to keep when touching it:
 node --test                # the whole suite, no network
 ```
 
+The suite is run four ways, and CI runs all of them; run each locally before a
+release, because they catch different things:
+
+```bash
+npm test                                                # node --test
+npm run test:clock                                      # Date.now() ticks a second per read (tools/ticking-clock.mjs)
+MSMOLI_FAKE_NOW=1893456000000 node --test               # the whole clock shifted ~3 years
+bun test                                                # the runtime magpie actually runs plugins on
+```
+
+The ticking-clock run makes a fixture that reads the clock twice (once to build,
+once to expect) fail every time instead of one run in a thousand; the shifted
+clock makes a fixture pinned to the calendar day it runs break. The bun run is
+what closes the gap between the tests' Node and magpie's real runtime. CI also
+runs macOS- and Windows-specific jobs — see `.github/workflows/test.yml`.
+
 The tests stub `fetch`; nothing here talks to ModelScope. Fixtures follow the
 clock, so they don't expire on a given day. The check-in window reads
 `msmoli.json` from the folder magpie reports as `input.directory`; the suite

@@ -106,7 +106,12 @@ so a key with a space or a newline pasted onto it — the shape a copy out of a
 terminal or a chat window leaves — or quoted inside a line is still the key it
 is. A word that is one key is masked whole, ends and all, including one split with
 separators — a hex digest with dashes, a key written as `AbCdEfGh.IjKlMnOp…` —
-and an AWS secret, whose two parts of 12+ characters with mixed case mark it. A
+and an AWS secret, whose two parts of 12+ characters with mixed case mark it. An
+invisible character dropped inside a key (a zero-width space or `\x01`, the
+shape a copy out of a chat window leaves) does not save it either: the
+control/format characters sitting between key-alphabet characters are removed
+before masking, so the two halves are rejoined into the one key they are —
+each half alone falls under the length floor and would have leaked. A
 word that starts like a path (`/`, `~`, `.`, a drive letter, a UNC root) keeps
 its shape, and only the key-like run inside it is masked, so `--dir
 /tmp/ghp_16C7…` still names the folder it read; a key pasted in *behind* a path
