@@ -432,10 +432,13 @@ const splitDigest = (w, c) => {
 // symbols but demands one of them in a whole word that is at least 12
 // characters of the key alphabet: retry=true and id=1234567890 carry a bare =,
 // code=ENOENT neither, v1.2.3+sha.abc a + but its dots are not the key
-// alphabet, and none of them is masked. The ends are stripped by that same
-// alphabet first — a word can arrive quoted ("AbCdEfGh+IjKlMnOp"), with a comma
-// after it, or (on a card) with a full stop — and a dot is not part of a base64
-// body even though a path or a version keeps it
+// alphabet, and none of them is masked. A trailing = is padding on its own; a +
+// is not, because a phrase of lowercase words carries one too (foo+bar+baz,
+// key=value+with+plus), so a + must sit beside a case mix or a digit. The ends
+// are stripped by that same alphabet first — a word can arrive quoted
+// ("AbCdEfGh+IjKlMnOp"), with a comma after it, or (on a card) with a full stop
+// — and a dot is not part of a base64 body even though a path or a version
+// keeps it
 const B64CH = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
 const base64y = (w) => {
   let a = 0
@@ -443,7 +446,12 @@ const base64y = (w) => {
   let b = w.length
   while (b > a && !B64CH.has(w[b - 1])) b -= 1
   const c = w.slice(a, b)
-  return c.length >= 12 && /^[A-Za-z0-9+/=_-]+$/.test(c) && (/\+/.test(c) || /=$/.test(c))
+  if (c.length < 12 || !/^[A-Za-z0-9+/=_-]+$/.test(c)) return false
+  // a trailing = is base64 padding. A + inside is the other sign, but a phrase
+  // of lowercase words can carry one too (foo+bar+baz+qux, key=value+with+plus),
+  // so a + needs the body beside it to be a key's: a case mix or a digit
+  if (c.endsWith("=")) return true
+  return c.includes("+") && ((/[a-z]/.test(c) && /[A-Z]/.test(c)) || /\d/.test(c))
 }
 // a word cut up by - _ . into pieces each under the run floor is one key when
 // two of its pieces alternate case inside themselves. A key does (AbCdEfGh,

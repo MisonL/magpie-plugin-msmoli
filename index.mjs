@@ -692,7 +692,9 @@ const stripB64 = (w) => {
 }
 const base64y = (w) => {
   const c = stripB64(w)
-  return c.length >= 12 && /^[A-Za-z0-9+/=_-]+$/.test(c) && (/\+/.test(c) || /=$/.test(c))
+  if (c.length < 12 || !/^[A-Za-z0-9+/=_-]+$/.test(c)) return false
+  if (c.endsWith("=")) return true
+  return c.includes("+") && ((/[a-z]/.test(c) && /[A-Z]/.test(c)) || /\d/.test(c))
 }
 // a word cut up by - _ . into pieces each under the run floor is one key when
 // two of its pieces alternate case inside themselves: a key does (AbCdEfGh,
