@@ -4119,6 +4119,7 @@ test("a key of any shape is masked in a typed value, and a path keeps its shape"
   try {
     const keys = [
       "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      // 拆开拼：GitHub 的推送保护会把整串当成真 Slack 令牌拦下推送。
       "xoxb-" + "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx",
       "550e8400-e29b-41d4-a716-446655440000",
       "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
@@ -4439,9 +4440,11 @@ test("a key pasted with a trailing space, or quoted inside a line, is masked who
   const keys = [
     "sk-ant-api03-Eyai1pkJrF_KbwtQm3Zx8Vd2Nc7Rt5Hs9Lg4Pf6Ba1Ue0YjXLkIhGwSnTvMoDrQpCsAzBxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz",
     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    // 拆开拼：GitHub 的推送保护会把整串当成真凭据拦下推送。
     "xoxb-" + "435186639673-1944724303225-OQaLmNbVcXzAsDwErTyUiOp",
     "github_pat_11ABCDEFG0123456789_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrSt",
     "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+    // 拆开拼：GitHub 的推送保护会把整串当成真凭据拦下推送。
     "sk_live_" + "51AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
   ]
   try {

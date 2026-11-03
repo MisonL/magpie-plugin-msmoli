@@ -6354,6 +6354,7 @@ test("a key the plugin does not hold is masked on the card too", async () => {
   const foreign = {
     ghp: "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
     aws: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    // 拆开拼：GitHub 的推送保护会把整串当成真 Slack 令牌拦下推送。
     xoxb: "xoxb-" + "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx",
     akia: "AKIAIOSFODNN7EXAMPLE",
     hex: "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
