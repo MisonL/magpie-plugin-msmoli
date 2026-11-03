@@ -425,6 +425,34 @@ const splitDigest = (w, c) => {
     pieces.every((r) => r.length < 32)
   )
 }
+// a short key carried the base64 symbols + and = as part of its body
+// (AbCdEfGh+IjKlMnOp, dGhpc2lzYQ==). Removing the old [+=] arm — it masked a
+// query's retry=true, an id=12345 — left those short keys unmasked: under the
+// 16-character run floor, their + or = was the only sign. This arm keeps the
+// symbols but demands one of them in a whole word that is at least 12
+// characters of the key alphabet: retry=true and id=1234567890 carry a bare =,
+// code=ENOENT neither, v1.2.3+sha.abc a + but its dots are not the key
+// alphabet, and none of them is masked. The ends are stripped by that same
+// alphabet first — a word can arrive quoted ("AbCdEfGh+IjKlMnOp"), with a comma
+// after it, or (on a card) with a full stop — and a dot is not part of a base64
+// body even though a path or a version keeps it
+const B64CH = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
+const base64y = (w) => {
+  let a = 0
+  while (a < w.length && !B64CH.has(w[a])) a += 1
+  let b = w.length
+  while (b > a && !B64CH.has(w[b - 1])) b -= 1
+  const c = w.slice(a, b)
+  return c.length >= 12 && /^[A-Za-z0-9+/=_-]+$/.test(c) && (/\+/.test(c) || /=$/.test(c))
+}
+// a word cut up by - _ . into pieces each under the run floor is one key when
+// two of its pieces alternate case inside themselves. A key does (AbCdEfGh,
+// nUJqxrpd9Bc7); a name capitalises each piece and stops, so at most one piece
+// ever flips — Qwen3-Coder-480B-A35B-Instruct has none and
+// MyProvider-Prod-Edition-2026 exactly one. 32+ with digits and one 12+ piece
+// is a hex digest, splitDigest's to take
+const alternates = (word) =>
+  (word.match(RUN) ?? []).filter((r) => /[a-z][A-Z]/.test(r)).length >= 2
 // the judgement takes one word — arg() hands it the whitespace-delimited piece,
 // so there is no whitespace in it and no value of nothing but spaces to answer
 // for. It was written for a whole value once, and a value with a trailing space
@@ -434,21 +462,20 @@ const isKey = (word) => {
     // no separator: the whole word is one key, and one key-like run in it is
     // enough (a generated key has no separator at all). PATHY's leading "." is
     // for paths (./x, ../x): a key never begins with one
-    if (UUID.test(word) || (word.match(RUN) ?? []).some(keyRun)) return true
-    // the base64 symbols are a key's own alphabet, but not on their own: a
-    // query's retry=true, an id=12345 carried one, and the value went out as
-    // "（10 字符）". One of them beside a long mixed run is what a key's body
-    // carries, and that run is key-shaped already; a bare "ab=" is not.
+    if (UUID.test(word) || base64y(word) || (word.match(RUN) ?? []).some(keyRun)) return true
     // A word cut up by - _ . into pieces none of which clears the floor is
-    // still one key when the pieces together clear it. Mixing cases is the
-    // shape of a generated key and of no name (documentsnewproject has none;
-    // between separators a name is lowercase letters), and 32+ with digits and
-    // one 12+ piece is a hex digest written with separators (a version or a
-    // date has no such piece). A word with no separator is not judged here:
-    // the run test above has already seen all of it
+    // still one key when the pieces together clear it AND at least two of them
+    // alternate case inside themselves. A key does (AbCdEfGh, nUJqxrpd9Bc7); a
+    // name capitalises each piece and stops — measured before the second half
+    // of that test existed: Qwen3-Coder-480B-A35B-Instruct came back as
+    // "Qwen…ruct" and a provider id the user named, MyProvider-Prod-Edition-2026,
+    // as "MyPr…2026". 32+ with digits and one 12+ piece is a hex digest written
+    // with separators (a version or a date has no such piece). A word with no
+    // separator is not judged here: the run test above has already seen all of
+    // it
     const c = compact(word)
     if (c === word) return false
-    if (c.length >= 20 && /[a-z]/.test(c) && /[A-Z]/.test(c)) return true
+    if (c.length >= 20 && alternates(word)) return true
     return splitDigest(word, c)
   }
   // with a separator it is a key only when it does not *start* like a path: an

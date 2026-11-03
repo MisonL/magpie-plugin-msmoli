@@ -647,6 +647,9 @@ const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]
 // of the first, all 35 of the second). A word does not qualify — which is what
 // keeps "每日签到", a model tier or a rule_key readable on the card.
 const RUN = /[A-Za-z0-9]+/g
+// the characters a key's word can be built from; punctuation outside this set is
+// the frame around it ("…", a trailing full stop, a comma)
+const IDCH = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_.-")
 const keyRun = (r) =>
   (r.length >= 16 && /[a-z]/.test(r) && /[A-Z]/.test(r)) ||
   (r.length >= 32 && /\d/.test(r) && /[A-Za-z]/.test(r)) ||
@@ -671,21 +674,43 @@ const splitDigest = (w, c) => {
     pieces.every((r) => r.length < 32)
   )
 }
+// a short key carried the base64 symbols + and = as part of its body
+// (AbCdEfGh+IjKlMnOp, dGhpc2lzYQ==). The [+=] arm that used to run here masked
+// a server's retry=true and an id=12345 with them; this arm keeps the symbols
+// but demands one of them in a whole word that is at least 12 characters of the
+// key alphabet. retry=true and id=1234567890 carry a bare =, code=ENOENT
+// neither, and none of them is masked. The ends are stripped by the same
+// alphabet — a card can put a full stop after the word, and a dot is not part
+// of a base64 body even though IDCH keeps it for a path or a version
+const B64CH = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
+const stripB64 = (w) => {
+  let a = 0
+  while (a < w.length && !B64CH.has(w[a])) a += 1
+  let b = w.length
+  while (b > a && !B64CH.has(w[b - 1])) b -= 1
+  return w.slice(a, b)
+}
+const base64y = (w) => {
+  const c = stripB64(w)
+  return c.length >= 12 && /^[A-Za-z0-9+/=_-]+$/.test(c) && (/\+/.test(c) || /=$/.test(c))
+}
+// a word cut up by - _ . into pieces each under the run floor is one key when
+// two of its pieces alternate case inside themselves: a key does (AbCdEfGh,
+// nUJqxrpd9Bc7); a name capitalises each piece and stops, so at most one piece
+// ever flips — Qwen3-Coder-480B-A35B-Instruct has none, MyProvider-Prod-Edition-2026
+// exactly one
+const alternates = (w) => (w.match(RUN) ?? []).filter((r) => /[a-z][A-Z]/.test(r)).length >= 2
 const isKeyWord = (w) => {
   if (w.length < 12) return false
   if (!/[\\/]/.test(w)) {
-    if (UUID.test(w) || (w.match(RUN) ?? []).some(keyRun)) return true
-    // the base64 symbols are a key's own alphabet, but not on their own: a
-    // query's retry=true, an id=12345 carried one, and the title went out as
-    // "…". One of them beside a long mixed run is what a key's body carries,
-    // and that run is key-shaped already; a bare "ab=" is not. The separators
-    // out: a key cut into pieces by - _ . is still one key, and
-    // the pieces together are long and mix cases where a name's are lowercase
-    // words. A word with no separator is not judged here — the run test above
-    // has already seen all of it
+    if (UUID.test(w) || base64y(w) || (w.match(RUN) ?? []).some(keyRun)) return true
+    // the separators out: a key cut into pieces by - _ . is still one key, and
+    // the pieces together are long and alternate case where a name's do not.
+    // A word with no separator is not judged here — the run test above has
+    // already seen all of it, and base64y the ones with + or =
     const c = compact(w)
     if (c === w) return false
-    if (c.length >= 20 && /[a-z]/.test(c) && /[A-Z]/.test(c)) return true
+    if (c.length >= 20 && alternates(w)) return true
     return splitDigest(w, c)
   }
   // with a separator it is one key only when it does not start like a path and
@@ -699,11 +724,23 @@ const isKeyWord = (w) => {
 // goes, and inside a word that is not, only the key-like runs and UUIDs go.
 // Punctuation that cannot be part of a key stays where it was, so a card
 // reads "（bonus ghp_16C7…8B4a）" rather than losing its brackets.
+//
+// The lead and tail of punctuation are found by walking in from each end, not
+// by an anchored regex. `word.slice(lead).match(/[^…]*$/)` backtracked from
+// every start position when a word began and ended with an identity character
+// and held a long punctuation run between them: a + 200k "!" + a took 117s for
+// one match, and a server controls the ledger title it sits in. (A word of
+// nothing but punctuation does not show it — the first start position matches
+// cleanly — so the test uses that shape)
 const maskKeys = (s) =>
   s.replace(/[^\s]+/g, (word) => {
-    const lead = (word.match(/^[^A-Za-z0-9+/=_.-]*/) ?? [""])[0]
-    const tail = (word.slice(lead.length).match(/[^A-Za-z0-9+/=_.-]*$/) ?? [""])[0]
-    const body = word.slice(lead.length, word.length - tail.length)
+    let a = 0
+    while (a < word.length && !IDCH.has(word[a])) a += 1
+    let b = word.length
+    while (b > a && !IDCH.has(word[b - 1])) b -= 1
+    const lead = word.slice(0, a)
+    const tail = word.slice(b)
+    const body = word.slice(a, b)
     if (!body) return word
     // the decision runs on the whole word, not the stripped body: a UNC path
     // begins with two backslashes, and \ is not in the identity set — stripped

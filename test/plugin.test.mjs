@@ -6474,3 +6474,74 @@ test("a server's key=value words are not masked on the card", async () => {
     assert.ok((r3.message ?? "").includes(said), `服务端原话被误掩：${r3.message}`)
   }
 })
+
+test("a short base64 key is masked on the card, a query's = is not", async () => {
+  // 与 bin/sync.mjs 的 base64y 同一条：低于 16 位、靠 + 或 = 现形的短 key
+  // （AbCdEfGh+IjKlMnOp、dGhpc2lzYQ==）在卡片上也不能原样留下；而服务端措辞里的
+  // retry=true / id=1234567890 带的是裸 =，不该被整词掩成一个「…」。
+  const masks = ["AbCdEfGh+IjKlMnOp", "AbCdEf+GhIjKl=", "abcdefghij0123456789=", "dGhpc2lzYQ=="]
+  for (const key of masks) {
+    for (const title of [`bonus ${key}`, `bonus: ${key}.`, `优惠码 ${key}，谢谢`]) {
+      const ledger = { success: true, data: { records: [day({ title })], total: 1 } }
+      const r = await withFetch(
+        {
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: ledger },
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+        },
+        () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+      )
+      const msg = r.message ?? r.error ?? ""
+      const kept = longestKeptIn(msg, key)
+      assert.ok(kept.length < 12, `${JSON.stringify(title.slice(0, 24))}…：卡片上原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}：${msg}`)
+    }
+  }
+  for (const said of ["bonus: retry=true.", "id=1234567890 used", "code=ENOENT today"]) {
+    const r3 = await withFetch({ "/openapi/v1/magicubes/transactions?page=1&page_size=50": { status: 500, body: { message: said } } }, () =>
+      auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+    )
+    assert.ok((r3.message ?? "").includes(said), `服务端原话被误掩：${r3.message}`)
+  }
+})
+
+test("a hyphenated provider name survives the card's glued arm", async () => {
+  // 合体那一臂从「去分隔符后大小写都有」改为「至少两段段内大小写交替」：名字
+  // 每段首字母大写、段内不翻转，最多一段合格。Qwen3-Coder-480B-A35B-Instruct、
+  // MyProvider-Prod-Edition-2026 这类 provider id / 模型名不该被掩。
+  const names = [
+    "Qwen3-Coder-480B-A35B-Instruct",
+    "MyProvider-Prod-Edition-2026",
+    "DeepSeek-V3-2-Chat-Preview",
+    "some-long-file-name-WithCaps",
+  ]
+  for (const name of names) {
+    const ledger = { success: true, data: { records: [day({ title: `签到奖励：${name}` })], total: 1 } }
+    const r = await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: ledger },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      },
+      () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+    )
+    const msg = r.message ?? r.error ?? ""
+    assert.ok(msg.includes(name), `${name} 被误掩：${msg}`)
+  }
+})
+
+test("a card title of nothing but punctuation does not stall maskKeys", async () => {
+  // maskKeys 原先用 `word.slice(lead).match(/[^…]*$/)` 剥离尾部标点：锚尾的星号式
+  // 回溯在一个字母开头、字母结尾、中间全是标点的词上从每个起点重试直到穷尽，20
+  // 万字符一次匹配实测 117 秒，而账簿的 title 是服务端可控的。改成两头各一次线性
+  // 内移后是 0.3ms。全标点的词不行——它在第一个起点就匹配成功，旧实现 0.6ms 就过
+  const bomb = "a" + "!".repeat(200_000) + "a"
+  const ledger = { success: true, data: { records: [day({ title: bomb })], total: 1 } }
+  const t0 = performance.now()
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: ledger },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+  )
+  const ms = performance.now() - t0
+  assert.ok(ms < 3000, `病态标点标题耗时 ${ms.toFixed(0)}ms，判定为二次回溯未修`)
+})

@@ -4577,3 +4577,93 @@ test("a child's plain key=value words are not masked, and a base64 body still is
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("a short key carrying a base64 symbol is masked, and a query's = is not", async () => {
+  // 第三十五轮把旧的 [+=] 那一臂撤了（它把子进程的 retry=true、id=12345 整词掩成
+  // 「（10 字符）」），撤得过头：低于 16 位下限、靠 + 或 = 才现形的短 key
+  // （AbCdEfGh+IjKlMnOp、dGhpc2lzYQ==）跟着漏了。新的一臂只认「整词全在 key
+  // 字母表里、>=12 位、且带 + 或以 = 结尾」：查询里的 retry=true、id=1234567890
+  // 带着裸 =，code=ENOENT 两样都没有，v1.2.3+sha.abc 的点不在字母表里，都不掩。
+  const dir = fixture("msmoli-b64word-")
+  try {
+    const masks = [
+      "AbCdEfGh+IjKlMnOp",
+      "AbCdEf+GhIjKl=",
+      "abcdefghij0123456789=",
+      "AbCdEf-GhIjKl+MnOpQr",
+      "dGhpc2lzYQ==",
+    ]
+    for (const key of masks) {
+      for (const value of [key, `${key} `, `token ${key} here`, `"${key}"`]) {
+        const out = []
+        await main({ argv: ["--dir", dir, "--status", "--from", value], log: (s) => out.push(s) })
+        const kept = longestKept(out.join("\n"), key)
+        assert.ok(kept.length < 12, `${JSON.stringify(value)}：原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}\n${out.join("\n")}`)
+      }
+    }
+    const keeps = ["retry=true", "id=12345", "id=1234567890", "code=ENOENT", "host=https://www.modelscope.cn", "v1.2.3+sha.abc", "ab="]
+    for (const v of keeps) {
+      const out = []
+      await main({ argv: ["--dir", dir, "--status", "--from", v], log: (s) => out.push(s) })
+      assert.ok(out.join("\n").includes(v), `${v} 被误掩：\n${out.join("\n")}`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the glued arm asks two pieces to alternate, so a hyphenated name survives", async () => {
+  // 合体那一臂原来是「去掉分隔符后 >=20 位、且大小写都有」：provider id
+  // MyProvider-Prod-Edition-2026 去掉连字符后大小写都有，于是被掩成「MyPr…2026」；
+  // Qwen3-Coder-480B-A35B-Instruct 被掩成「Qwen…ruct」。改成「至少两段在段内
+  // 大小写交替（[a-z][A-Z]）」：key 的段 AbCdEfGh、nUJqxrpd9Bc7 各自交替，而
+  // 名字每段首字母大写、段内不再翻转，最多只有一段合格。
+  const dir = fixture("msmoli-glueword-")
+  try {
+    const keys = [
+      "AbCdEfGh.IjKlMnOp.QrStUvWx.Yz012345",
+      "nUJqxrpd9Bc7-GvG7J--onUJqxrpd9Bc7-GvG7J--o",
+      "wJalrXUtnFEMI-K7MDENG-bPxRfiCYEXAMPLEKEY",
+    ]
+    for (const key of keys) {
+      const out = []
+      await main({ argv: ["--dir", dir, "--status", "--from", key], log: (s) => out.push(s) })
+      const kept = longestKept(out.join("\n"), key)
+      assert.ok(kept.length < 12, `${key}：原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}\n${out.join("\n")}`)
+    }
+    const names = [
+      "Qwen3-Coder-480B-A35B-Instruct",
+      "MyProvider-Prod-Edition-2026",
+      "DeepSeek-V3-2-Chat-Preview",
+      "some-long-file-name-WithCaps",
+      "modelscope-backup-2025-east",
+    ]
+    for (const v of names) {
+      const out = []
+      await main({ argv: ["--dir", dir, "--status", "--from", v], log: (s) => out.push(s) })
+      assert.ok(out.join("\n").includes(v), `${v} 被误掩：\n${out.join("\n")}`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a word of nothing but punctuation does not stall maskKeys", async () => {
+  // maskKeys 原先用 `word.slice(lead).match(/[^…]*$/)` 找回尾部的标点：锚尾的
+  // 星号式回溯在一个字母开头、字母结尾、中间全是标点的词上，从每个起点重试一遍
+  // 直到穷尽，20 万字符一次匹配实测 117 秒，而服务端能把这样的串放进名字。
+  // 改成两头各一次线性内移后是 0.3ms。全标点的词不行——它在第一个起点就匹配成功，
+  // 旧实现 0.6ms 就过，那样测不出东西
+  const dir = fixture("msmoli-punct-")
+  try {
+    const bomb = "a" + "!".repeat(200_000) + "a"
+    const out = []
+    const t0 = performance.now()
+    await main({ argv: ["--dir", dir, "--status", "--from", bomb], log: (s) => out.push(s) })
+    const ms = performance.now() - t0
+    assert.ok(ms < 2000, `病态标点词耗时 ${ms.toFixed(0)}ms，判定为二次回溯未修`)
+    assert.ok(out.join("\n").includes(bomb), `病态标点词该原样保留`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
