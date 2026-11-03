@@ -438,8 +438,8 @@ const isKey = (word) => {
     // the base64 symbols are a key's own alphabet, but not on their own: a
     // query's retry=true, an id=12345 carried one, and the value went out as
     // "（10 字符）". One of them beside a long mixed run is what a key's body
-    // carries, and that run is key-shaped already; a bare "ab=" is not
-    // a word cut up by - _ . into pieces none of which clears the floor is
+    // carries, and that run is key-shaped already; a bare "ab=" is not.
+    // A word cut up by - _ . into pieces none of which clears the floor is
     // still one key when the pieces together clear it. Mixing cases is the
     // shape of a generated key and of no name (documentsnewproject has none;
     // between separators a name is lowercase letters), and 32+ with digits and

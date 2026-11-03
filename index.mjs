@@ -678,8 +678,8 @@ const isKeyWord = (w) => {
     // the base64 symbols are a key's own alphabet, but not on their own: a
     // query's retry=true, an id=12345 carried one, and the title went out as
     // "…". One of them beside a long mixed run is what a key's body carries,
-    // and that run is key-shaped already; a bare "ab=" is not
-    // the separators out: a key cut into pieces by - _ . is still one key, and
+    // and that run is key-shaped already; a bare "ab=" is not. The separators
+    // out: a key cut into pieces by - _ . is still one key, and
     // the pieces together are long and mix cases where a name's are lowercase
     // words. A word with no separator is not judged here — the run test above
     // has already seen all of it
