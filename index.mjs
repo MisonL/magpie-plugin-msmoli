@@ -788,17 +788,30 @@ const cardText = (value, token, max = 200) => {
 const hostText = (value) => cardText(value, "")
 
 // unusableName is a nickname that must not be written back: empty, the token
-// itself or a piece of it (the server would be handed it twice), or a key the
-// host's accountNames lookup would read as inherited rather than as a name.
+// itself or a piece of it (the server would be handed it twice), a key the
+// host's accountNames lookup would read as inherited rather than as a name, or
+// a string the card would mask — because that string is a key, and writing it
+// back puts the plaintext in plugin-auth.json's accountId, where the card's
+// mask does not reach. Measured: a server that answered NickName with
+// ghp_16C7e42F292c6912E7710c838347Ae178B4a had it stored verbatim, and a
+// sk-ant body cut to 40 characters with it. The card judges word by word, so
+// the test does too; but a camelCase name ("MisonLiangWithALongName") is
+// key-shaped to the card as well, and it is not a key — a generated key nearly
+// always carries a digit or a base64 symbol, and a name nearly never does, so
+// nameIsKey asks for one of those beside the card's verdict.
 // The piece is looked for before the cut to 40: a token longer than 40, cut
 // to 40, is no longer equal to the token, and its front would be written to
 // plugin-auth.json as the account's name. A substring of 20+ characters is
 // the piece; a nickname of a few characters that happens to sit inside a
 // token ("ms", "ab") is a nickname.
+const nameIsKey = (name, token) =>
+  !(typeof token === "string" && token.includes(name)) &&
+  name.split(/\s+/).some((w) => isKeyWord(w) && (/\d/.test(w) || /[+/=]/.test(w)))
 const unusableName = (name, token) =>
   !name ||
   name === token ||
   (typeof token === "string" && ((name.length >= 20 && token.includes(name)) || name.includes(token))) ||
+  nameIsKey(name, token) ||
   ["__proto__", "constructor", "prototype"].includes(name)
 
 async function rememberAccountName(client, token, name, auth, dir) {

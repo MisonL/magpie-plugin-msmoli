@@ -6545,3 +6545,52 @@ test("a card title of nothing but punctuation does not stall maskKeys", async ()
   const ms = performance.now() - t0
   assert.ok(ms < 3000, `病态标点标题耗时 ${ms.toFixed(0)}ms，判定为二次回溯未修`)
 })
+
+test("a nickname that is another vendor's key is not written back as the account name", async () => {
+  // 服务端的 NickName 会被原样写进 plugin-auth.json 的 accountId（磁盘明文，
+  // 卡片的掩码管不到那里）：实测把 ghp_16C7… 写成账号名，sk-ant 本体截到 40 位
+  // 也照样写。unusableName 补上卡片同一套判据（逐词 isKeyWord）后，论键形状的昵称
+  // 不写回；普通昵称（含大小写混排的 Qwen3-Coder）照写。
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-nickkey-"))
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    // 每个用例一个 token：名字按 token 只写回一次（named 冷却），共用一个 token
+    // 会让先通过的那条吃掉后面要断言的写入
+    let n = 0
+    const run = async (nick) => {
+      n += 1
+      const token = `ms-nickkey-0000-0000-0000-00000000${String(n).padStart(4, "0")}`
+      const writes = []
+      const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+      await withFetch(
+        {
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+        },
+        () => withClient.auth.checkin(async () => ({ type: "api", key: token })),
+      )
+      return writes
+    }
+    for (const nick of [
+      "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+      "sk-ant-api03-Eyai1pkJrF_KbwtQm3Z8Vd2Nc7Rt5Hs",
+      "AbCdEfGh.IjKlMnOp.QrStUvWx.Yz012345",
+      "9f8e7d6c5b4a3928-1706f5e4d3c2b1a0",
+      "AbCdEf0123456789+/xYzAbCdEf0123456789==",
+    ]) {
+      const w = await run(nick)
+      assert.equal(w.length, 0, `论键形状的昵称不该写回：${JSON.stringify(nick)} → accountId=${JSON.stringify(w[0]?.body?.accountId)}`)
+    }
+    for (const nick of ["Mison", "alice", "魔搭用户", "Qwen3-Coder", "my_name"]) {
+      const w = await run(nick)
+      assert.equal(w.length, 1, `普通昵称该写回：${JSON.stringify(nick)}`)
+      assert.equal(w[0].body.accountId, nick)
+    }
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
