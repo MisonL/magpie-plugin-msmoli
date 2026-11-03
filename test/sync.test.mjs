@@ -4125,7 +4125,9 @@ test("a key of any shape is masked in a typed value, and a path keeps its shape"
       "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
       "sk-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2",
       "AKIAIOSFODNN7EXAMPLE",
-      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+      // 自造且已过期（exp 2018，sub=fixture）：密钥扫描服务会把 JWT 形状当成真
+      // 凭据报警，而它们在过期令牌上没有可报的东西；这里要的只是「三段长串」。
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmaXh0dXJlIiwiZXhwIjoxNTE2MjM5MDIyfQ.c3ludGhldGljLWZpeHR1cmUtc2lnbmF0dXJlLW5vdC1hLWNyZWRlbnRpYWw",
       "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
       "AbCdEf0123456789+/xYzAbCdEf0123456789==",
       "/tmp/ghp_16C7e42F292c6912E7710c838347Ae178B4a",
