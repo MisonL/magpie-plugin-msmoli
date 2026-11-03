@@ -6478,6 +6478,27 @@ test("a key split into short pieces is masked on the card too", async () => {
   }
 })
 
+test("a UUID inside a larger word is masked by the run and UUID pass, not left whole", async () => {
+  // maskKeys 对「不是一个 key 的词」还有第三道：词内的 key-like run 与内嵌的
+  // UUID 各掩各的。前两条测试给的是独立 UUID 词，走的是 isKeyWord 整词那条，
+  // 第三道从没被走到。用一个带 / 的词把 UUID 包进去：/ 不在 identity 字母表，
+  // 整词不算 key，于是 UUID_ANY 这一趟才真正跑起来（实测该分支命中 1 次）。
+  const U = "550e8400-e29b-41d4-a716-446655440000"
+  for (const title of [`path/${U}`, `ref/${U}.json`, `${U}/${U}`]) {
+    const ledger = { success: true, data: { records: [day({ title })], total: 1 } }
+    const r = await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: ledger },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      },
+      () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+    )
+    const msg = r.message ?? r.error ?? ""
+    assert.ok(!msg.includes(U), `${JSON.stringify(title)}：UUID 整串留在了卡片上：${msg}`)
+    assert.match(msg, /550e…0000/, `${JSON.stringify(title)}：UUID 该被掩成 550e…0000：${msg}`)
+  }
+})
+
 test("a server's key=value words are not masked on the card", async () => {
   // 与 bin/sync.mjs 同一条：「含 +/= 就整词算 key」会把 retry=true、id=12345
   // 这样的词整词掩掉，卡片上只剩一个「…」。key 的 base64 本体带着 16+ 位长串，
