@@ -447,11 +447,16 @@ const base64y = (w) => {
   while (b > a && !B64CH.has(w[b - 1])) b -= 1
   const c = w.slice(a, b)
   if (c.length < 12 || !/^[A-Za-z0-9+/=_-]+$/.test(c)) return false
-  // a trailing = is base64 padding. A + inside is the other sign, but a phrase
-  // of lowercase words can carry one too (foo+bar+baz+qux, key=value+with+plus),
-  // so a + needs the body beside it to be a key's: a case mix or a digit
+  // a trailing = is base64 padding on its own. A + inside is the other sign,
+  // but only beside a case mix: a phrase of lowercase words carries one too
+  // (foo+bar+baz+qux, key=value+with+plus), and so does arithmetic and a phone
+  // number (+1-555-123-4567, 1+2+3+4+5). A generated key mixes cases; digits
+  // alone do not make it one, and demanding them alongside the + masked the
+  // phone numbers. The five shapes this arm exists for — AbCdEfGh+IjKlMnOp,
+  // AbCdEf+GhIjKl=, AbCdEf-GhIjKl+MnOpQr, abcdefghij0123456789=, dGhpc2lzYQ==
+  // — are each covered by the case mix or the trailing =
   if (c.endsWith("=")) return true
-  return c.includes("+") && ((/[a-z]/.test(c) && /[A-Z]/.test(c)) || /\d/.test(c))
+  return c.includes("+") && /[a-z]/.test(c) && /[A-Z]/.test(c)
 }
 // a word cut up by - _ . into pieces each under the run floor is one key when
 // two of its pieces alternate case inside themselves. A key does (AbCdEfGh,

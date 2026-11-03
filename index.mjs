@@ -693,8 +693,12 @@ const stripB64 = (w) => {
 const base64y = (w) => {
   const c = stripB64(w)
   if (c.length < 12 || !/^[A-Za-z0-9+/=_-]+$/.test(c)) return false
+  // a trailing = is base64 padding on its own. A + inside is the other sign,
+  // but only beside a case mix: a phrase of lowercase words (foo+bar+baz+qux),
+  // arithmetic and a phone number (+1-555-123-4567, 1+2+3+4+5) carry one too.
+  // A generated key mixes cases; digits alone do not make it one
   if (c.endsWith("=")) return true
-  return c.includes("+") && ((/[a-z]/.test(c) && /[A-Z]/.test(c)) || /\d/.test(c))
+  return c.includes("+") && /[a-z]/.test(c) && /[A-Z]/.test(c)
 }
 // a word cut up by - _ . into pieces each under the run floor is one key when
 // two of its pieces alternate case inside themselves: a key does (AbCdEfGh,

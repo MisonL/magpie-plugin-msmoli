@@ -6495,7 +6495,7 @@ test("a short base64 key is masked on the card, a query's = is not", async () =>
       assert.ok(kept.length < 12, `${JSON.stringify(title.slice(0, 24))}…：卡片上原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}：${msg}`)
     }
   }
-  for (const said of ["bonus: retry=true.", "id=1234567890 used", "code=ENOENT today", "foo+bar+baz+qux+quux+corge", "key=value+with+plus"]) {
+  for (const said of ["bonus: retry=true.", "id=1234567890 used", "code=ENOENT today", "foo+bar+baz+qux+quux+corge", "key=value+with+plus", "tel:+1-555-123-4567", "1+2+3+4+5+6+7+8+9"]) {
     const r3 = await withFetch({ "/openapi/v1/magicubes/transactions?page=1&page_size=50": { status: 500, body: { message: said } } }, () =>
       auth.checkin(async () => ({ type: "api", key: "ms-test" })),
     )

@@ -4601,7 +4601,7 @@ test("a short key carrying a base64 symbol is masked, and a query's = is not", a
         assert.ok(kept.length < 12, `${JSON.stringify(value)}：原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}\n${out.join("\n")}`)
       }
     }
-    const keeps = ["retry=true", "id=12345", "id=1234567890", "code=ENOENT", "host=https://www.modelscope.cn", "v1.2.3+sha.abc", "ab=", "foo+bar+baz+qux+quux+corge", "key=value+with+plus", "a+b=c+d=e+f=g+h"]
+    const keeps = ["retry=true", "id=12345", "id=1234567890", "code=ENOENT", "host=https://www.modelscope.cn", "v1.2.3+sha.abc", "ab=", "foo+bar+baz+qux+quux+corge", "key=value+with+plus", "a+b=c+d=e+f=g+h", "+1-555-123-4567", "1+2+3+4+5+6+7+8+9", "100+200+300+400", "mnbvcxzlkjh+1234"]
     for (const v of keeps) {
       const out = []
       await main({ argv: ["--dir", dir, "--status", "--from", v], log: (s) => out.push(s) })
