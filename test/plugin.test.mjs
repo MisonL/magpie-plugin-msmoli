@@ -3,10 +3,11 @@
 // parsed. Run with: node --test test/
 
 import assert from "node:assert/strict"
-import { test } from "node:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { after, test } from "node:test"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 
 import { MsmoliPlugin, testables } from "../index.mjs"
 
@@ -29,6 +30,25 @@ if (Number.isFinite(SHIFT)) {
 const TEST_CONFIG = join(tmpdir(), `msmoli-test-${process.pid}.json`)
 process.env.MAGPIE_MSMOLI_CONFIG = TEST_CONFIG
 writeFileSync(TEST_CONFIG, JSON.stringify({ checkinWindow: false }))
+
+// Every test that needs a temp folder makes it through tmpDir so the whole
+// run's scratch space is recorded and removed once at the end. Tests that
+// already rmSync their own dir simply leave nothing behind for the hook; the
+// ones that never did (a dir per test, and the proto-key test one per loop
+// turn) used to pile up in $TMPDIR across CI and dev runs — 200k+ folders — so
+// the cleanup lives here in one place instead of trusting every test to have a
+// finally. The base config file is removed alongside them.
+const scratchDirs = []
+const tmpDir = (prefix) => {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  scratchDirs.push(dir)
+  return dir
+}
+
+after(() => {
+  for (const dir of scratchDirs) rmSync(dir, { recursive: true, force: true })
+  rmSync(TEST_CONFIG, { force: true })
+})
 
 // withDirectory runs fn with the plugin reading its own config from dir, and
 // puts MAGPIE_MSMOLI_CONFIG back afterwards whatever happens. Deleting the
@@ -841,7 +861,7 @@ test("checkinWindow off claims at once, as if there were no window", async () =>
 test("the window is read from the folder magpie reports, not a guessed one", async () => {
   // a portable magpie keeps its files in its data folder, not ~/.config/magpie;
   // a config read from the guessed path would be ignored without a word
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-portable-"))
+  const dir = tmpDir("msmoli-portable-")
   const file = join(dir, "msmoli.json")
   writeFileSync(file, JSON.stringify({ checkinWindow: ["13:00", "14:00"] }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
@@ -878,7 +898,7 @@ test("the window is read from the folder magpie reports, not a guessed one", asy
 test("a config file that is not JSON, or not an object, is the default window", async () => {
   // the file is hand-edited by users; a stray comma or a JSON array must not
   // make the plugin stop claiming — it reads as "no overrides at all"
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-bad-"))
+  const dir = tmpDir("msmoli-bad-")
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
   const realNow = Date.now
@@ -970,7 +990,7 @@ test("a window reaching into the late evening is capped, so a failed ask still h
   // the host asks again 30 minutes after a failure; a target in the last half
   // hour of the day has no ask left before the day (and the target) resets, so
   // the claim would be lost and the card would read failed until midnight
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-late-"))
+  const dir = tmpDir("msmoli-late-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: ["22:00", "23:59"] }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -1018,7 +1038,7 @@ test("two tokens are two accounts: own target, own name, no bleed", async () => 
   // its own token. The hash is over the day and the token, so two accounts
   // must not land on the same minute, and one's name must not show on the
   // other's row.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-two-"))
+  const dir = tmpDir("msmoli-two-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: ["08:30", "10:00"] }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -1079,7 +1099,7 @@ test("the name read at check-in is written back so the card can show it", async 
   // magpie labels an account by its accountId; an api-type sign-in has none,
   // so the card would read "API key …a1b2". The check-in is the one place the
   // name is known, so it writes it back — the same sign-in, the token once.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-nm-"))
+  const dir = tmpDir("msmoli-nm-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -1122,7 +1142,7 @@ test("a sign-in that is not an object is not spread into the write-back", async 
   // but only when what the host handed over is an object. `typeof` is what
   // draws that line: a callable carrying auth fields is not a sign-in, and
   // spreading one would copy whatever it carries onto the account's sign-in.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-fnauth-"))
+  const dir = tmpDir("msmoli-fnauth-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -1158,7 +1178,7 @@ test("an account the user already named is not renamed under them", async () => 
   // nickname over an account whose label the user has aliased would leave the
   // alias keyed to a label nothing carries: the name would silently vanish
   // from the card.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-al-"))
+  const dir = tmpDir("msmoli-al-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const token = "ms-nametest-0000-0000-0000-000000000010"
   const label = "API key …0010"
@@ -1199,7 +1219,7 @@ test("a providers.json with a BOM is read, not kept from being written back", as
   // own BOM strip — the same rule configOf has — and losing it makes a file
   // that parses look unreadable: aliasOf answers "could not look", the
   // nickname is never written back, and nothing says why.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-aliasbom-"))
+  const dir = tmpDir("msmoli-aliasbom-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   writeFileSync(join(dir, "providers.json"), "﻿" + JSON.stringify({ providers: [{ id: "msmoli" }] }))
   const token = "ms-aliasbom-0000-0000-0000-000000000027"
@@ -1267,7 +1287,7 @@ test("invisible characters in a nickname never reach the written-back name", asy
   // U+200B/200D (zero-width), U+2060 (word joiner), U+061C (ALM) and the tag
   // characters U+E0000–E007F all survived the earlier sanitizer: two accounts
   // could be made to look identical on the card, and tags can carry hidden data
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-zw-"))
+  const dir = tmpDir("msmoli-zw-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -1296,7 +1316,7 @@ test("invisible characters in a nickname never reach the written-back name", asy
 })
 
 test("a nickname that is the token itself is not written back", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-tokname-"))
+  const dir = tmpDir("msmoli-tokname-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -1672,7 +1692,7 @@ test("a write-back failure is retried later, and never logs the token", async ()
   // the host can refuse the write (a locked file, a daemon restarting). The
   // name has to be tried again on the next ask, and the log line must not
   // carry the token even if the host's error message echoes it.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-wbfail-"))
+  const dir = tmpDir("msmoli-wbfail-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -1721,7 +1741,7 @@ test("a write-back failure is retried later, and never logs the token", async ()
 })
 
 test("a logged rejection that is not an Error does not print [object Object]", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-wbobj-"))
+  const dir = tmpDir("msmoli-wbobj-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -1755,7 +1775,7 @@ test("a nickname that is a prototype key is not written back", async () => {
   // the host looks names up in an object; "__proto__"/"constructor" would be
   // inherited properties rather than a name
   for (const name of ["__proto__", "constructor", "prototype"]) {
-    const dir = mkdtempSync(join(tmpdir(), "msmoli-proto-"))
+    const dir = tmpDir("msmoli-proto-")
     writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
     const saved = process.env.MAGPIE_MSMOLI_CONFIG
     delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -1786,7 +1806,7 @@ test("an alias kept on a plugin-left provider still counts as the user's name", 
   // provider is a single object, not a list. Read as a list the record was
   // skipped and the user's alias went unseen, so the nickname was written
   // over it.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-left-"))
+  const dir = tmpDir("msmoli-left-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const token = "ms-left-0000-0000-0000-000000000015"
   writeFileSync(
@@ -1827,7 +1847,7 @@ test("a pluginLeft entry that is not a record is skipped, not tripped over", asy
   // write or hand-edited: the file's reader already treats anything it cannot
   // understand as "don't write". A null entry is exactly that — and the record
   // walk must not let one take the whole check-in down with it.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-leftjunk-"))
+  const dir = tmpDir("msmoli-leftjunk-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const token = "ms-left-0000-0000-0000-000000000025"
   writeFileSync(
@@ -2119,7 +2139,7 @@ test("a providers.json that cannot be read is not written over", async () => {
   // middle arm joined by `&&` lets every one of them through, and the
   // nickname is written over state the user could not have meant to lose.
   for (const [i, broken] of ["{ not json", "", "null", "[1,2,3", "5", "true", "[1,2,3]"].entries()) {
-    const dir = mkdtempSync(join(tmpdir(), "msmoli-badalias-"))
+    const dir = tmpDir("msmoli-badalias-")
     writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
     writeFileSync(join(dir, "providers.json"), broken)
     const saved = process.env.MAGPIE_MSMOLI_CONFIG
@@ -2148,7 +2168,7 @@ test("a providers.json that cannot be read is not written over", async () => {
 
 test("a providers.json that is missing is a fresh install, and gets the name", async () => {
   // the other side of the same distinction: nothing to clobber
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-noalias-"))
+  const dir = tmpDir("msmoli-noalias-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -2545,7 +2565,7 @@ test("a second check-in in the same process does not write the name again", asyn
   // `named` is the once-per-token guard. The earlier test's second ask carried
   // accountId the host had already saved, so the "already named" condition
   // short-circuited first and the guard itself was never reached.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-once-"))
+  const dir = tmpDir("msmoli-once-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -2600,7 +2620,7 @@ test("a host error that carries the token is masked on the two getAuth exits too
   // through unmasked. magpie's own wording for a missing key names it
   // ("no key <key> for provider"), so the text can carry one.
   const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-getauth-"))
+  const dir = tmpDir("msmoli-getauth-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const real = globalThis.fetch
   let asked = 0
@@ -2635,7 +2655,7 @@ test("a token-shaped run is masked whatever its first character and length", asy
   // pattern takes; 11 lets a 14-character key through, which maskToken would
   // still have shown by its ends. sync.mjs's show() has the same test; this
   // side had none.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-hostsahpe-"))
+  const dir = tmpDir("msmoli-hostsahpe-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   try {
     const p = await MsmoliPlugin({ directory: dir, client: {} })
@@ -2669,7 +2689,7 @@ test("an error from the host reaches the card scrubbed, like the log's does", as
   // host demonstrably does put them in error text. The four card exits used to
   // pass that text through untouched — only the nickname log did not.
   const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-card-"))
+  const dir = tmpDir("msmoli-card-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const real = globalThis.fetch
   globalThis.fetch = async () => {
@@ -2696,7 +2716,7 @@ test("a host log that throws synchronously does not reject the usage hook", asyn
   // usage promises an {error}, never a rejection — and the nickname write-back
   // sits on its path. `?.catch?.()` only catches a rejected promise, not a
   // throw made while the call itself is being made.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-logthrow-"))
+  const dir = tmpDir("msmoli-logthrow-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const token = "ms-nametest-0000-0000-0000-000000000012"
   const real = globalThis.fetch
@@ -2734,7 +2754,7 @@ test("a host log whose promise rejects leaves no unhandled rejection behind", as
   // is done. `typeof r.catch === "function"` flipped to !== attaches nothing
   // and does exactly that; no other test observes the difference, because the
   // card and the state are unchanged either way.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-logreject-"))
+  const dir = tmpDir("msmoli-logreject-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const token = "ms-nametest-0000-0000-0000-000000000077"
   const unhandled = []
@@ -2774,7 +2794,7 @@ test("the write-back log masks the token before truncating, not after", async ()
   // The other order cuts a token in half; half a token is not a token to
   // split() on, so the front of it reaches the log. Padding puts the token
   // across the 200-code-point cut.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-cut-"))
+  const dir = tmpDir("msmoli-cut-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
   const logged = []
@@ -2810,7 +2830,7 @@ test("a config file with a BOM is read, not quietly replaced by the default wind
   // a user who wrote checkinWindow: false would get the default window back
   // with nothing said. The file has to be the one the plugin reads: the env
   // variable wins over the directory, so it is cleared for this test.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-bom-"))
+  const dir = tmpDir("msmoli-bom-")
   writeFileSync(join(dir, "msmoli.json"), "\uFEFF" + JSON.stringify({ checkinWindow: false }))
   await withDirectory(dir, async () => {
     const hooks = await MsmoliPlugin({ directory: dir })
@@ -3486,7 +3506,7 @@ test("a nickname longer than the cut is not a token's front", async () => {
   // account's name
   const token = "ms-0123456789abcdef0123456789abcdef012345678"
   assert.ok(token.length > 40)
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-longtok-"))
+  const dir = tmpDir("msmoli-longtok-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -3674,7 +3694,7 @@ test("a nickname that is not a string is not written back", async () => {
   // stops matching. A directory with no providers.json is a fresh install,
   // where the write is allowed — so a missing write is this guard, not the
   // alias one.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-nick-"))
+  const dir = tmpDir("msmoli-nick-")
   try {
     for (const nick of [{ weird: 1 }, [1, 2], 12345, true]) {
       const writes = []
@@ -3952,8 +3972,8 @@ test("a relative XDG_CONFIG_HOME is ignored, as magpie itself ignores it", async
   // the process happened to start in — a file magpie never keeps. The user's
   // real window then did nothing, because the plugin read a different file.
   const cwd = process.cwd()
-  const scratch = mkdtempSync(join(tmpdir(), "msmoli-relxdg-"))
-  const home = mkdtempSync(join(tmpdir(), "msmoli-relhome-"))
+  const scratch = tmpDir("msmoli-relxdg-")
+  const home = tmpDir("msmoli-relhome-")
   const saved = { env: process.env.MAGPIE_MSMOLI_CONFIG, xdg: process.env.XDG_CONFIG_HOME, home: process.env.HOME }
   delete process.env.MAGPIE_MSMOLI_CONFIG
   try {
@@ -3993,7 +4013,7 @@ test("with no directory, the config comes from XDG_CONFIG_HOME, else the home fo
   // the host hands over input.directory, so this path only runs for a plugin
   // loaded without one (a bare import, a test harness): it must still look in
   // magpie's own folder rather than the process's working directory.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-xdg-"))
+  const dir = tmpDir("msmoli-xdg-")
   const saved = { env: process.env.MAGPIE_MSMOLI_CONFIG, xdg: process.env.XDG_CONFIG_HOME }
   delete process.env.MAGPIE_MSMOLI_CONFIG
   try {
@@ -4052,7 +4072,7 @@ test("a key too short for magpie to hint goes by magpie's label, not one of our 
   // which is the string a user's alias is kept under. Reading a shorter key
   // with our own tail would look the alias up under a name nothing carries,
   // find nothing, and write the nickname over the user's own name.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-short-"))
+  const dir = tmpDir("msmoli-short-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   writeFileSync(
     join(dir, "providers.json"),
@@ -4115,7 +4135,7 @@ test("a key of exactly magpie's hint length is labelled and masked by its tail",
   // back to the bare "…" only below its threshold.
   const token = "ms-abcdefghi"
   assert.equal(token.length, 12, "the first length magpie hints at")
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-hint12-"))
+  const dir = tmpDir("msmoli-hint12-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   writeFileSync(
     join(dir, "providers.json"),
@@ -4162,7 +4182,7 @@ test("an empty accountId is no accountId, and the key's own label is used", asyn
   // under, so aliasOf answers "could not look" instead of "no alias" and the
   // nickname is never written — on a fresh install the card would show the
   // key's tail for good instead of the account's own name.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-emptyid-"))
+  const dir = tmpDir("msmoli-emptyid-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -4194,7 +4214,7 @@ test("an accountId on the sign-in is the label its alias is kept under", async (
   // is kept under. Read as `!==` ("a non-string is the label"), the branch
   // never runs for a real accountId, the lookup goes to the key's tail
   // instead, misses the alias, and the nickname is written over it.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-accid-"))
+  const dir = tmpDir("msmoli-accid-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   writeFileSync(
     join(dir, "providers.json"),
@@ -4231,7 +4251,7 @@ test("with no directory there is nowhere to look, so the nickname is not written
   // "fresh install, safe to write". The name is written over a state nobody
   // looked at.
   const cwd = process.cwd()
-  const scratch = mkdtempSync(join(tmpdir(), "msmoli-nodir-"))
+  const scratch = tmpDir("msmoli-nodir-")
   try {
     writeFileSync(join(scratch, "providers.json"), JSON.stringify({ providers: [{ id: "msmoli" }] }))
     process.chdir(scratch)
@@ -4258,7 +4278,7 @@ test("an accountNames value that is not a string is not a name to keep", async (
   // keeps a name only when it is a non-empty string; read as `||`, a number
   // under the label is returned as the user's name, `!== ""` is true, and the
   // nickname is never written — the card keeps the key's tail for good.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-nonstr-"))
+  const dir = tmpDir("msmoli-nonstr-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   writeFileSync(
     join(dir, "providers.json"),
@@ -4294,7 +4314,7 @@ test("an accountNames that is not a map does not take the check-in down with it"
   // narrowed to `&&` it stops guarding null — typeof null is "object" — and
   // `names[key]` then throws out of the check-in, which answers failed and
   // retries forever over a name it was never going to write.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-nullnames-"))
+  const dir = tmpDir("msmoli-nullnames-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "msmoli", accountNames: null }] }))
   const token = "ms-null-0000-0000-0000-000000000017"
@@ -4330,7 +4350,7 @@ test("a nickname a token could hold is refused at 20 characters, and a longer on
   // characters, however unrelated. The threshold is the token's own front:
   // whatever its length, a piece of it must be refused at 20 and a name the
   // token does not contain must go through.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-longname-"))
+  const dir = tmpDir("msmoli-longname-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -4521,7 +4541,7 @@ test("a getAuth that rejects as expired marks the sign-in expired, on both hooks
   // session is gone, that has to reach the card: without it magpie sends the
   // user to sign in again for a token it already knows is dead. Both spellings
   // of "gone" are what signedOut reads (signIn:"expired" and a bare .expired).
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-getexp-"))
+  const dir = tmpDir("msmoli-getexp-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -4601,7 +4621,7 @@ test("with no directory and no XDG_CONFIG_HOME, the config comes from ~/.config/
   // silently the default, with their file sitting where they were told.
   // Both spellings of "home" are set because the runtimes read different ones:
   // HOME on POSIX, USERPROFILE on Windows.
-  const home = mkdtempSync(join(tmpdir(), "msmoli-homewin-"))
+  const home = tmpDir("msmoli-homewin-")
   mkdirSync(join(home, ".config", "magpie"), { recursive: true })
   // a window that does not overlap the default 08:30-10:00, so a fall-through
   // to the default is not mistaken for having read the file
@@ -4731,7 +4751,7 @@ test("a null entry in providers.json does not stop the name being written back",
   // every list looking for our id; read as `p.id` the null throws, and the
   // check-in reports "Cannot read properties of null" with the nickname never
   // written back.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-nullprov-"))
+  const dir = tmpDir("msmoli-nullprov-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [null, { id: "msmoli", accountNames: {} }] }))
   const token = "ms-null-0000-0000-0000-000000000024"
@@ -4846,7 +4866,7 @@ test("a host with no auth.set still gets its check-in, with the name simply not 
   // `{ auth: { set: 1 } }` (set not callable): both must count as "cannot
   // write" and be walked past — read as `!client?.auth`, the first one calls
   // a non-function and the check-in fails.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-noset-"))
+  const dir = tmpDir("msmoli-noset-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -4894,7 +4914,7 @@ test("the nickname is written back before the hook answers", async () => {
   // answered has not landed anywhere yet. Dropped, the check-in answers first
   // and the write races it — on a host that closes the plugin the moment the
   // answer is in, it never lands at all.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-awaitset-"))
+  const dir = tmpDir("msmoli-awaitset-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -5023,7 +5043,7 @@ test("a title and a nickname lose the padding around them before the card sees t
 test("a padded nickname is written back trimmed", async () => {
   // the same trim, on the other exit: what goes to auth.set is the account's
   // name in magpie's UI, and "  alice  " is not how a person writes it
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-padname-"))
+  const dir = tmpDir("msmoli-padname-")
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
   try {
@@ -5061,7 +5081,7 @@ test("an account label with padding around it still finds the alias kept under i
   // aliasOf keyed the lookup on `label.trim().toLowerCase()`: the label is the
   // accountId the host hands over, and a padded one that misses the trim finds
   // no alias — so the nickname is written over the name the user chose.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-padalias-"))
+  const dir = tmpDir("msmoli-padalias-")
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
   try {
@@ -5093,7 +5113,7 @@ test("a message naming two tokens has both of them masked", async () => {
   // tokenShaped carries /g because the mask is a replace: without it only the
   // first run is rewritten and the second is printed whole — the one promise
   // this tool makes about a token, broken by the message that names two.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-twotok-"))
+  const dir = tmpDir("msmoli-twotok-")
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
   try {
@@ -5125,7 +5145,7 @@ test("a nickname that is a middle slice of the token, or that carries it, is ref
   // startsWith, a 24-character slice from the middle of the token is written
   // back as the account name, and so is a name with the token inside it — the
   // server is handed its own session back, once removed.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-midname-"))
+  const dir = tmpDir("msmoli-midname-")
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
   try {
@@ -5172,7 +5192,7 @@ test("a nickname of only whitespace falls through to the Name behind it", async 
   // `||` moves on to Name. Read as the bare string, "   " is truthy, wins the
   // `||`, and text() then trims it to "" — the account is left without the
   // name the server did send.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-wsnick-"))
+  const dir = tmpDir("msmoli-wsnick-")
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
   try {
@@ -5202,7 +5222,7 @@ test("an amount with a third decimal rounds to two, it does not truncate", async
   // makes 0.125 into 0.13: as Math.floor it truncates every amount with a
   // third decimal — 0.125 reads 0.12, 0.335 reads 0.33, and the totals on the
   // card disagree with the ledger they came from.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-yin-"))
+  const dir = tmpDir("msmoli-yin-")
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
   try {
@@ -5243,7 +5263,7 @@ test("the usage percentage rounds to two decimals on both denominators", async (
   // reads 66.66 instead of 66.67, and 2 used out of 201 earned reads 0.99
   // instead of a full 1. The two branches take different inputs, so each needs
   // its own arithmetic.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-pct-"))
+  const dir = tmpDir("msmoli-pct-")
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
   try {
@@ -5305,7 +5325,7 @@ test("a grant of one 魔粒 is today's grant, not a fall-back to the balance", a
   // grant falls through to the balance denominator, and one 魔粒 earned and
   // one spent reads "used 0.4" — a rounding test whose smallest grant is 201
   // never reaches the switch's own boundary.
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-one-"))
+  const dir = tmpDir("msmoli-one-")
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
   try {
@@ -5340,7 +5360,7 @@ test("a providers.json that parses to an empty object still takes the nickname",
   // 是 undefined。`if (!Array.isArray(list)) continue` 被掏空后，for...of
   // undefined 立刻抛 "list is not iterable"，整次签到回答 failed——用户没做错
   // 任何事，网也通，只因为 providers.json 恰好是个空对象，昵称就永远写不回来。
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-emptyobj-"))
+  const dir = tmpDir("msmoli-emptyobj-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   writeFileSync(join(dir, "providers.json"), "{}")
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
@@ -5495,7 +5515,7 @@ test("a control character in a name becomes a space, not the word undefined", as
   // text() 把控制字符替换成一个空格。漏掉替换串，String.replace 会把替换结果
   // 写成字面量 "undefined"——昵称原样写回成「Miundefinedson」，卡片和
   // plugin-auth.json 里都是这个。
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-cc-"))
+  const dir = tmpDir("msmoli-cc-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -5550,7 +5570,7 @@ test("the day's claim target moves with the date", async () => {
 test("a nickname longer than 40 is cut before it is written back", async () => {
   // 写回的是 magpie 卡片上的账号名：一行放不下四十个字符以外的部分。丢掉
   // 这个实参，截断点退回 text 的默认 120，一个长昵称会把卡片撑成两行。
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-nm40-"))
+  const dir = tmpDir("msmoli-nm40-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -6551,7 +6571,7 @@ test("a nickname that is another vendor's key is not written back as the account
   // 卡片的掩码管不到那里）：实测把 ghp_16C7… 写成账号名，sk-ant 本体截到 40 位
   // 也照样写。unusableName 补上卡片同一套判据（逐词 isKeyWord）后，论键形状的昵称
   // 不写回；普通昵称（含大小写混排的 Qwen3-Coder）照写。
-  const dir = mkdtempSync(join(tmpdir(), "msmoli-nickkey-"))
+  const dir = tmpDir("msmoli-nickkey-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
@@ -6647,4 +6667,15 @@ test("a non-ms key cut by an invisible character is masked whole on the card", a
       assert.ok(kept.length < 12, `${JSON.stringify(key)} 夹 ${JSON.stringify(cut)}：卡片上原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}：${msg}`)
     }
   }
+})
+
+test("no test creates a temp folder outside the tracked helper", async () => {
+  // 每个测试的临时目录都要经 tmpDir 登记，after 钩子统一删。以前有一批测试
+  // 建完临时目录又不 rmSync，$TMPDIR 里累积到 20 万+ 个 msmoli-* 目录。
+  // 这条守卫读本文件源码，凡是带字面量前缀、绕过 tmpDir 登记的建目录调用都是
+  // 会再泄漏的形状；只允许变量前缀的 helper 定义（tmpDir 与 withNameDir，
+  // 后者自清）。
+  const self = readFileSync(fileURLToPath(import.meta.url), "utf8")
+  const raw = self.match(/mkdtempSync\(join\(tmpdir\(\), "/g) ?? []
+  assert.equal(raw.length, 0, `有 ${raw.length} 处直接用字面量前缀建临时目录，未经 tmpDir 登记，会泄漏`)
 })
