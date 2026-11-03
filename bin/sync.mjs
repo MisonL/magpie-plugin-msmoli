@@ -459,13 +459,17 @@ const base64y = (w) => {
   return c.includes("+") && /[a-z]/.test(c) && /[A-Z]/.test(c)
 }
 // a word cut up by - _ . into pieces each under the run floor is one key when
-// two of its pieces alternate case inside themselves. A key does (AbCdEfGh,
-// nUJqxrpd9Bc7); a name capitalises each piece and stops, so at most one piece
-// ever flips — Qwen3-Coder-480B-A35B-Instruct has none and
-// MyProvider-Prod-Edition-2026 exactly one. 32+ with digits and one 12+ piece
-// is a hex digest, splitDigest's to take
-const alternates = (word) =>
-  (word.match(RUN) ?? []).filter((r) => /[a-z][A-Z]/.test(r)).length >= 2
+// it flips case inside itself at least twice. A generated key does
+// (AbCdEfGh.IjKlMnOp…, nUJqxrpd9Bc7-GvG7J--o…, wJalrXUtnFEMI-K7MDENG-…), and
+// so does a vendor key whose front is lowercase words — sk-ant-api03-
+// Eyai1pkJrF_Kbwt flips at Ey and at Kw, and counting flips rather than pieces
+// is what keeps it. A name capitalises each piece and stops: MyProvider-Prod-
+// Edition-2026, DeepSeek-V3-2-Chat-Preview and some-long-file-name-WithCaps
+// each flip exactly once. Counting per piece was the first cut and it lost
+// sk-ant-api03-Eyai1pkJrF_Kbwt — one flipping piece — with no test to catch it;
+// measured, counting the flips in the word keeps every key and no name.
+// 32+ with digits and one 12+ piece is a hex digest, splitDigest's to take
+const alternates = (word) => (word.match(/[a-z][A-Z]/g) ?? []).length >= 2
 // the judgement takes one word — arg() hands it the whitespace-delimited piece,
 // so there is no whitespace in it and no value of nothing but spaces to answer
 // for. It was written for a whole value once, and a value with a trailing space
@@ -507,16 +511,21 @@ const isKey = (word) => {
   return !PATHY.test(word) && segs.length >= 2
 }
 const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
-// arg is the door every echoed value goes through. It works word by word, in
-// the visible characters: a control or format character has already become a
-// space, so a zero-width space pasted into a token is a word edge, and a word
-// that is a key is judged and masked as that word. One word that is a key goes
-// whole — revealed at its own ends (mask), not at the ends of each run — and
-// inside a word that is not, only the key-like runs and UUIDs go. show() masks
-// an ms- token first, so its shape survives for the pass below even when it is
-// one fragment among others.
+// A key of another shape pasted with an invisible character inside it — a
+// zero-width space from a chat client, a \x01 from a child's echo — reaches
+// arg() as two words once show() has turned that character into a space, and
+// neither half clears the floor on its own: measured before this was written, a
+// 27-character ghp_ token cut in two kept its 14-character back half, an sk-ant
+// body its 12. tokenShaped steps over an invisible character only for the ms-
+// shape; every other shape was split. This removes such a character before
+// show() sees the text, but only where it sits between two key-alphabet
+// characters — a real space, a line break or a comma is not glued, so a key is
+// put back together and ordinary words are left alone. One character wide at
+// each lookaround, so it is a linear pass, not the kind of scan that backtracked
+// to minutes on a body of control characters.
+const GLUE = new RegExp(String.raw`(?<=[A-Za-z0-9+\/=_.-])${INV}(?=[A-Za-z0-9+\/=_.-])`, "gu")
 const arg = (v) =>
-  show(v).replace(/[^\s]+/g, (w) =>
+  show(String(v ?? "").replace(GLUE, "")).replace(/[^\s]+/g, (w) =>
     isKey(w) ? mask(w) : w.replace(RUN, (r) => (keyRun(r) ? mask(r) : r)).replace(UUID_ANY, (m) => mask(m)),
   )
 

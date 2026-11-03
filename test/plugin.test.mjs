@@ -6594,3 +6594,57 @@ test("a nickname that is another vendor's key is not written back as the account
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("a vendor key with one case flip is masked on the card", async () => {
+  // 合体判据从「段内交替的段数 >= 2」改成「整词里 [a-z][A-Z] 的总次数 >= 2」后，
+  // sk-ant-api03-Eyai1pkJrF_Kbwt（Ey 与 Kw 两处）在卡片上也被掩——它在 9aa0bcd
+  // 之后曾漏过。名字照旧：段首字母大写、段内不翻转，各只算一处。
+  const keys = [
+    "sk-ant-api03-Eyai1pkJrF_Kbwt",
+    "sk-ant-api03-Eyai1pkJrF_KbwtQm3Z8Vd2Nc7Rt5Hs",
+    "AbCdEfGh.IjKlMnOp.QrStUvWx.Yz012345",
+  ]
+  for (const key of keys) {
+    for (const title of [`bonus ${key}`, `bonus: ${key}.`, key]) {
+      const ledger = { success: true, data: { records: [day({ title })], total: 1 } }
+      const r = await withFetch(
+        {
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: ledger },
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+        },
+        () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+      )
+      const msg = r.message ?? r.error ?? ""
+      const kept = longestKeptIn(msg, key)
+      assert.ok(kept.length < 12, `${JSON.stringify(title.slice(0, 30))}…：卡片上原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}：${msg}`)
+    }
+  }
+  for (const name of ["MyProvider-Prod-Edition-2026", "DeepSeek-V3-2-Chat-Preview", "some-long-file-name-WithCaps"]) {
+    const ledger = { success: true, data: { records: [day({ title: `签到：${name}` })], total: 1 } }
+    const r = await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: ledger },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      },
+      () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+    )
+    assert.ok((r.message ?? "").includes(name), `${name} 被误掩：${r.message}`)
+  }
+})
+
+test("a non-ms key cut by an invisible character is masked whole on the card", async () => {
+  // 与 bin/sync.mjs 的 GLUE 同一条：非 ms- 形状的密钥被零宽空格/\x01 从中间
+  // 劈开，两半各低于词级门槛，卡片上留下后段（实测 14 位 ghp_、12 位 sk-ant）。
+  for (const key of ["ghp_16C7e42F292c6912E7710c8", "sk-ant-api03-Eyai1pkJrF_Kbwt", "abcdefghij0123456789="]) {
+    for (const cut of ["​", "\x01", "﻿"]) {
+      const at = Math.floor(key.length / 2)
+      const said = `request failed for ${key.slice(0, at)}${cut}${key.slice(at)}`
+      const r = await withFetch({ "/openapi/v1/magicubes/transactions?page=1&page_size=50": { status: 500, body: { message: said } } }, () =>
+        auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+      )
+      const msg = r.message ?? ""
+      const kept = longestKeptIn(msg, key)
+      assert.ok(kept.length < 12, `${JSON.stringify(key)} 夹 ${JSON.stringify(cut)}：卡片上原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}：${msg}`)
+    }
+  }
+})

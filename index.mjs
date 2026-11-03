@@ -619,6 +619,17 @@ const maskEchoes = (s, token) => {
 const invisible = (c) => /[\p{Cc}\p{Cf}]/u.test(c)
 const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
 
+// A key of another shape with an invisible character inside it reaches the card
+// as two words once that character is turned into a space, and neither half
+// clears the word floor on its own: measured, a 27-character ghp_ token cut in
+// two kept its 14-character back half, an sk-ant body its 12. tokenShaped steps
+// over an invisible character only for the ms- shape. This removes one before
+// the rest of the pipeline sees the text, but only where it sits between two
+// key-alphabet characters — a real space, a line break or a comma is not glued,
+// so a key is put back together and ordinary words are left alone. One
+// character wide at each lookaround, so it is a linear pass.
+const GLUE = new RegExp(String.raw`(?<=[A-Za-z0-9+\/=_.-])${INV}(?=[A-Za-z0-9+\/=_.-])`, "gu")
+
 // tokenShaped is a ModelScope key seen in someone else's text. Every key
 // ModelScope issues starts with "ms-", and tokenOf only lets visible ASCII
 // out (SENDABLE), so the run it matches is the same character set — a key
@@ -701,11 +712,14 @@ const base64y = (w) => {
   return c.includes("+") && /[a-z]/.test(c) && /[A-Z]/.test(c)
 }
 // a word cut up by - _ . into pieces each under the run floor is one key when
-// two of its pieces alternate case inside themselves: a key does (AbCdEfGh,
-// nUJqxrpd9Bc7); a name capitalises each piece and stops, so at most one piece
-// ever flips — Qwen3-Coder-480B-A35B-Instruct has none, MyProvider-Prod-Edition-2026
-// exactly one
-const alternates = (w) => (w.match(RUN) ?? []).filter((r) => /[a-z][A-Z]/.test(r)).length >= 2
+// it flips case inside itself at least twice: a key does (AbCdEfGh.IjKlMnOp…,
+// nUJqxrpd9Bc7-GvG7J--o…), and so does a vendor key whose front is lowercase
+// words — sk-ant-api03-Eyai1pkJrF_Kbwt flips at Ey and at Kw. A name
+// capitalises each piece and stops: MyProvider-Prod-Edition-2026 and
+// Qwen3-Coder-480B-A35B-Instruct each flip at most once. Counting flips, not
+// flipping pieces, is what keeps the vendor key (one flipping piece) from
+// being lost
+const alternates = (w) => (w.match(/[a-z][A-Z]/g) ?? []).length >= 2
 const isKeyWord = (w) => {
   if (w.length < 12) return false
   if (!/[\\/]/.test(w)) {
@@ -779,7 +793,7 @@ const maskKeys = (s) =>
 // looks like a key of ANOTHER vendor (keyShaped) — the server's own words are
 // not vetted by the shape of ours.
 const cardText = (value, token, max = 200) => {
-  let s = String(value ?? "")
+  let s = String(value ?? "").replace(GLUE, "")
   if (typeof token === "string" && token) s = s.split(token).join(maskToken(token))
   return text(maskKeys(maskEchoes(s, token).replace(tokenShaped, (m) => maskToken(m))), max)
 }

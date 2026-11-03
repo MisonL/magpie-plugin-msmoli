@@ -4615,15 +4615,22 @@ test("a short key carrying a base64 symbol is masked, and a query's = is not", a
 test("the glued arm asks two pieces to alternate, so a hyphenated name survives", async () => {
   // 合体那一臂原来是「去掉分隔符后 >=20 位、且大小写都有」：provider id
   // MyProvider-Prod-Edition-2026 去掉连字符后大小写都有，于是被掩成「MyPr…2026」；
-  // Qwen3-Coder-480B-A35B-Instruct 被掩成「Qwen…ruct」。改成「至少两段在段内
-  // 大小写交替（[a-z][A-Z]）」：key 的段 AbCdEfGh、nUJqxrpd9Bc7 各自交替，而
-  // 名字每段首字母大写、段内不再翻转，最多只有一段合格。
+  // Qwen3-Coder-480B-A35B-Instruct 被掩成「Qwen…ruct」。改成按大小写交替判：
+  // 一开始数「段内交替的段数 >= 2」，这把 sk-ant-api03-Eyai1pkJrF_Kbwt 漏了——
+  // 它只有 Ey 一处段内交替（其余段 k 前是分隔符或已是小写），整串可读。那是我
+  // 在 9aa0bcd 引入的回归，r35（5f38d60）本来是掩的。改成数「整词里 [a-z][A-Z]
+  // 出现的总次数」：sk-ant-api03-Eyai1pkJrF_Kbwt 有 Ey 与 Kw 两处，判为 key；
+  // 名字段落首字母大写、段内不再翻转，DeepSeek-V3-2-Chat-Preview 的
+  // 「Preview」以后没有小写接大写，MyProvider-… 的「MyPr」以后也没有，各只算一处。
   const dir = fixture("msmoli-glueword-")
   try {
     const keys = [
       "AbCdEfGh.IjKlMnOp.QrStUvWx.Yz012345",
       "nUJqxrpd9Bc7-GvG7J--onUJqxrpd9Bc7-GvG7J--o",
       "wJalrXUtnFEMI-K7MDENG-bPxRfiCYEXAMPLEKEY",
+      // 单处段内交替的厂商密钥：这一条是 9aa0bcd 的回归，缺了它那次的改动不会红
+      "sk-ant-api03-Eyai1pkJrF_Kbwt",
+      "sk-ant-api03-Eyai1pkJrF_KbwtQm3Z8Vd2Nc7Rt5Hs",
     ]
     for (const key of keys) {
       const out = []
@@ -4637,6 +4644,7 @@ test("the glued arm asks two pieces to alternate, so a hyphenated name survives"
       "DeepSeek-V3-2-Chat-Preview",
       "some-long-file-name-WithCaps",
       "modelscope-backup-2025-east",
+      "sk-anti-fraud-review-team",
     ]
     for (const v of names) {
       const out = []
@@ -4663,6 +4671,39 @@ test("a word of nothing but punctuation does not stall maskKeys", async () => {
     const ms = performance.now() - t0
     assert.ok(ms < 2000, `病态标点词耗时 ${ms.toFixed(0)}ms，判定为二次回溯未修`)
     assert.ok(out.join("\n").includes(bomb), `病态标点词该原样保留`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a non-ms key cut by an invisible character is still masked whole", async () => {
+  // 第 31 轮只给 ms- 形状做了「跨不可见字符」（tokenShaped 的 INV*）。别的形状
+  // 没有：一把 27 位的 ghp_ 令牌被零宽空格切成 13+14，两半都低于 16 位下限，
+  // 词级判据都不认，后 14 位原样上终端（实测「92c6912E7710c8」）；sk-ant 本体
+  // 同样留下 12 位。GLUE 在 show() 之前，把「两侧都是 key 字母表字符」的不可见
+  // 字符去掉——真正应算分隔的空格、换行、逗号不在两侧，不受影响。
+  const dir = fixture("msmoli-gluecut-")
+  try {
+    const keys = [
+      "ghp_16C7e42F292c6912E7710c8",
+      "sk-ant-api03-Eyai1pkJrF_Kbwt",
+      "AbCdEfGh.IjKlMnOp.QrStUvWx",
+      "abcdefghij0123456789=",
+    ]
+    for (const key of keys) {
+      for (const cut of ["​", "\x01", "⁠", "﻿"]) {
+        const at = Math.floor(key.length / 2)
+        const pasted = key.slice(0, at) + cut + key.slice(at)
+        const out = []
+        await main({ argv: ["--dir", dir, "--status", "--from", pasted], log: (s) => out.push(s) })
+        const kept = longestKept(out.join("\n"), key)
+        assert.ok(kept.length < 12, `${JSON.stringify(key)} 夹 ${JSON.stringify(cut)}：原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}\n${out.join("\n")}`)
+      }
+    }
+    // 真正该分隔的地方不被粘：两段普通词之间夹不可见字符仍是两段
+    const o = []
+    await main({ argv: ["--dir", dir, "--status", "--from", "alpha​beta"], log: (s) => o.push(s) })
+    assert.ok(o.join("\n").includes("alpha"), "普通词不受影响")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
