@@ -230,17 +230,21 @@ put it there.
 
 ## Things that are deliberate
 
-- **Two plugin entries, one body.** magpie's loader takes every exported
-  function as its own provider, so `index.mjs` exports `MsmoliPlugin`
-  (`msmoli`, 国内站) and `MsmoliIntlPlugin` (`msmoli-intl`,
-  [modelscope.ai](https://modelscope.ai)). Both are thin wrappers over one
-  `pluginFor(profile, input)`; everything that differs between the sites lives
-  in a profile object — origin, provider id, the card's name and plan, and the
-  国内站/国际站 word in the 401. Exporting a helper would silently add a third
-  provider, which is why the guard test asserts the entry list by name; the
-  profiles are reachable to tests through `testables`, an object the loader
-  skips. Do not copy a hook for the second site: a fix landing in one copy and
-  not the other is the failure this shape exists to prevent.
+- **One provider, two sites, one body.** The card is `msmoli` and it serves
+  both modelscope.cn and modelscope.ai; a token's site is a fact about the
+  token, not a choice the user should have to make twice in two cards. Each
+  account's site is found from the token itself by `siteRead`: the read goes
+  to the domestic site first, and only a 401 sends it to the international
+  one; the result is cached per token (`sites`), so polls do not re-probe.
+  Everything that differs between the sites lives in a profile object —
+  origin, the plan line, and the 国内站/国际站 word in the 401. Only
+  `MsmoliPlugin` is exported: magpie's loader takes every exported function
+  as its own provider, so exporting a helper would silently add a second
+  card, which is why the guard test asserts the entry list by name; the
+  profiles and the cache are reachable to tests through `testables`, an
+  object the loader skips. Do not copy a hook for the second site: a fix
+  landing in one copy and not the other is the failure this shape exists to
+  prevent.
 - **A separate `msmoli` provider, with no models.** Chat keeps using the
   `modelscope` preset with your API key. A plugin that served the provider
   inference routes through would take the whole chat path out of magpie when

@@ -1,5 +1,5 @@
-// ModelScope (魔搭) 魔粒 check-in for magpie — one provider per site:
-// modelscope.cn (`msmoli`) and modelscope.ai (`msmoli-intl`).
+// ModelScope (魔搭) 魔粒 check-in for magpie — one provider that serves both
+// modelscope.cn and modelscope.ai, each account on the site its token is from.
 //
 // magpie calls auth.checkin once a Beijing day per signed-in account while the
 // provider's check-in switch is on, and again later that day after a failure.
@@ -14,32 +14,44 @@
 // ms- token authenticates only on the site it came from.
 //
 // The plugin serves no chat models: inference keeps using the API-key modelscope
-// preset in providers.json. Both providers exist only to carry the sign-in the
+// preset in providers.json. This provider exists only to carry the sign-in the
 // check-in runs as.
 
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
 
-// A profile is everything that differs between the two deployments: the
-// origin, the provider id (magpie keys the sign-in, the card and the alias by
-// it), and the words on the card. The rest of this module is shared — the two
-// sites answer with the same envelopes, the same magicubes rules and the same
-// 24-hour expiry, so a second copy of the hooks would only be a second place
-// for them to drift.
+// One provider serves both sites: a token's site is a fact about the token,
+// not about the card, so the plugin finds it per account instead of asking the
+// user to pick a provider. A profile carries what differs between the sites —
+// the origin, the plan line the card shows, and the word a 401 uses.
 const CN = {
   site: "https://modelscope.cn",
-  id: "msmoli",
-  name: "ModelScope 魔粒",
   plan: "魔搭社区",
   where: "国内站",
 }
 const INTL = {
   site: "https://modelscope.ai",
-  id: "msmoli-intl",
-  name: "ModelScope 魔粒（国际版）",
   plan: "魔搭社区（国际版）",
   where: "国际站",
+}
+const SITES = [CN, INTL]
+
+// The provider's id and name: one card, whatever mix of accounts it holds.
+const ID = "msmoli"
+const NAME = "ModelScope 魔粒"
+
+// sites remembers which site each token signs in to, for the life of the
+// process. Finding it costs one of the reads the hook was about to make anyway
+// — a 401 is the only answer that rules a site out — and asking again on every
+// poll would double every read. Bounded like `names`: a host is long-lived, and
+// tokens come and go.
+const sites = new Map()
+const SITES_MAX = 64
+const rememberSite = (token, profile) => {
+  sites.delete(token)
+  sites.set(token, profile)
+  while (sites.size > SITES_MAX) sites.delete(sites.keys().next().value)
 }
 
 const LOGIN_INFO = "/api/v1/users/login/info"
@@ -149,6 +161,25 @@ function saidFailure(e, ctl, budget) {
     return new Error("请求失败：网络不通、被代理拦截，或遇到了重定向")
   }
   return e
+}
+
+// siteRead is how the plugin learns a token's site: it makes the read once
+// against the domestic site, and only a 401 sends the same read to the
+// international one. Any other answer means the token was accepted there —
+// a 403 (risk control) or a body that does not parse included — and the
+// caller's gate() reports what is wrong with it. Once known, the site is
+// remembered, so later polls go straight to it.
+async function siteRead(token, path, deadline = Infinity) {
+  const known = sites.get(token)
+  if (known) return { profile: known, ...(await json(known.site, token, path, deadline)) }
+  for (const profile of SITES) {
+    const got = await json(profile.site, token, path, deadline)
+    if (got.res.status !== 401) {
+      rememberSite(token, profile)
+      return { profile, ...got }
+    }
+  }
+  throw deadToken("任一站点")
 }
 
 async function json(site, token, path, deadline = Infinity) {
@@ -859,7 +890,7 @@ const unusableName = (name, token) =>
   nameIsKey(name, token) ||
   ["__proto__", "constructor", "prototype"].includes(name)
 
-async function rememberAccountName(profile, client, token, name, auth, dir) {
+async function rememberAccountName(client, token, name, auth, dir) {
   // "can write" is a function, not a truthy value: `{ auth: { set: 1 } }` is a
   // client that cannot write, and `!client?.auth?.set` let it through to call
   // a number — the TypeError is caught below, but it logs "account name not
@@ -873,7 +904,7 @@ async function rememberAccountName(profile, client, token, name, auth, dir) {
   // it would re-key their alias to a label the account no longer has. A
   // providers.json that can't be read says the same thing — don't write over
   // a state we can't see.
-  if (aliasOf(profile.id, dir, labelOf(auth, token)) !== "") return
+  if (aliasOf(ID, dir, labelOf(auth, token)) !== "") return
   named.delete(token)
   named.set(token, Date.now())
   while (named.size > NAMES_MAX) named.delete(named.keys().next().value)
@@ -881,7 +912,7 @@ async function rememberAccountName(profile, client, token, name, auth, dir) {
     // auth.set replaces the whole sign-in, so what the host handed us is the
     // base: a field we do not know about is kept, not dropped
     const body = { ...(auth && typeof auth === "object" ? auth : {}), type: "api", key: token, accountId: name }
-    await client.auth.set({ path: { id: profile.id }, body })
+    await client.auth.set({ path: { id: ID }, body })
   } catch (e) {
     // the card keeps the key's tail; nothing else depends on this. Put the
     // token back so the next ask tries the write again, and let the log call
@@ -892,7 +923,7 @@ async function rememberAccountName(profile, client, token, name, auth, dir) {
     // of it before it reaches magpie's log
     const why = cardText(whyOf(e), token)
     try {
-      const r = client?.app?.log?.({ body: { level: "warn", service: profile.id, message: `account name not written back: ${why}` } })
+      const r = client?.app?.log?.({ body: { level: "warn", service: ID, message: `account name not written back: ${why}` } })
       if (r && typeof r.catch === "function") r.catch(() => {})
     } catch {
       // a host whose log throws synchronously must not turn a successful
@@ -955,11 +986,11 @@ const gate = (profile, res, body, parsed, token, what, risk = RISK) => {
 // The day is read at each call, on purpose: a check-in that crosses midnight
 // between its reads reports what its touch granted on the new day, which is
 // true, where diffing both reads against the old day would answer inactive.
-async function todayEarn(profile, token, deadline) {
-  const { res, body, parsed } = await json(profile.site, token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
+async function todayEarn(token, deadline) {
+  const { profile, res, body, parsed } = await siteRead(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
   gate(profile, res, body, parsed, token, "账单查询失败")
   const day = todayCN()
-  return recordsOf(body).filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day))
+  return { profile, rows: recordsOf(body).filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day)) }
 }
 
 // SURE_HOUR is magpie's checkinSureHour (workbuddy_checkin.go): before noon,
@@ -1026,11 +1057,7 @@ const yin = (n) => {
 
 const sumOf = (records) => yin(records.reduce((n, r) => n + amountOf(r), 0))
 
-// pluginFor is the whole plugin, with the one profile it serves passed in.
-// magpie calls every exported function as its own plugin entry, so the two
-// exports below are two providers over this one body: same hooks, same
-// wording, one place for both to drift from.
-async function pluginFor(profile, input) {
+export async function MsmoliPlugin(input) {
   // input.directory is magpie's own folder (host.go passes settings.Dir()),
   // which is where a portable magpie keeps everything too.
   const configDir = typeof input?.directory === "string" ? input.directory : ""
@@ -1041,7 +1068,7 @@ async function pluginFor(profile, input) {
 
   return {
     auth: {
-      provider: profile.id,
+      provider: ID,
 
       // 静态令牌签到：粘贴一把 ms- 开头的访问令牌即可。
       //
@@ -1120,9 +1147,10 @@ async function pluginFor(profile, input) {
         let name = ""
         const answer = await (async () => {
         try {
-          const before = await todayEarn(profile, token, deadline)
-          const beforeDaily = before.filter((r) => DAILY_RULES.includes(r?.rule_key))
-          const claimed = before.some((r) => r?.rule_key === "daily_active")
+          const before = await todayEarn(token, deadline)
+          const profile = before.profile
+          const beforeDaily = before.rows.filter((r) => DAILY_RULES.includes(r?.rule_key))
+          const claimed = before.rows.some((r) => r?.rule_key === "daily_active")
           // What this run granted is the ledger's growth, not a new key: the
           // rows are aggregated per (day, type, rule_key, model_tier), so a
           // second grant of a rule already in today's page grows that row's
@@ -1212,7 +1240,7 @@ async function pluginFor(profile, input) {
             return { credit, which }
           }
 
-          const daily = gained((await todayEarn(profile, token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key)))
+          const daily = gained((await todayEarn(token, deadline)).rows.filter((r) => DAILY_RULES.includes(r?.rule_key)))
           if (daily) return { outcome: "claimed", credit: daily.credit, message: `领取 ${daily.credit} 魔粒：${daily.which}` }
           // 触达了却没有到账记录：可能是账本还没写出来（发放是异步的），
           // 也可能这个账号本来就不在活动范围。再读一次账本确认，别把刚写
@@ -1221,7 +1249,7 @@ async function pluginFor(profile, input) {
           // 是宿主：还没见到领取的 done/inactive 是暂定答案，每 30 分钟重问
           // （provisional，由 checkinSureHour 决定）。12 点起宿主就当天了结，
           // 所以下午的时段由插件自己用 until 要一次半小时后的重问。
-          const later = gained((await todayEarn(profile, token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key)))
+          const later = gained((await todayEarn(token, deadline)).rows.filter((r) => DAILY_RULES.includes(r?.rule_key)))
           if (later) return { outcome: "claimed", credit: later.credit, message: `领取 ${later.credit} 魔粒：${later.which}` }
           const hourCN = Math.floor(minuteCN() / 60)
           if (hourCN >= SURE_HOUR && deferred.get(token) !== today) {
@@ -1242,7 +1270,7 @@ async function pluginFor(profile, input) {
         // catches its own failures, and anything it could still throw (an
         // unreadable providers.json read) must not undo the answer above
         try {
-          await rememberAccountName(profile, client, token, name, auth, configDir)
+          await rememberAccountName(client, token, name, auth, configDir)
         } catch {}
         return answer
       },
@@ -1266,8 +1294,9 @@ async function pluginFor(profile, input) {
         // Inside the try: the hook promises an {error}, never a rejection,
         // and this path reaches client.auth.set.
         try {
-          await rememberAccountName(profile, client, token, names.get(token) ?? "", auth, configDir)
-          const bal = await json(profile.site, token, BALANCE, deadline)
+          await rememberAccountName(client, token, names.get(token) ?? "", auth, configDir)
+          const bal = await siteRead(token, BALANCE, deadline)
+          const profile = bal.profile
           gate(profile, bal.res, bal.body, bal.parsed, token, "余额查询失败")
           // data 缺失读成 0 会把「没读懂」翻译成「余额为零」——一个确定又
           // 错误的结论，卡片会写「0 魔粒可用」。账本那侧的 recordsOf 同理。
@@ -1409,32 +1438,20 @@ async function pluginFor(profile, input) {
       // 用户自己改过的名字留着：magpie 把 provider 的名字存在 providers.json
       // 里，而钩子每次启动都跑一遍——强制写回默认值会把 UI 里的改名悄悄撤销，
       // 与账号昵称那条「用户命名过就不动」是同一条规矩。值不是对象时当作没有。
-      const was = config.provider[profile.id] && typeof config.provider[profile.id] === "object" ? config.provider[profile.id] : {}
-      config.provider[profile.id] = {
+      const was = config.provider[ID] && typeof config.provider[ID] === "object" ? config.provider[ID] : {}
+      config.provider[ID] = {
         ...was,
-        name: typeof was.name === "string" && was.name ? was.name : profile.name,
+        name: typeof was.name === "string" && was.name ? was.name : NAME,
       }
     },
   }
 }
 
-// Two entries: the domestic site (`msmoli`) and the international one
-// (`msmoli-intl`). Exporting two functions makes two providers — magpie's
-// loader takes every exported function as a plugin entry (`testables` is an
-// object, which it skips). The check-in window in msmoli.json is shared: it is
-// a personal preference about when to claim, not a per-site setting.
-export async function MsmoliPlugin(input) {
-  return pluginFor(CN, input)
-}
-
-export async function MsmoliIntlPlugin(input) {
-  return pluginFor(INTL, input)
-}
 
 // testables is how the pure helpers the tests pin are reached without
 // exporting them as functions: magpie's loader treats every exported function
 // as a plugin entry (see windowOf above), but an object it skips. The tests
 // are the only reader.
-export const testables = { windowOf, CN, INTL }
+export const testables = { windowOf, CN, INTL, sites }
 
 export default MsmoliPlugin

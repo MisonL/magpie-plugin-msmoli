@@ -96,23 +96,25 @@ The sign-in is kept per provider id (`msmoli`) rather than per folder, so
 switching between the two forms (or moving the clone) keeps the token — no
 second login.
 
-### International site (modelscope.ai)
+### The international site (modelscope.ai)
 
-The plugin now provides a second provider for the international site:
-`msmoli-intl` (ModelScope 魔粒（国际版）). The same `ms-` token format, the same
-daily grant rules, **but tokens are site-specific** — a token from `modelscope.cn`
-answers 401 on `modelscope.ai`, and vice versa.
+There is one provider, `msmoli`, and it serves both sites. A token is
+site-specific — `modelscope.cn`'s answers 401 on `modelscope.ai`, and the other
+way round — so the plugin finds each account's site from its token: the first
+read goes to the domestic site, and only a 401 sends it to the international
+one. The site is remembered for the process, the card's plan line says which
+one it is (`魔搭社区` or `魔搭社区（国际版）`), and a 401 names the site that
+refused.
 
-The sign-in and check-in work the same way:
+To check in an international account, sign in again with that site's token —
+the second account lives under the same `msmoli` card:
 
 ```bash
-printf 'ms-your-intl-token\n' | magpie plugin login msmoli-intl
+printf 'ms-your-intl-token\n' | magpie plugin login msmoli
 ```
 
-The check-in window (`msmoli.json`) is shared between both providers — it is
-a personal preference, not a per-site setting. To turn on the international
-check-in, set `msmoli-intl` in your plugin-checkins instead of or alongside
-`msmoli` (see "Turn the check-in on" below, substituting the provider id).
+The check-in switch, the card and the window (`msmoli.json`) are per provider,
+so one setting covers every account, whichever site it is from.
 
 ### Already have ModelScope set up in magpie? Sync that key to the plugin
 
@@ -121,8 +123,8 @@ If you added ModelScope earlier just for chat, its key is already in
 the plugin, so you don't have to find it again.
 
 It syncs the domestic site only, because the built-in preset it reads is the
-`modelscope.cn` one. The international site has no preset; sign `msmoli-intl`
-in by hand (`magpie plugin login msmoli-intl`).
+`modelscope.cn` one. The international site has no preset; sign that account
+in by hand (`magpie plugin login msmoli` with an international token).
 
 Installed from GitHub, magpie keeps its own copy in its plugin folder:
 
@@ -203,9 +205,9 @@ magpie):
 
 The token comes from <https://modelscope.cn/my/myaccesstoken>. The same `ms-`
 token is both the inference `Authorization: Bearer` and the web session cookie,
-so nothing else needs configuring. For the international provider
-(`msmoli-intl`), the token comes from <https://modelscope.ai/my/myaccesstoken>
-instead — the two sites' tokens do not interchange.
+so nothing else needs configuring. An international account's token comes from
+<https://modelscope.ai/my/myaccesstoken> instead — the two sites' tokens do not
+interchange.
 
 From then on magpie claims it once a Beijing day per signed-in account, retries
 later that day if it fails, and reports the outcome on the account's usage card:
@@ -429,10 +431,10 @@ The one real overlap to know about: **both rows cost nothing extra**, but if you
 remove the plugin's sign-in, chat is unaffected, and if you remove the preset,
 the check-in keeps working. They fail independently.
 
-If you sign in the international site as well, that adds one more row,
-`msmoli-intl` (ModelScope 魔粒（国际版）). It has every property in the table
-above — no models, its own card, its own check-in — and fails independently of
-both the preset and the domestic plugin row.
+If you sign in the international site as well, it is a second account under
+the same `msmoli` row — not a second row. Both columns in the table still
+apply, and the account fails independently of the preset and of the other
+account.
 
 ## Privacy
 
@@ -441,7 +443,7 @@ This plugin reads `NickName` / `Name` and nothing else; the rest is dropped as
 soon as the response is parsed. The token lives only in magpie's own
 `plugin-auth.json` — the plugin never writes it anywhere, never logs it, never
 sends it anywhere but the site the account was signed in for (`modelscope.cn`
-for `msmoli`, `modelscope.ai` for `msmoli-intl`).
+or `modelscope.ai`; each token is only ever used on the site it came from).
 
 The one thing it writes is that nickname, as `accountId` on the sign-in it
 already has, so magpie's card can name the account. It goes through the host's
