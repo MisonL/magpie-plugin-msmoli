@@ -384,6 +384,31 @@ test("when both sites cannot be reached, the card says so instead of expiring th
   }
 })
 
+test("when both sites fail differently, the first site's failure is the one reported", async () => {
+  // siteRead keeps the *first* failure (`firstError ??= e`) because the
+  // domestic site is the one the token most often belongs to: its failure is
+  // the one the user was closest to. A fixture that fails both sites the same
+  // way cannot see the difference — `firstError = e` kept the suite green —
+  // so the two sites fail differently here: whichever wording the card shows
+  // says which failure was kept.
+  testables.sites.clear()
+  const token = "ms-first-err-0000-0000-0000-000000000011"
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.origin === CN_ORIGIN) throw new Error("proxyconnect tcp: dial tcp 127.0.0.1:7890: i/o timeout")
+    throw new Error("The operation timed out")
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.match(u.error, /代理连不上/, `the domestic site's failure is the one kept, got: ${u.error}`)
+    assert.doesNotMatch(u.error, /请求超时/, `the second site's timeout must not replace it: ${u.error}`)
+    assert.notEqual(u.signIn, "expired", "a transport failure is not a revoked token")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("two accounts of one provider, each on its own site, keep their own plan line", async () => {
   // The single card holds both sites at once: a domestic account and an
   // international one must not be shown as the same site just because they
@@ -3362,6 +3387,28 @@ test("a row stamped with a time is still today's row", async () => {
   )
 })
 
+test("a stamp that merely mentions the date is not today's row", async () => {
+  // onDay reads the date *part* of the stamp: the spellings ModelScope writes
+  // both begin with the day, and a stamp carrying the date somewhere else is
+  // a shape we do not understand. Read as `includes(day)`, a row whose text
+  // happens to mention today would be summed into today's numbers — a grant
+  // the ledger never recorded that day, on the card next to a balance that
+  // did not move. (Measured by mutation: `s.includes(day)` survived the whole
+  // suite before this test.)
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records: [day({ gmt_created: `更新于 ${today}` })] } },
+      },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+      assert.equal(u.windows[0].limit, 0, `a stamp not starting with the day is not today's: ${u.windows[0].display}`)
+    },
+  )
+})
+
 test("a day whose grants were reversed does not claim a negative credit", async () => {
   // An EARN row can be a reversal (冲正), and a day netting below zero is a
   // real state. magpie clamps `credit` itself (host.js's num: Math.max(0, v))
@@ -5223,6 +5270,66 @@ test("the nickname is written back before the hook answers", async () => {
       },
     )
   } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a slow name write cannot spend the usage read's budget", async () => {
+  // The check-in's write waits until after its answer because the host's
+  // auth.set can spend ~20s of its 25s on a lock (see the test above). The
+  // usage hook retries a write the check-in failed, and that retry ran before
+  // the two reads: a lock held for 30s turned a card whose numbers were one
+  // request away into 预算已用完. The write belongs before the answer — the
+  // test above pins that — and after the reads.
+  const real = Date.now
+  let skew = 0
+  Date.now = () => real() + skew
+  const dir = tmpDir("msmoli-usagelock-")
+  // the config lives in this test's own folder (window off, as the suite's
+  // neighbors) rather than behind the shared MAGPIE_MSMOLI_CONFIG: a leak that
+  // left the variable unset would otherwise put this test on the default
+  // 08:30–10:00 window and turn the check-in's answer from inactive to failed
+  // for a reason that is not its own.
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const token = "ms-usagelock-0000-0000-0000-000000000003"
+  const writes = []
+  let failNext = true
+  const client = {
+    auth: {
+      set: async (o) => {
+        if (failNext) {
+          failNext = false
+          throw new Error("host busy")
+        }
+        writes.push(o)
+        skew += 30_000 // a lock held by another process, waited out synchronously
+      },
+    },
+  }
+  try {
+    const p = await MsmoliPlugin({ directory: dir, client })
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Data: { NickName: "Lock" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+      },
+      async () => {
+        const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(c.outcome, "inactive", c.message)
+        assert.equal(writes.length, 0, "the failed write left nothing behind")
+        const u = await p.auth.usage(async () => ({ type: "api", key: token }))
+        assert.equal(u.error, undefined, `the reads must not pay for the write: ${u.error}`)
+        assert.equal(u.balance, "5 魔粒可用")
+        assert.equal(writes.length, 1, "the retried write still lands before the answer")
+      },
+    )
+  } finally {
+    Date.now = real
     if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
     else process.env.MAGPIE_MSMOLI_CONFIG = saved
     rmSync(dir, { recursive: true, force: true })

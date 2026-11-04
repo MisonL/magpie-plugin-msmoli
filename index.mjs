@@ -1303,11 +1303,16 @@ export async function MsmoliPlugin(input) {
         if (!token) return { error: unusableKey(auth) ? "令牌内容无法识别，请重新登录" : "没有登录信息", signIn: "" }
         const deadline = Date.now() + USAGE_BUDGET_MS
         // the name is only known from login/info, which usage must never
-        // reach; a check-in in this process leaves it here for the card.
-        // Inside the try: the hook promises an {error}, never a rejection,
-        // and this path reaches client.auth.set.
+        // reach; a check-in in this process leaves it here for the card, and
+        // the write-back of a name the check-in failed to write is retried
+        // here. That write is the last thing before the answer, not the first
+        // thing before the reads: the host's auth.set can wait out a lock for
+        // ~20s (see the check-in's own note), and a wait spent before the
+        // reads came out of the 18s the two of them share — the card answered
+        // 预算已用完 for a name it had just written. Everything here is inside
+        // the try, so the hook still promises an {error} and never a
+        // rejection, whatever that write or the reads do.
         try {
-          await rememberAccountName(client, token, names.get(token) ?? "", auth, configDir)
           const bal = await siteRead(token, BALANCE, deadline)
           const profile = bal.profile
           gate(profile, bal.res, bal.body, bal.parsed, token, "余额查询失败")
@@ -1411,9 +1416,22 @@ export async function MsmoliPlugin(input) {
 
           // 今天还没领到时，把时段里的目标时刻写在卡片上，别让「领 0」
           // 看起来像是出了问题。
-          const win = windowOf(configOf(configDir))
-          const ahead = win && earnedToday === 0 ? plan(win, token, day) : null
+          //
+          // The config is read only when the card actually needs the target:
+          // after the day's grant has landed there is no hint to compute, and
+          // this file read is the hook's only synchronous I/O — a poll every
+          // few minutes per account should not pay for it to be thrown away.
+          // `win` is null when earnedToday is non-zero, so `ahead` is null
+          // exactly where `win && earnedToday === 0` used to make it so.
+          const win = earnedToday === 0 ? windowOf(configOf(configDir)) : null
+          const ahead = win ? plan(win, token, day) : null
           const hint = ahead && !ahead.due ? ` · ${clock(ahead.target)} 领取` : ""
+
+          // last, and awaited: the card must not be answered ahead of the
+          // write (a poll answered before it would race the very retry this
+          // exists for), while the reads above have already had the budget to
+          // themselves.
+          await rememberAccountName(client, token, names.get(token) ?? "", auth, configDir)
 
           return {
             plan: profile.plan,
