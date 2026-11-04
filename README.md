@@ -18,6 +18,40 @@ Daily grants are **24 hours only**. They do not accumulate: what you don't
 spend today is gone. A flagship model costs 2 魔粒 per call (mainstream 1,
 lightweight 0.5), so the daily 250 is roughly 125 calls.
 
+## Purpose, responsibility, and risk
+
+**What it is for.** A personal utility: it claims the daily 魔粒 grant of the
+ModelScope (魔搭) account *you* sign in, and does nothing else. It is not an
+official ModelScope product; it is not affiliated with ModelScope, Alibaba or
+magpie, and it collects nothing about you — the token stays in magpie's own
+`plugin-auth.json`, and every request goes to the site the account signed in
+to.
+
+**The risk you are taking.** ModelScope has no check-in endpoint. The daily
+grant exists for a *real* website sign-in, and this plugin obtains it by
+calling `login/info` once a day with the browser's session cookie — a script
+posing as the browser, not a button the official client offers. ModelScope's
+user agreement forbids plugins that interfere with the service (4.1.2(1)) and
+"刷分" with third-party tools (4.1.2(5)), and lets the platform freeze a
+user's benefits or blacklist them for abuse (2.3.1 and the 魔粒 rules). An
+account is real-name verified and often tied to Aliyun, so what is at stake is
+the account, not the 250 credits that expire the same day. No account has been
+reported frozen for running this, and no one can promise one never will be —
+whether the service's detection would ever notice is not something this
+project can answer. Whether to run it is a decision about your own account.
+
+**Responsibility.** You are responsible for complying with ModelScope's terms
+when you use this. The software is provided under the MIT licence, without
+warranty of any kind; the maintainer is not liable for a suspended or frozen
+account, lost credits, or anything else that follows from running it. See
+[LICENSE](LICENSE).
+
+**Not in the magpie market, and it will not be submitted.** magpie's community
+market declined to list this package for exactly the reason above
+([plugins#714](https://github.com/magpie-community/plugins/pull/714)), and the
+project has decided not to submit it again. It stays installable by name from
+npm.
+
 ## Install
 
 Needs magpie itself (<https://usemagpie.ai>). On macOS, use `magpie --version` to check it's on PATH; if not, use the app's full path:
@@ -391,18 +425,8 @@ nothing — your name stays, and the nickname is not put over it.
 
 ## Scope and limits
 
-**ModelScope's terms.** The plugin gets the daily grant by making the server
-count a website sign-in: there is no check-in endpoint, so it calls
-`login/info` once a day with the browser's session cookie. ModelScope's user
-agreement forbids plugins that interfere with the service and "刷分", and lets
-the platform freeze accounts for abuse; the daily grant is described as a
-reward for logging in. For that reason **magpie's community market declined to
-list this package** ([plugins#714](https://github.com/magpie-community/plugins/pull/714)):
-a script posing as the browser is not a button the official client offers.
-Whether ModelScope's detection ever flags an account is not known either way —
-no account has been reported frozen for it, and none is guaranteed safe. That
-is a risk you take on your own account; it is the reason the package is
-installable by name but not recommended from the app's Discover list.
+**ModelScope's terms and the risks of running this are stated above, in
+[Purpose, responsibility, and risk](#purpose-responsibility-and-risk).**
 
 - One account's own daily grant, idempotent: a check-in reads the ledger, touches
 the sign-in endpoint, and reads the ledger again — three requests. A day already

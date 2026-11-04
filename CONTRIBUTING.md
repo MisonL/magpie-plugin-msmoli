@@ -209,10 +209,12 @@ an official button may be automated, but a reward that needs real activity is
 not simulated. A ModelScope account is real-name verified and often tied to
 Aliyun, so the downside for a user is larger than 250 expiring credits.
 
-Do not re-open the PR as-is. The package stays on npm and anyone can install
-it by name; it is simply not recommended from the registry. A new PR makes
-sense only if ModelScope publishes a check-in API or confirms in writing that
-automated logins are allowed.
+**This project does not submit to the market and will not again** (decision of
+2026-11-04, after the rejection above). The package stays on npm and anyone
+can install it by name; it is simply not recommended from the registry. Do not
+open a registry PR for it without that decision being revisited first — even if
+ModelScope later publishes a check-in API, that would be a new decision, not a
+correction to this one.
 
 ### What the package contains
 

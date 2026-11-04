@@ -2,6 +2,14 @@
 
 一个 [magpie](https://github.com/yetone/magpie) 插件，替你领取 ModelScope（魔搭）的每日**魔粒**——每天自动签到一次，代替人工打开网页——并在账号卡片上显示余额与今日消耗。
 
+> **Before you install:** new material is written in English only, and this
+> translation does not cover the English README's "Purpose, responsibility,
+> and risk" section. Read
+> [Purpose, responsibility, and risk](README.md#purpose-responsibility-and-risk)
+> in the English README first — it states what the plugin is for, the risk to
+> your ModelScope account, and that the project is not listed in magpie's
+> market and will not be submitted to it.
+
 ## 魔粒是什么
 
 ModelScope 的 API-Inference 是免费的，用魔粒结算：
