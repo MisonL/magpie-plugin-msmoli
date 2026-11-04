@@ -235,7 +235,9 @@ put it there.
   token, not a choice the user should have to make twice in two cards. Each
   account's site is found from the token itself by `siteRead`: the read goes
   to the domestic site first, and only a 401 sends it to the international
-  one; the result is cached per token (`sites`), so polls do not re-probe.
+  one; a transport failure is not an answer about the token either, so it
+  moves on and is what the card reports when both sites fail. The result is
+  cached per token (`sites`, bounded), so polls do not re-probe.
   Everything that differs between the sites lives in a profile object —
   origin, the plan line, and the 国内站/国际站 word in the 401. Only
   `MsmoliPlugin` is exported: magpie's loader takes every exported function

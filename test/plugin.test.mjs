@@ -334,6 +334,98 @@ test("the site is remembered, so a later poll does not ask the other site", asyn
   assert.deepEqual(origins, [INTL_ORIGIN], "the second poll must not probe .cn again")
 })
 
+test("a domestic site that cannot be reached still lets an international token be found", async () => {
+  // The domestic site can be unreachable on a network where the international
+  // one answers — and the token is a fact, not a guess made from whichever
+  // request happened to work. A transport error must therefore move on to the
+  // other site, not end the read.
+  testables.sites.clear()
+  const token = "ms-intl-0000-0000-0000-000000000007"
+  const real = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    seen.push(u.origin)
+    if (u.origin === CN_ORIGIN) throw new TypeError("fetch failed")
+    const hit = {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 2 } } },
+      [TX_PATH]: { body: { success: true, data: { records: [] } } },
+    }[u.pathname + u.search]
+    return reply(hit)
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.ok(!u.error, u.error)
+    assert.equal(u.plan, "魔搭社区（国际版）")
+    assert.deepEqual([...new Set(seen)], [CN_ORIGIN, INTL_ORIGIN])
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("when both sites cannot be reached, the card says so instead of expiring the account", async () => {
+  // A transport failure says nothing about the token: reporting it as a dead
+  // token would sign the account out over a proxy problem. Both sites are
+  // tried, and what comes back is the network wording.
+  testables.sites.clear()
+  const real = globalThis.fetch
+  let n = 0
+  globalThis.fetch = async () => {
+    n += 1
+    throw new TypeError("fetch failed")
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-nowhere-0000-0000-0000-000000000008" }))
+    assert.equal(n, 2, "both sites are tried before giving up")
+    assert.match(u.error, /请求失败/, u.error)
+    assert.notEqual(u.signIn, "expired", "a network failure is not a revoked token")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("two accounts of one provider, each on its own site, keep their own plan line", async () => {
+  // The single card holds both sites at once: a domestic account and an
+  // international one must not be shown as the same site just because they
+  // share a provider id.
+  testables.sites.clear()
+  const responses = {
+    [BALANCE_PATH]: (origin) =>
+      origin === CN_ORIGIN ? { body: { success: true, data: { available_balance: 5 } } } : { body: { success: true, data: { available_balance: 9 } } },
+    [TX_PATH]: { body: { success: true, data: { records: [] } } },
+  }
+  // the international token meets a 401 on .cn; the domestic one does not
+  const cn = await withUrlFetch(
+    { ...responses, [BALANCE_PATH]: (origin) => (origin === CN_ORIGIN ? { body: { success: true, data: { available_balance: 5 } } } : { status: 401, body: {} }) },
+    async () => auth.usage(async () => ({ type: "api", key: "ms-cn-two-0000-0000-0000-000000000009" })),
+  )
+  const intl = await withUrlFetch(
+    { ...responses, [BALANCE_PATH]: (origin) => (origin === CN_ORIGIN ? { status: 401, body: {} } : { body: { success: true, data: { available_balance: 9 } } }) },
+    async () => auth.usage(async () => ({ type: "api", key: "ms-intl-two-0000-0000-0000-000000000010" })),
+  )
+  assert.equal(cn.plan, "魔搭社区")
+  assert.equal(intl.plan, "魔搭社区（国际版）")
+  assert.equal(cn.balance, "5 魔粒可用")
+  assert.equal(intl.balance, "9 魔粒可用")
+})
+
+test("the remembered sites are bounded, and the oldest goes first", async () => {
+  // A long-lived host sees tokens come and go; an unbounded map would keep
+  // every one of them for the life of the process. Same shape as `names`.
+  testables.sites.clear()
+  const response = {
+    [BALANCE_PATH]: { body: { success: true, data: { available_balance: 1 } } },
+    [TX_PATH]: { body: { success: true, data: { records: [] } } },
+  }
+  const tokens = Array.from({ length: 65 }, (_, i) => `ms-bound-${String(i).padStart(4, "0")}-0000-0000-000000000011`)
+  await withUrlFetch(response, async () => {
+    for (const key of tokens) await auth.usage(async () => ({ type: "api", key }))
+  })
+  assert.equal(testables.sites.size, 64, "the cache is capped at 64 tokens")
+  assert.equal(testables.sites.has(tokens[0]), false, "the oldest token is the one evicted")
+  assert.equal(testables.sites.has(tokens[64]), true, "the newest is kept")
+})
+
 test("a token both sites refuse is expired, and says so", async () => {
   testables.sites.clear()
   const refused = { status: 401, body: { success: false, message: "Invalid authentication" } }
@@ -5663,7 +5755,11 @@ test("the request timer is armed with the request's whole budget", async (t) => 
     )
     assert.equal(r.outcome, "failed", "the request never answered")
     assert.match(r.message, /请求超时（8 秒）/, `the timeout says the budget it used: ${r.message}`)
-    assert.deepEqual(delays, [8000], "the timer is armed with the budget, not with no delay at all")
+    assert.ok(delays.length > 0, "a timer was armed at all")
+    assert.ok(
+      delays.every((ms) => ms === 8000),
+      `every request is armed with the budget, not with no delay at all: ${JSON.stringify(delays)}`,
+    )
   } finally {
     globalThis.setTimeout = realSet
     globalThis.clearTimeout = realClear

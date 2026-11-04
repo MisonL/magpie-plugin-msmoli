@@ -172,13 +172,26 @@ function saidFailure(e, ctl, budget) {
 async function siteRead(token, path, deadline = Infinity) {
   const known = sites.get(token)
   if (known) return { profile: known, ...(await json(known.site, token, path, deadline)) }
+  // A transport failure is not an answer about the token: the domestic site
+  // can be unreachable on a network where the international one works, and an
+  // international account must still be found there. The first failure is the
+  // one kept, because when both sites fail it is the one the user was closest
+  // to (their token most often comes from the domestic site).
+  let firstError
   for (const profile of SITES) {
-    const got = await json(profile.site, token, path, deadline)
+    let got
+    try {
+      got = await json(profile.site, token, path, deadline)
+    } catch (e) {
+      firstError ??= e
+      continue
+    }
     if (got.res.status !== 401) {
       rememberSite(token, profile)
       return { profile, ...got }
     }
   }
+  if (firstError) throw firstError
   throw deadToken("任一站点")
 }
 
@@ -1080,7 +1093,7 @@ export async function MsmoliPlugin(input) {
       methods: [
         {
           type: "api",
-          label: "ModelScope 访问令牌",
+          label: "ModelScope 访问令牌（国内站或国际站）",
           placeholder: "ms-…",
         },
       ],

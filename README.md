@@ -111,10 +111,14 @@ the second account lives under the same `msmoli` card:
 
 ```bash
 printf 'ms-your-intl-token\n' | magpie plugin login msmoli
+magpie accounts            # both accounts, each with its own 魔粒 window
 ```
 
-The check-in switch, the card and the window (`msmoli.json`) are per provider,
-so one setting covers every account, whichever site it is from.
+That is the same "add a second account" flow the rest of the plugin already
+uses (see [More than one account](#more-than-one-account)): the second sign-in
+is filed as `msmoli#xxxxxx` and gets its own target minute. The check-in
+switch, the card and the window (`msmoli.json`) are per provider, so one
+setting covers every account, whichever site it is from.
 
 ### Already have ModelScope set up in magpie? Sync that key to the plugin
 
@@ -214,6 +218,7 @@ later that day if it fails, and reports the outcome on the account's usage card:
 
 ```
 ● msmoli  API key …a1b2 · 魔搭社区  魔粒 1% (今日用 2 / 领 250 · 余额 249.5) ↻14h24m tomorrow 09:31  249.5 魔粒可用 left
+● msmoli  Mison · 魔搭社区（国际版）  魔粒 0% (今日用 0 / 领 300 · 余额 300) ↻18h6m tomorrow 10:00  300 魔粒可用 left
 ```
 
 ## How the check-in works
@@ -467,6 +472,11 @@ caught up with reads it once more, four. Once a day.
 Asks that arrive before the window open send nothing at all.
 The usage read makes two requests and never touches the sign-in endpoint, so the
 menu bar's polling cannot turn into check-ins.
+- **An international account costs one extra read, once per process.** The
+  first request a token makes goes to the domestic site, because that is where
+  most tokens are from; a 401 sends the same request to the international site,
+  and the answer is remembered for the rest of the process. A domestic account
+  therefore costs nothing extra, and the poll after the first does not probe.
 - Every request gives up after 8 seconds, and a response body is read to at most
 256 KiB; neither can hold the host or grow without bound. The timeout covers the
 body as well as the request: a proxy that stops mid-reply is cut at the same
