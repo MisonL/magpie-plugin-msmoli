@@ -29,7 +29,7 @@ ModelScope 的 API-Inference 是免费的，用魔粒结算：
 
 ### 方式一：从 npm 装（推荐，能跟着版本更新）
 
-包已发布在 npm：`magpie-plugin-msmoli`（最新 0.1.0）。装进 magpie 自己的插件目录，
+包已发布在 npm：`magpie-plugin-msmoli`。装进 magpie 自己的插件目录，
 `magpie plugin update` 跟着版本更新：
 
 ```bash
@@ -80,7 +80,7 @@ node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --t
 目录>`（安装版是 `~/.config/magpie`，便携版是它的 `data` 目录）和 `--magpie <magpie 可执行
 文件的路径>` 指明。`--magpie` 要的是一个路径，绝对或相对都行；裸名 `magpie` 会被拒绝——
 那个是按 `PATH` 解析的，PATH 上第一个 magpie 会拿到令牌。`npx magpie-plugin-msmoli` 可以直接用
-（已发布到 npm，0.1.0）——npm 12 默认禁用 `npx github:…`，别从那条路开始。
+（已发布到 npm）——npm 12 默认禁用 `npx github:…`，别从那条路开始。
 
 `--dir` 只决定**读**哪里；magpie 的 CLI 没有这个参数，写入永远落在可执行文件自己的目录。
 两个都给了而指向**不同的地方**时，工具会在写之前停下，而不是读一个 magpie、写进另一个。
