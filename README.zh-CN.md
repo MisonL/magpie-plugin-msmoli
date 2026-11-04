@@ -19,7 +19,17 @@ ModelScope 的 API-Inference 是免费的，用魔粒结算：
 需要先装好 magpie（<https://usemagpie.ai>）。macOS 上用 `magpie --version` 确认命令在 `PATH` 上；
 不在的话用 app 里的完整路径 `/Applications/magpie.app/Contents/MacOS/magpie`。
 
-### 方式一：直接从 GitHub 装（不用 clone，能跟着更新）
+### 方式一：从 npm 装（推荐，能跟着版本更新）
+
+包已发布在 npm：`magpie-plugin-msmoli`（最新 0.1.0）。装进 magpie 自己的插件目录，
+`magpie plugin update` 跟着版本更新：
+
+```bash
+magpie plugin add magpie-plugin-msmoli
+printf 'ms-你的令牌\n' | magpie plugin login msmoli
+```
+
+### 方式二：直接从 GitHub 装（不用 clone，能跟着更新）
 
 装进 magpie 自己的插件目录（安装版是 `~/.config/magpie/plugins`，便携版是 data 目录下的 `plugins`），
 以后 `magpie plugin update` 就能更新：
@@ -29,7 +39,7 @@ magpie plugin add github:MisonL/magpie-plugin-msmoli
 printf 'ms-你的令牌\n' | magpie plugin login msmoli
 ```
 
-### 方式二：clone 到本地再装
+### 方式三：clone 到本地再装
 
 留一份自己的副本，打算改代码就用这种。magpie 是**按位置引用**这个文件夹而不是拷走，
 所以文件夹不在（比如外置盘没挂）插件就加载不了，更新也得先 pull 再 add 一次：
@@ -61,8 +71,8 @@ node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs --t
 便携版的目录结构相同，只是根目录是它的 `data` 文件夹；探测不到时用 `--dir <magpie 的配置
 目录>`（安装版是 `~/.config/magpie`，便携版是它的 `data` 目录）和 `--magpie <magpie 可执行
 文件的路径>` 指明。`--magpie` 要的是一个路径，绝对或相对都行；裸名 `magpie` 会被拒绝——
-那个是按 `PATH` 解析的，PATH 上第一个 magpie 会拿到令牌。`npx magpie-plugin-msmoli` 要等
-包发布到 npm 之后才能用——npm 12 默认禁用 `npx github:…`，别从那条路开始。
+那个是按 `PATH` 解析的，PATH 上第一个 magpie 会拿到令牌。`npx magpie-plugin-msmoli` 可以直接用
+（已发布到 npm，0.1.0）——npm 12 默认禁用 `npx github:…`，别从那条路开始。
 
 `--dir` 只决定**读**哪里；magpie 的 CLI 没有这个参数，写入永远落在可执行文件自己的目录。
 两个都给了而指向**不同的地方**时，工具会在写之前停下，而不是读一个 magpie、写进另一个。

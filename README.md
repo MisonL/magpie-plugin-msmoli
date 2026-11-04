@@ -23,6 +23,16 @@ lightweight 0.5), so the daily 250 is roughly 125 calls.
 Needs magpie itself (<https://usemagpie.ai>). On macOS, use `magpie --version` to check it's on PATH; if not, use the app's full path:
 `/Applications/magpie.app/Contents/MacOS/magpie`.
 
+### Install from npm
+
+The package is on npm as `magpie-plugin-msmoli` (latest 0.1.0). Installs into
+magpie's own plugin folder, and `magpie plugin update` follows the versions.
+
+```bash
+magpie plugin add magpie-plugin-msmoli
+printf 'ms-your-token\n' | magpie plugin login msmoli
+```
+
 ### Install via GitHub URL (no clone, auto-updates)
 
 This installs into magpie's own plugin folder (`~/.config/magpie/plugins` for a regular install, or `data/plugins` for the portable version), so it updates with `magpie plugin update`.
@@ -73,9 +83,9 @@ installs keep the same layout under their `data` folder; if detection misses,
 where things are: for a portable install that is its `data` folder, not the
 folder the executable sits in. `--magpie` takes a path, absolute or relative —
 a bare `magpie` is refused, because that one is resolved through `PATH` and the
-first `magpie` on it would be handed the token. `npx magpie-plugin-msmoli` will
-work once the package is on npm — npm 12 blocks `npx github:…` by default, so
-don't start from that.
+first `magpie` on it would be handed the token. `npx magpie-plugin-msmoli` runs
+the CLI from npm (published as 0.1.0) — npm 12 blocks `npx github:…` by
+default, so don't start from that.
 
 `--dir` says where to *read*; magpie's CLI has no such flag, so a write always
 lands in the binary's own folder. Given both and they disagree, the tool stops

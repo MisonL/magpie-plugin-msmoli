@@ -55,11 +55,10 @@ the same de-dup the loader uses.
 ## The sync CLI
 
 `bin/sync.mjs` is the sync CLI the READMEs document (run it straight from
-magpie's plugin folder, or `npx magpie-plugin-msmoli` once the package is on
-npm), which copies an existing
-ModelScope key between the built-in preset (`providers.json`) and this plugin's
-sign-in (`plugin-auth.json`). Its tests live in `test/sync.test.mjs` and run
-with the rest of the suite.
+magpie's plugin folder, or `npx magpie-plugin-msmoli` from npm), which copies
+an existing ModelScope key between the built-in preset (`providers.json`) and
+this plugin's sign-in (`plugin-auth.json`). Its tests live in
+`test/sync.test.mjs` and run with the rest of the suite.
 
 Three invariants to keep when touching it:
 
@@ -151,26 +150,87 @@ magpie accounts | grep msmoli
 
 ## Publishing
 
-The package is not on npm yet. When it is, this is the whole of it:
+### Versioning
+
+The version in `package.json` is the one version: `npm version` writes it,
+commits it and tags it (`v0.1.0`), and that tag is what the GitHub release and
+the npm package are called. Do not edit the number by hand — a hand-edited
+number and an untagged commit are how npm and the repo drift apart.
+
+Semantic versioning, with the pre-1.0 reading the spec allows:
+
+| Change | Bump | Example |
+|---|---|---|
+| bug fix, no behaviour change for existing users | patch | 0.1.0 → 0.1.1 |
+| new provider, new option, new card field | minor | 0.1.0 → 0.2.0 |
+| breaking change to the hooks, the config file or the provider id | minor, and said out loud in the release notes | 0.1.0 → 0.2.0 |
+
+`0.x` means the hooks contract is still open to change; a breaking change
+there takes the minor segment (that is what the spec says `0.x` minor is for),
+not a 1.0. The first release that is safe to depend on without reading the
+notes gets `1.0.0`. The provider id (`msmoli`) is the one identifier users'
+sign-ins and aliases are filed under: changing it is a breaking change however
+small the diff looks.
+
+Release:
 
 ```bash
-node --test          # the suite, no network
-npm publish          # prepublishOnly runs the suite again
+node --test                     # the suite, no network
+npm pack --dry-run             # what goes in: module, sync CLI, both READMEs, licence, package.json
+npm version patch -m "v%s — <one line>"
+git push origin main --tags
+npm publish                     # prepublishOnly runs the suite again
+gh release create "v$(node -p 'require("./package.json").version')" \
+  --title "v$(node -p 'require("./package.json").version')" --verify-tag --generate-notes
 ```
 
-Check what goes in first if anything under `files` changed: `npm pack --dry-run`
-lists it — the module, the sync CLI, both READMEs, the licence and
-`package.json`, nothing else.
+`--generate-notes` drafts the notes from the commits since the last tag; edit
+them for anything a user would not read out of commit titles (a breaking
+change, a config key that moved). `npm publish` after a `npm version` is the
+only publish path: the tarball's `package.json` and the repo's tag must be the
+same commit.
 
-Once it is there, `magpie plugin add magpie-plugin-msmoli` installs it the way
+### The community market
+
+Being on npm is not the same as being in magpie's Discover list. That list is
+`registry.json` in magpie-community/plugins, and an entry is added by pull
+request to that repo. It is not limited to packages under the
+`@magpie-community` scope: eight of the entries there are third-party packages
+with their own npm names, so this one can be listed too. The README of that
+repo has the current entry shape and the review rules; the entry for this
+plugin is:
+
+```json
+{
+  "package": "magpie-plugin-msmoli",
+  "name": "ModelScope 魔粒",
+  "providers": ["msmoli"],
+  "icon": "https://modelscope.cn/favicon.ico",
+  "community": true,
+  "summary": {
+    "en": "Automatic daily check-in for ModelScope 魔粒 — claims the daily 200+50 credits, shows balance and today's spend on the usage card. Token from modelscope.cn.",
+    "zh": "魔搭魔粒每日自动签到：领取每日 200+50 魔粒，在 magpie 卡片上显示余额与今日消耗。令牌从 modelscope.cn 获取。"
+  }
+}
+```
+
+`providers` names the provider ids the package signs in to — `msmoli` only;
+the international provider, if and when it ships, is added to the array in the
+same entry. A duplicated channel is the one thing that needs an argument:
+"ModelScope 魔粒" is not in the registry today, so there is nothing to
+distinguish from yet.
+
+### What the package contains
+
+`npm pack --dry-run` before a release if anything under `files` changed. It
+lists the module, the sync CLI, both READMEs, the licence and `package.json`,
+and nothing else — no tests, no tooling, no config.
+
+Once published, `magpie plugin add magpie-plugin-msmoli` installs it the way
 every other plugin is installed, and `magpie plugin update` follows the
-versions.
-
-The Plugins tab's Discover list is the community's own (`registry.json` in
-magpie-community/plugins) and shows only packages under that organisation.
-A plugin outside it is found through the tab's search instead, which asks npm
-for packages whose name or keywords say they are an OpenCode plugin — this
-package's `opencode-plugin` and `magpie-plugin` keywords are what put it there.
+versions. Until the registry entry lands, the Discover tab's search finds it by
+name — this package's `opencode-plugin` and `magpie-plugin` keywords are what
+put it there.
 
 ## Things that are deliberate
 
