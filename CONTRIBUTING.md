@@ -194,31 +194,25 @@ same commit.
 
 Being on npm is not the same as being in magpie's Discover list. That list is
 `registry.json` in magpie-community/plugins, and an entry is added by pull
-request to that repo. It is not limited to packages under the
-`@magpie-community` scope: eight of the entries there are third-party packages
-with their own npm names, so this one can be listed too. The README of that
-repo has the current entry shape and the review rules; the entry for this
-plugin is:
+request to that repo. Third-party packages can be listed (several are), and a
+PR adding this one was opened — and declined.
 
-```json
-{
-  "package": "magpie-plugin-msmoli",
-  "name": "ModelScope 魔粒",
-  "providers": ["msmoli"],
-  "icon": "https://modelscope.cn/favicon.ico",
-  "community": true,
-  "summary": {
-    "en": "Automatic daily check-in for ModelScope 魔粒 — claims the daily 200+50 credits, shows balance and today's spend on the usage card. Token from modelscope.cn.",
-    "zh": "魔搭魔粒每日自动签到：领取每日 200+50 魔粒，在 magpie 卡片上显示余额与今日消耗。令牌从 modelscope.cn 获取。"
-  }
-}
-```
+**PR magpie-community/plugins#714 was closed on 2026-11-04.** The maintainer's
+reason is policy, not code: ModelScope has no check-in endpoint, so the plugin
+gets the daily grant by making the server count a website sign-in — a script
+posing as the browser rather than a person pressing a button the official
+client offers. ModelScope's user agreement forbids tools that interfere with
+the service (4.1.2(1)) and "刷分" by plugin (4.1.2(5)), and lets the platform
+freeze accounts or blacklist users for abuse (2.3.1 and the 魔粒 rules). The
+market's own rule (plugins#230, #150) is that a one-request claim triggered by
+an official button may be automated, but a reward that needs real activity is
+not simulated. A ModelScope account is real-name verified and often tied to
+Aliyun, so the downside for a user is larger than 250 expiring credits.
 
-`providers` names the provider ids the package signs in to — `msmoli` only;
-the international provider, if and when it ships, is added to the array in the
-same entry. A duplicated channel is the one thing that needs an argument:
-"ModelScope 魔粒" is not in the registry today, so there is nothing to
-distinguish from yet.
+Do not re-open the PR as-is. The package stays on npm and anyone can install
+it by name; it is simply not recommended from the registry. A new PR makes
+sense only if ModelScope publishes a check-in API or confirms in writing that
+automated logins are allowed.
 
 ### What the package contains
 

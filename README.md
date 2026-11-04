@@ -391,6 +391,19 @@ nothing — your name stays, and the nickname is not put over it.
 
 ## Scope and limits
 
+**ModelScope's terms.** The plugin gets the daily grant by making the server
+count a website sign-in: there is no check-in endpoint, so it calls
+`login/info` once a day with the browser's session cookie. ModelScope's user
+agreement forbids plugins that interfere with the service and "刷分", and lets
+the platform freeze accounts for abuse; the daily grant is described as a
+reward for logging in. For that reason **magpie's community market declined to
+list this package** ([plugins#714](https://github.com/magpie-community/plugins/pull/714)):
+a script posing as the browser is not a button the official client offers.
+Whether ModelScope's detection ever flags an account is not known either way —
+no account has been reported frozen for it, and none is guaranteed safe. That
+is a risk you take on your own account; it is the reason the package is
+installable by name but not recommended from the app's Discover list.
+
 - One account's own daily grant, idempotent: a check-in reads the ledger, touches
 the sign-in endpoint, and reads the ledger again — three requests. A day already
 claimed (a retry, a later ask) answers `done` in two; a touch the ledger has not
