@@ -96,11 +96,33 @@ The sign-in is kept per provider id (`msmoli`) rather than per folder, so
 switching between the two forms (or moving the clone) keeps the token — no
 second login.
 
+### International site (modelscope.ai)
+
+The plugin now provides a second provider for the international site:
+`msmoli-intl` (ModelScope 魔粒（国际版）). The same `ms-` token format, the same
+daily grant rules, **but tokens are site-specific** — a token from `modelscope.cn`
+answers 401 on `modelscope.ai`, and vice versa.
+
+The sign-in and check-in work the same way:
+
+```bash
+printf 'ms-your-intl-token\n' | magpie plugin login msmoli-intl
+```
+
+The check-in window (`msmoli.json`) is shared between both providers — it is
+a personal preference, not a per-site setting. To turn on the international
+check-in, set `msmoli-intl` in your plugin-checkins instead of or alongside
+`msmoli` (see "Turn the check-in on" below, substituting the provider id).
+
 ### Already have ModelScope set up in magpie? Sync that key to the plugin
 
 If you added ModelScope earlier just for chat, its key is already in
 `providers.json`. This package ships a small CLI that logs the same token into
 the plugin, so you don't have to find it again.
+
+It syncs the domestic site only, because the built-in preset it reads is the
+`modelscope.cn` one. The international site has no preset; sign `msmoli-intl`
+in by hand (`magpie plugin login msmoli-intl`).
 
 Installed from GitHub, magpie keeps its own copy in its plugin folder:
 
@@ -181,7 +203,9 @@ magpie):
 
 The token comes from <https://modelscope.cn/my/myaccesstoken>. The same `ms-`
 token is both the inference `Authorization: Bearer` and the web session cookie,
-so nothing else needs configuring.
+so nothing else needs configuring. For the international provider
+(`msmoli-intl`), the token comes from <https://modelscope.ai/my/myaccesstoken>
+instead — the two sites' tokens do not interchange.
 
 From then on magpie claims it once a Beijing day per signed-in account, retries
 later that day if it fails, and reports the outcome on the account's usage card:
@@ -405,13 +429,19 @@ The one real overlap to know about: **both rows cost nothing extra**, but if you
 remove the plugin's sign-in, chat is unaffected, and if you remove the preset,
 the check-in keeps working. They fail independently.
 
+If you sign in the international site as well, that adds one more row,
+`msmoli-intl` (ModelScope 魔粒（国际版）). It has every property in the table
+above — no models, its own card, its own check-in — and fails independently of
+both the preset and the domestic plugin row.
+
 ## Privacy
 
 `login/info` responds with `Email` and `GitlabAccessToken` among other fields.
 This plugin reads `NickName` / `Name` and nothing else; the rest is dropped as
 soon as the response is parsed. The token lives only in magpie's own
 `plugin-auth.json` — the plugin never writes it anywhere, never logs it, never
-sends it anywhere but `modelscope.cn`.
+sends it anywhere but the site the account was signed in for (`modelscope.cn`
+for `msmoli`, `modelscope.ai` for `msmoli-intl`).
 
 The one thing it writes is that nickname, as `accountId` on the sign-in it
 already has, so magpie's card can name the account. It goes through the host's
@@ -466,7 +496,7 @@ uses, so a ledger title or a server message of ordinary words is untouched.
 |---|---|
 | `not signed in` | `printf 'ms-token\n' \| magpie plugin login msmoli` |
 | No 魔粒 window on the card, or no check-in | restart magpie (the plugin host caches) |
-| `failed` with HTTP 401 | the token was revoked — make a new one and sign in again |
+| `failed` with HTTP 401 | the token was revoked, or it belongs to the other site — `modelscope.cn` and `modelscope.ai` do not share tokens. The card names which site refused (国内站 / 国际站). Make a new token on that site and sign in again |
 | `failed` with HTTP 403 | ModelScope's risk control refused the request; the token is fine. It retries in 30 minutes |
 | Before the window the card reads failed, with a line naming the claim time: `09:56 后自动领取（magpie 每半小时问一次，无需操作）` | expected — the card leads with when it will claim; see "When it claims" above |
 | Always `inactive` | the sign-in works but nothing shows in today's ledger: the account may not be eligible, or the grant hasn't been written yet (a claim made elsewhere shows as `done`). Before Beijing noon magpie asks again every 30 minutes; from noon on the plugin asks once more itself, half an hour later ("半小时后再核对一次"), and only the second `inactive` stands for the day |

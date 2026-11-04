@@ -9,7 +9,7 @@ import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
-import { MsmoliPlugin, testables } from "../index.mjs"
+import { MsmoliIntlPlugin, MsmoliPlugin, testables } from "../index.mjs"
 
 const { windowOf } = testables
 
@@ -228,6 +228,164 @@ test("a provider entry that is not an object is no entry, and a name that is not
     await hooks.config(config)
     assert.equal(config.provider.msmoli.name, "ModelScope 魔粒", `${JSON.stringify(name)} is not a name to keep`)
   }
+})
+
+// ── The international site: a second provider over the same hooks ──────────
+// modelscope.ai and .cn are one backend: same paths, same grant rules, same
+// 24-hour expiry. What differs is a handful of fields in the profile, and each
+// test below pins one of them — getting any of them wrong does not throw, it
+// only shows one site's account as the other's, or asks the international site
+// with a domestic token. The check-in window (msmoli.json) is shared.
+const intlHooks = await MsmoliIntlPlugin({})
+const intlAuth = intlHooks.auth
+
+// withUrlFetch is withFetch that remembers the whole URL, not only the path:
+// the two sites answer on identical paths, so the path-keyed fake above cannot
+// tell which origin was asked. A hit may be a function, called per request, for
+// the reads that change between calls.
+const withUrlFetch = async (responses, fn) => {
+  const real = globalThis.fetch
+  const urls = []
+  globalThis.fetch = async (url) => {
+    urls.push(String(url))
+    const u = new URL(url)
+    const hit = responses[u.pathname + u.search]
+    if (!hit) return reply({ status: 404, raw: "404 page not found" })
+    return reply(typeof hit === "function" ? hit() : hit)
+  }
+  try {
+    return await fn(urls)
+  } finally {
+    globalThis.fetch = real
+  }
+}
+
+test("the international entry is its own provider, and the domestic one is unmoved", () => {
+  assert.equal(intlAuth.provider, "msmoli-intl")
+  assert.equal(auth.provider, "msmoli", "a second export must not move the first")
+  // the sign-in is the same api-token hand-over: one ms- token, no prompts
+  assert.equal(intlAuth.methods.length, 1)
+  assert.equal(intlAuth.methods[0].type, "api")
+  assert.equal(intlAuth.methods[0].prompts, undefined)
+})
+
+test("the config hook names both providers, each keeping its own user-set name", async () => {
+  const config = { provider: { msmoli: { name: "我的魔搭" } } }
+  await hooks.config(config)
+  await intlHooks.config(config)
+  assert.equal(config.provider.msmoli.name, "我的魔搭", "the domestic rename is left alone")
+  assert.equal(config.provider["msmoli-intl"].name, "ModelScope 魔粒（国际版）")
+  assert.equal(config.provider["msmoli-intl"].models, undefined, "still no model registered")
+  // and a rename of the international one survives the next start too
+  config.provider["msmoli-intl"].name = "MS Intl"
+  await intlHooks.config(config)
+  assert.equal(config.provider["msmoli-intl"].name, "MS Intl")
+  assert.equal(config.provider.msmoli.name, "我的魔搭")
+})
+
+test("the international check-in claims on modelscope.ai and never on .cn", async () => {
+  const records = [day(), day({ rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50 })]
+  // first ledger read empty, later ones carry the grants — the claim path
+  let tx = 0
+  let askedUrls = []
+  const r = await withUrlFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": () => ({
+        body: { success: true, data: { records: ++tx === 1 ? [] : records } },
+      }),
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    async (got) => {
+      const result = await intlAuth.checkin(async () => ({ type: "api", key: "ms-intl-0000-0000-0000-000000000001" }))
+      askedUrls = got.slice()  // copy after the calls, not before
+      return result
+    },
+  )
+  assert.equal(r.outcome, "claimed")
+  assert.equal(r.credit, 250)
+  assert.deepEqual(
+    [...new Set(askedUrls.map((u) => new URL(u).origin))],
+    ["https://modelscope.ai"],
+    `every read must go to the international site: ${askedUrls.join(", ")}`,
+  )
+})
+
+test("each site's usage read asks its own origin", async () => {
+  // check-in and usage are two different sets of requests, and the profile is
+  // threaded through both: only the read that goes to the wrong site tells the
+  // user their balance is somebody else's. A .cn token asked of .ai answers
+  // 401, so a mixed-up usage path is a card that says the token is dead.
+  const responses = {
+    "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+    "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+  }
+  const ask = async (hook, key) =>
+    withUrlFetch(responses, async (got) => {
+      const out = await hook.usage(async () => ({ type: "api", key }))
+      return { out, origins: [...new Set(got.map((u) => new URL(u).origin))] }
+    })
+  const cn = await ask(auth, "ms-cn-origin")
+  assert.ok(!cn.out.error, cn.out.error)
+  assert.deepEqual(cn.origins, ["https://modelscope.cn"], `the domestic entry must not follow the new one: ${cn.origins}`)
+  const intl = await ask(intlAuth, "ms-intl-origin")
+  assert.ok(!intl.out.error, intl.out.error)
+  assert.deepEqual(intl.origins, ["https://modelscope.ai"], `every usage read must go to the international site: ${intl.origins}`)
+})
+
+test("the two cards carry their own plan line", async () => {
+  const responses = {
+    "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+    "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+  }
+  const cn = await withFetch(responses, async () => auth.usage(async () => ({ type: "api", key: "ms-cn-plan" })))
+  const intl = await withFetch(responses, async () => intlAuth.usage(async () => ({ type: "api", key: "ms-intl-plan" })))
+  assert.equal(cn.plan, "魔搭社区")
+  assert.equal(intl.plan, "魔搭社区（国际版）")
+})
+
+test("a 401 names the site whose token was refused", async () => {
+  const refused = { "/openapi/v1/magicubes/balance": { status: 401, body: { message: "unauthorized" } } }
+  const intl = await withFetch(refused, async () => intlAuth.usage(async () => ({ type: "api", key: "ms-intl-bad" })))
+  assert.equal(intl.signIn, "expired")
+  assert.match(intl.error, /令牌失效或不属于国际站（HTTP 401）/, intl.error)
+  const cn = await withFetch(refused, async () => auth.usage(async () => ({ type: "api", key: "ms-cn-bad" })))
+  assert.equal(cn.signIn, "expired")
+  assert.match(cn.error, /令牌失效或不属于国内站（HTTP 401）/, "the domestic wording is unchanged")
+})
+
+test("each site reads only its own aliases from providers.json", async () => {
+  // providers.json holds both sites side by side. A user who renamed their
+  // domestic account "主号" has not named anything on the international site;
+  // a lookup that keys on the label alone takes the domestic alias for the
+  // international account, and its real name is never written back.
+  const dir = tmpDir("msmoli-intl-alias-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  writeFileSync(
+    join(dir, "providers.json"),
+    JSON.stringify({ providers: [{ id: "msmoli", accountNames: { "api key …0019": "主号" } }] }),
+  )
+  const token = "ms-intl-alias-0000-0000-0000-000000000019"
+  const wrote = []
+  const client = { auth: { set: async (o) => { wrote.push(o) } } }
+  const responses = {
+    "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+    "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+  }
+  await withDirectory(dir, async () => {
+    // the domestic account carries that alias and keeps it
+    const cn = await withFetch(responses, async () =>
+      (await MsmoliPlugin({ directory: dir, client })).auth.checkin(async () => ({ type: "api", key: token })),
+    )
+    assert.equal(cn.outcome, "done")
+    assert.equal(wrote.length, 0, "the domestic alias is honoured")
+    // the international account has none of its own, so its name is written
+    const intl = await withFetch(responses, async () =>
+      (await MsmoliIntlPlugin({ directory: dir, client })).auth.checkin(async () => ({ type: "api", key: token })),
+    )
+    assert.equal(intl.outcome, "done")
+    assert.equal(wrote.length, 1, "the domestic alias says nothing about the international account")
+    assert.equal(wrote[0].path.id, "msmoli-intl", "the write goes back to the international provider")
+  })
 })
 
 test("checkin claims when the day had no daily_active", async () => {
@@ -1501,6 +1659,9 @@ test("the module exports no bare function the host would take for a plugin", asy
   // nothing happens, but a throw from it is caught by the loader's per-plugin
   // try/catch and the whole package is reported as failed to load. Helpers
   // live on `testables`, which the loader skips because it is an object.
+  //
+  // Two entries are intended: the international site is a second provider over
+  // the same hooks. Anything else appearing here is an accident.
   const mod = await import("../index.mjs")
   // exactly as servers() builds its list, de-dup included: the named export
   // `MsmoliPlugin` is the same function `default` is, and the Set keeps it
@@ -1513,8 +1674,8 @@ test("the module exports no bare function the host would take for a plugin", asy
     if (typeof v === "function") entries.push(v)
   }
   assert.deepEqual(
-    entries.map((f) => f.name),
-    ["MsmoliPlugin"],
+    entries.map((f) => f.name).sort(),
+    ["MsmoliIntlPlugin", "MsmoliPlugin"],
     `every exported function is run as a plugin entry; found ${entries.map((f) => f.name).join(", ")}`,
   )
   // and the one helper the tests need is still reachable

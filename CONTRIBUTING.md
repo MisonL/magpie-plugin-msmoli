@@ -230,6 +230,17 @@ put it there.
 
 ## Things that are deliberate
 
+- **Two plugin entries, one body.** magpie's loader takes every exported
+  function as its own provider, so `index.mjs` exports `MsmoliPlugin`
+  (`msmoli`, 国内站) and `MsmoliIntlPlugin` (`msmoli-intl`,
+  [modelscope.ai](https://modelscope.ai)). Both are thin wrappers over one
+  `pluginFor(profile, input)`; everything that differs between the sites lives
+  in a profile object — origin, provider id, the card's name and plan, and the
+  国内站/国际站 word in the 401. Exporting a helper would silently add a third
+  provider, which is why the guard test asserts the entry list by name; the
+  profiles are reachable to tests through `testables`, an object the loader
+  skips. Do not copy a hook for the second site: a fix landing in one copy and
+  not the other is the failure this shape exists to prevent.
 - **A separate `msmoli` provider, with no models.** Chat keeps using the
   `modelscope` preset with your API key. A plugin that served the provider
   inference routes through would take the whole chat path out of magpie when

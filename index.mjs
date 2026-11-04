@@ -1,21 +1,47 @@
-// ModelScope (魔搭) 魔粒 check-in for magpie.
+// ModelScope (魔搭) 魔粒 check-in for magpie — one provider per site:
+// modelscope.cn (`msmoli`) and modelscope.ai (`msmoli-intl`).
 //
 // magpie calls auth.checkin once a Beijing day per signed-in account while the
 // provider's check-in switch is on, and again later that day after a failure.
 // Hooks here: checkin, usage.
 //
-// 签到机制：ModelScope 的 OpenAPI 里没有签到端点。访问
-// GET /api/v1/users/login/info 会被服务端记成一次登录，随即发放当日
-// 「注册并登录 200」与「绑定阿里云账号 50」，当日幂等。
+// How the claim works: ModelScope's OpenAPI has no check-in endpoint. What it
+// has is a side effect — GET /api/v1/users/login/info counts as a website
+// sign-in, and the server grants that day's credits with it (200 for the
+// "注册并登录" daily grant, 50 for a bound Aliyun account), once per day.
+// modelscope.ai is the same backend with the same paths and the same
+// daily_active rule, but separate accounts and separate tokens: measured, an
+// ms- token authenticates only on the site it came from.
 //
-// 本插件不提供任何聊天模型：推理仍走 providers.json 里 API key 版的
-// modelscope 预设。这个 provider 只为承载签到所需的登录态而存在。
+// The plugin serves no chat models: inference keeps using the API-key modelscope
+// preset in providers.json. Both providers exist only to carry the sign-in the
+// check-in runs as.
 
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
 
-const SITE = "https://modelscope.cn"
+// A profile is everything that differs between the two deployments: the
+// origin, the provider id (magpie keys the sign-in, the card and the alias by
+// it), and the words on the card. The rest of this module is shared — the two
+// sites answer with the same envelopes, the same magicubes rules and the same
+// 24-hour expiry, so a second copy of the hooks would only be a second place
+// for them to drift.
+const CN = {
+  site: "https://modelscope.cn",
+  id: "msmoli",
+  name: "ModelScope 魔粒",
+  plan: "魔搭社区",
+  where: "国内站",
+}
+const INTL = {
+  site: "https://modelscope.ai",
+  id: "msmoli-intl",
+  name: "ModelScope 魔粒（国际版）",
+  plan: "魔搭社区（国际版）",
+  where: "国际站",
+}
+
 const LOGIN_INFO = "/api/v1/users/login/info"
 const BALANCE = "/openapi/v1/magicubes/balance"
 const TXNS = "/openapi/v1/magicubes/transactions"
@@ -25,8 +51,6 @@ const UA =
 
 // 每日发放的规则。这类魔粒 24 小时过期，不累积。
 const DAILY_RULES = ["daily_active", "aliyun_bindlogin"]
-
-const ID = "msmoli"
 
 const TIMEOUT_MS = 8000
 // PAGE_SIZE is one page of the ledger, and one page is all that is read. The
@@ -127,7 +151,7 @@ function saidFailure(e, ctl, budget) {
   return e
 }
 
-async function json(token, path, deadline = Infinity) {
+async function json(site, token, path, deadline = Infinity) {
   const left = deadline - Date.now()
   if (left <= 0) throw new Error("预算已用完，本次请求未发出")
   const budget = Math.min(TIMEOUT_MS, left)
@@ -144,15 +168,15 @@ async function json(token, path, deadline = Infinity) {
   try {
     const res = await Promise.race([
       aborted,
-      fetch(SITE + path, {
+      fetch(site + path, {
         // every redirect is refused, the site's own included: one that left
-        // modelscope.cn would carry the session cookie off-site (the runtimes
+        // the origin would carry the session cookie off-site (the runtimes
         // happen not to forward it), and ModelScope's endpoints answer in place
         redirect: "error",
         headers: {
           Cookie: "m_session_id=" + token,
           "User-Agent": UA,
-          Referer: SITE + "/",
+          Referer: site + "/",
           Accept: "application/json",
         },
         signal: ctl.signal,
@@ -502,7 +526,10 @@ function labelOf(auth, token) {
 // the user's name keyed to a label nothing carries any more — it would stop
 // showing, with no sign of why. A file that is mid-write, unreadable, or not
 // the shape we know must therefore count as "don't write", not as "no alias".
-function aliasOf(dir, label) {
+//
+// `id` is the provider's own: both sites keep their accounts in the same
+// providers.json, and an alias is only this plugin's when the row's id says so.
+function aliasOf(id, dir, label) {
   // no directory is not "the user has no alias": it is having nowhere to look
   if (!dir || !label) return undefined
   let raw
@@ -531,7 +558,7 @@ function aliasOf(dir, label) {
   for (const list of lists) {
     if (!Array.isArray(list)) continue
     for (const p of list) {
-      if (p?.id !== ID) continue
+      if (p?.id !== id) continue
       const names = p.accountNames
       if (!names || typeof names !== "object") continue
       const mine = names[key]
@@ -832,7 +859,7 @@ const unusableName = (name, token) =>
   nameIsKey(name, token) ||
   ["__proto__", "constructor", "prototype"].includes(name)
 
-async function rememberAccountName(client, token, name, auth, dir) {
+async function rememberAccountName(profile, client, token, name, auth, dir) {
   // "can write" is a function, not a truthy value: `{ auth: { set: 1 } }` is a
   // client that cannot write, and `!client?.auth?.set` let it through to call
   // a number — the TypeError is caught below, but it logs "account name not
@@ -846,7 +873,7 @@ async function rememberAccountName(client, token, name, auth, dir) {
   // it would re-key their alias to a label the account no longer has. A
   // providers.json that can't be read says the same thing — don't write over
   // a state we can't see.
-  if (aliasOf(dir, labelOf(auth, token)) !== "") return
+  if (aliasOf(profile.id, dir, labelOf(auth, token)) !== "") return
   named.delete(token)
   named.set(token, Date.now())
   while (named.size > NAMES_MAX) named.delete(named.keys().next().value)
@@ -854,7 +881,7 @@ async function rememberAccountName(client, token, name, auth, dir) {
     // auth.set replaces the whole sign-in, so what the host handed us is the
     // base: a field we do not know about is kept, not dropped
     const body = { ...(auth && typeof auth === "object" ? auth : {}), type: "api", key: token, accountId: name }
-    await client.auth.set({ path: { id: ID }, body })
+    await client.auth.set({ path: { id: profile.id }, body })
   } catch (e) {
     // the card keeps the key's tail; nothing else depends on this. Put the
     // token back so the next ask tries the write again, and let the log call
@@ -865,7 +892,7 @@ async function rememberAccountName(client, token, name, auth, dir) {
     // of it before it reaches magpie's log
     const why = cardText(whyOf(e), token)
     try {
-      const r = client?.app?.log?.({ body: { level: "warn", service: "msmoli", message: `account name not written back: ${why}` } })
+      const r = client?.app?.log?.({ body: { level: "warn", service: profile.id, message: `account name not written back: ${why}` } })
       if (r && typeof r.catch === "function") r.catch(() => {})
     } catch {
       // a host whose log throws synchronously must not turn a successful
@@ -888,13 +915,15 @@ const whyOf = (e) =>
 // used to exist for one condition ("令牌失效或不属于国内站", the same plus
 // "（HTTP 401）", and a bare "HTTP 401" from the balance/ledger path), and the
 // README's troubleshooting row promises the user will see the status code in
-// it — which only two of the three carried.
-const EXPIRED = "令牌失效或不属于国内站（HTTP 401）"
+// it — which only two of the three carried. `where` is the profile's 国内站/
+// 国际站, and stays in the one wording so the card says which site refused
+// the token.
+const expired = (where) => `令牌失效或不属于${where}（HTTP 401）`
 
 // deadToken is what every 401 becomes: the token is revoked, and magpie only
 // signs the account out when the hook says so. Both call sites guard
 // `status === 401` before throwing this, so there is no other status to name.
-const deadToken = () => Object.assign(new Error(EXPIRED), { signIn: "expired" })
+const deadToken = (where) => Object.assign(new Error(expired(where)), { signIn: "expired" })
 
 // RISK is what every 403 says — ModelScope's risk control, not a bad token:
 // the account may be perfectly fine and only the request was refused. The
@@ -907,15 +936,16 @@ const RISK = "被魔搭风控拒绝（HTTP 403）"
 // usage's ledger) do not each carry their own copy of the four checks. `what`
 // names the read in the message ("账单查询失败" / "余额查询失败" / "登录接口
 // 失败"); `risk` is the 403 wording, which the touch alone extends with the
-// retry it can promise.
+// retry it can promise. `profile` is there for the one site-specific word a
+// 401 carries (国内站/国际站).
 //
 // The parse check and the status check are separate on purpose: a body that
 // does not parse is not JSON; a body that parses and carries a 429/500 is the
 // server saying why in its own words (「请求过于频繁」「系统繁忙」). Merged,
 // a JSON-carrying 429 was reported as "响应不是 JSON" and sent the user to
 // check their proxy.
-const gate = (res, body, parsed, token, what, risk = RISK) => {
-  if (res.status === 401) throw deadToken()
+const gate = (profile, res, body, parsed, token, what, risk = RISK) => {
+  if (res.status === 401) throw deadToken(profile.where)
   if (res.status === 403) throw new Error(risk)
   if (!parsed) throw new Error(`${what}：响应不是 JSON（HTTP ${res.status}）`)
   if (res.status !== 200 || !okOf(body)) throw new Error(`${what}：${saidOf(body, token) || `HTTP ${res.status}`}`)
@@ -925,9 +955,9 @@ const gate = (res, body, parsed, token, what, risk = RISK) => {
 // The day is read at each call, on purpose: a check-in that crosses midnight
 // between its reads reports what its touch granted on the new day, which is
 // true, where diffing both reads against the old day would answer inactive.
-async function todayEarn(token, deadline) {
-  const { res, body, parsed } = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
-  gate(res, body, parsed, token, "账单查询失败")
+async function todayEarn(profile, token, deadline) {
+  const { res, body, parsed } = await json(profile.site, token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
+  gate(profile, res, body, parsed, token, "账单查询失败")
   const day = todayCN()
   return recordsOf(body).filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day))
 }
@@ -996,7 +1026,11 @@ const yin = (n) => {
 
 const sumOf = (records) => yin(records.reduce((n, r) => n + amountOf(r), 0))
 
-export async function MsmoliPlugin(input) {
+// pluginFor is the whole plugin, with the one profile it serves passed in.
+// magpie calls every exported function as its own plugin entry, so the two
+// exports below are two providers over this one body: same hooks, same
+// wording, one place for both to drift from.
+async function pluginFor(profile, input) {
   // input.directory is magpie's own folder (host.go passes settings.Dir()),
   // which is where a portable magpie keeps everything too.
   const configDir = typeof input?.directory === "string" ? input.directory : ""
@@ -1007,7 +1041,7 @@ export async function MsmoliPlugin(input) {
 
   return {
     auth: {
-      provider: ID,
+      provider: profile.id,
 
       // 静态令牌签到：粘贴一把 ms- 开头的访问令牌即可。
       //
@@ -1086,7 +1120,7 @@ export async function MsmoliPlugin(input) {
         let name = ""
         const answer = await (async () => {
         try {
-          const before = await todayEarn(token, deadline)
+          const before = await todayEarn(profile, token, deadline)
           const beforeDaily = before.filter((r) => DAILY_RULES.includes(r?.rule_key))
           const claimed = before.some((r) => r?.rule_key === "daily_active")
           // What this run granted is the ledger's growth, not a new key: the
@@ -1129,9 +1163,9 @@ export async function MsmoliPlugin(input) {
           if (claimed && known) {
             name = known
           } else {
-            const { res, body, parsed } = await json(token, LOGIN_INFO, deadline)
+            const { res, body, parsed } = await json(profile.site, token, LOGIN_INFO, deadline)
             // 403 是风控，不是令牌坏了：账号可能是好的，只是这次请求被拒
-            gate(res, body, parsed, token, "登录接口失败", `${RISK}，稍后会自动重试`)
+            gate(profile, res, body, parsed, token, "登录接口失败", `${RISK}，稍后会自动重试`)
 
             const me = dataOf(body)
             // A name is a string. Anything else — a number, an object, a list —
@@ -1178,7 +1212,7 @@ export async function MsmoliPlugin(input) {
             return { credit, which }
           }
 
-          const daily = gained((await todayEarn(token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key)))
+          const daily = gained((await todayEarn(profile, token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key)))
           if (daily) return { outcome: "claimed", credit: daily.credit, message: `领取 ${daily.credit} 魔粒：${daily.which}` }
           // 触达了却没有到账记录：可能是账本还没写出来（发放是异步的），
           // 也可能这个账号本来就不在活动范围。再读一次账本确认，别把刚写
@@ -1187,7 +1221,7 @@ export async function MsmoliPlugin(input) {
           // 是宿主：还没见到领取的 done/inactive 是暂定答案，每 30 分钟重问
           // （provisional，由 checkinSureHour 决定）。12 点起宿主就当天了结，
           // 所以下午的时段由插件自己用 until 要一次半小时后的重问。
-          const later = gained((await todayEarn(token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key)))
+          const later = gained((await todayEarn(profile, token, deadline)).filter((r) => DAILY_RULES.includes(r?.rule_key)))
           if (later) return { outcome: "claimed", credit: later.credit, message: `领取 ${later.credit} 魔粒：${later.which}` }
           const hourCN = Math.floor(minuteCN() / 60)
           if (hourCN >= SURE_HOUR && deferred.get(token) !== today) {
@@ -1208,7 +1242,7 @@ export async function MsmoliPlugin(input) {
         // catches its own failures, and anything it could still throw (an
         // unreadable providers.json read) must not undo the answer above
         try {
-          await rememberAccountName(client, token, name, auth, configDir)
+          await rememberAccountName(profile, client, token, name, auth, configDir)
         } catch {}
         return answer
       },
@@ -1232,9 +1266,9 @@ export async function MsmoliPlugin(input) {
         // Inside the try: the hook promises an {error}, never a rejection,
         // and this path reaches client.auth.set.
         try {
-          await rememberAccountName(client, token, names.get(token) ?? "", auth, configDir)
-          const bal = await json(token, BALANCE, deadline)
-          gate(bal.res, bal.body, bal.parsed, token, "余额查询失败")
+          await rememberAccountName(profile, client, token, names.get(token) ?? "", auth, configDir)
+          const bal = await json(profile.site, token, BALANCE, deadline)
+          gate(profile, bal.res, bal.body, bal.parsed, token, "余额查询失败")
           // data 缺失读成 0 会把「没读懂」翻译成「余额为零」——一个确定又
           // 错误的结论，卡片会写「0 魔粒可用」。账本那侧的 recordsOf 同理。
           // 字段这一层也一样：available_balance 缺失、null、或改了名字，
@@ -1259,8 +1293,8 @@ export async function MsmoliPlugin(input) {
           // below zero, and "-5 魔粒可用" is not a thing the card can show
           const available = Math.max(0, yin(availableN))
 
-          const tx = await json(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
-          gate(tx.res, tx.body, tx.parsed, token, "账单查询失败")
+          const tx = await json(profile.site, token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
+          gate(profile, tx.res, tx.body, tx.parsed, token, "账单查询失败")
 
           const day = todayCN()
           let earned = 0
@@ -1340,7 +1374,7 @@ export async function MsmoliPlugin(input) {
           const hint = ahead && !ahead.due ? ` · ${clock(ahead.target)} 领取` : ""
 
           return {
-            plan: "魔搭社区",
+            plan: profile.plan,
             user: names.get(token) ?? "",
             balance: `${available} 魔粒可用`,
             windows: [
@@ -1367,27 +1401,40 @@ export async function MsmoliPlugin(input) {
     async config(config) {
       // 宿主是 `{ provider: {}, ...userConfig }` 拼出来的，用户配置里那个
       // provider 会盖掉默认的 {}。它不是对象时（旧版本写的字符串、手改的
-      // 数字），下面 `[ID] =` 会抛 TypeError，宿主只把 config 钩子的错误
-      // 记进日志——插件照常出现，只是没有名字，看不出哪里错了。`??=` 只挡
-      // null/undefined，挡不住 ""、0、false；一个装不下 ID 的容器里没有可
-      // 保留的东西，整个换掉。
+      // 数字），下面 `[profile.id] =` 会抛 TypeError，宿主只把 config 钩子
+      // 的错误记进日志——插件照常出现，只是没有名字，看不出哪里错了。
+      // `??=` 只挡 null/undefined，挡不住 ""、0、false；一个装不下 id 的
+      // 容器里没有可保留的东西，整个换掉。
       if (!config.provider || typeof config.provider !== "object") config.provider = {}
       // 用户自己改过的名字留着：magpie 把 provider 的名字存在 providers.json
       // 里，而钩子每次启动都跑一遍——强制写回默认值会把 UI 里的改名悄悄撤销，
       // 与账号昵称那条「用户命名过就不动」是同一条规矩。值不是对象时当作没有。
-      const was = config.provider[ID] && typeof config.provider[ID] === "object" ? config.provider[ID] : {}
-      config.provider[ID] = {
+      const was = config.provider[profile.id] && typeof config.provider[profile.id] === "object" ? config.provider[profile.id] : {}
+      config.provider[profile.id] = {
         ...was,
-        name: typeof was.name === "string" && was.name ? was.name : "ModelScope 魔粒",
+        name: typeof was.name === "string" && was.name ? was.name : profile.name,
       }
     },
   }
+}
+
+// Two entries: the domestic site (`msmoli`) and the international one
+// (`msmoli-intl`). Exporting two functions makes two providers — magpie's
+// loader takes every exported function as a plugin entry (`testables` is an
+// object, which it skips). The check-in window in msmoli.json is shared: it is
+// a personal preference about when to claim, not a per-site setting.
+export async function MsmoliPlugin(input) {
+  return pluginFor(CN, input)
+}
+
+export async function MsmoliIntlPlugin(input) {
+  return pluginFor(INTL, input)
 }
 
 // testables is how the pure helpers the tests pin are reached without
 // exporting them as functions: magpie's loader treats every exported function
 // as a plugin entry (see windowOf above), but an object it skips. The tests
 // are the only reader.
-export const testables = { windowOf }
+export const testables = { windowOf, CN, INTL }
 
 export default MsmoliPlugin
