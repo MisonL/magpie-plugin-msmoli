@@ -54,6 +54,11 @@ const rememberSite = (token, profile) => {
   while (sites.size > SITES_MAX) sites.delete(sites.keys().next().value)
 }
 
+// profileForSite maps a value kept on a sign-in back to its site. Anything
+// else — an older host's field, a hand-edited file — is ignored and the token
+// probed again rather than trusted.
+const profileForSite = (v) => (typeof v === "string" ? SITES.find((p) => p.site === v) : undefined)
+
 const LOGIN_INFO = "/api/v1/users/login/info"
 const BALANCE = "/openapi/v1/magicubes/balance"
 const TXNS = "/openapi/v1/magicubes/transactions"
@@ -622,10 +627,6 @@ function aliasOf(id, dir, label) {
   return ""
 }
 
-// rememberAccountName tells magpie the account's own name, so its card reads
-// "Mison" instead of "API key …a1b2". The sign-in is written as it already
-// is — the same key, no second copy of the token — with the name beside it;
-// an account that has one already is left alone.
 // maskToken hides all but the ends of a token, for messages that mention one.
 // The log is magpie's own, but a token has no business in it whole.
 const maskToken = (token) =>
@@ -913,40 +914,62 @@ const unusableName = (name, token) =>
   nameIsKey(name, token) ||
   ["__proto__", "constructor", "prototype"].includes(name)
 
-async function rememberAccountName(client, token, name, auth, dir) {
+// rememberAccountFields tells magpie what the plugin learned about this
+// sign-in: the account's own name (so the card reads "Mison" instead of
+// "API key …a1b2"), and — for an account on the international site — the site
+// itself, so a restarted host does not have to hand the token to the domestic
+// site for a 401 first. The sign-in is written as it already is — the same
+// key, no second copy of the token — with those fields beside it; what is
+// already there is left alone. Both go in one write: auth.set takes
+// plugin-auth.json's lock, and two writes would take it twice.
+async function rememberAccountFields(client, token, learned, auth, dir) {
   // "can write" is a function, not a truthy value: `{ auth: { set: 1 } }` is a
   // client that cannot write, and `!client?.auth?.set` let it through to call
-  // a number — the TypeError is caught below, but it logs "account name not
+  // a number — the TypeError is caught below, but it logs "account facts not
   // written back" on every check-in, a failure report for a client that never
   // had a chance to succeed.
-  if (!name || typeof client?.auth?.set !== "function") return
-  if (auth?.accountId === name) return
+  if (typeof client?.auth?.set !== "function") return
+  const name = learned?.name ?? ""
+  // Only the international site is worth keeping: a probe tries the domestic
+  // one first, so recording it saves no request and costs a locked write.
+  const site = learned?.profile?.site === INTL.site ? INTL.site : ""
+  const wantSite = !!site && auth?.site !== site
   const at = named.get(token)
-  if (at !== undefined && Date.now() - at < NAME_AGAIN_MS) return
+  const cooling = at !== undefined && Date.now() - at < NAME_AGAIN_MS
   // an account the user has named keeps that name: writing the nickname over
   // it would re-key their alias to a label the account no longer has. A
   // providers.json that can't be read says the same thing — don't write over
   // a state we can't see.
-  if (aliasOf(ID, dir, labelOf(auth, token)) !== "") return
-  named.delete(token)
-  named.set(token, Date.now())
-  while (named.size > NAMES_MAX) named.delete(named.keys().next().value)
+  const wantName =
+    !!name && auth?.accountId !== name && !cooling && aliasOf(ID, dir, labelOf(auth, token)) === ""
+  if (!wantName && !wantSite) return
+  if (wantName) {
+    named.delete(token)
+    named.set(token, Date.now())
+    while (named.size > NAMES_MAX) named.delete(named.keys().next().value)
+  }
   try {
     // auth.set replaces the whole sign-in, so what the host handed us is the
     // base: a field we do not know about is kept, not dropped
-    const body = { ...(auth && typeof auth === "object" ? auth : {}), type: "api", key: token, accountId: name }
+    const body = {
+      ...(auth && typeof auth === "object" ? auth : {}),
+      type: "api",
+      key: token,
+      ...(wantName ? { accountId: name } : {}),
+      ...(wantSite ? { site } : {}),
+    }
     await client.auth.set({ path: { id: ID }, body })
   } catch (e) {
     // the card keeps the key's tail; nothing else depends on this. Put the
     // token back so the next ask tries the write again, and let the log call
     // be truly best-effort: a host whose log is synchronous returns undefined
     // where a promise is expected, and that must not throw out of here.
-    named.delete(token)
+    if (wantName) named.delete(token)
     // the message can carry whatever the host put in it; scrub the token out
     // of it before it reaches magpie's log
     const why = cardText(whyOf(e), token)
     try {
-      const r = client?.app?.log?.({ body: { level: "warn", service: ID, message: `account name not written back: ${why}` } })
+      const r = client?.app?.log?.({ body: { level: "warn", service: ID, message: `account facts not written back: ${why}` } })
       if (r && typeof r.catch === "function") r.catch(() => {})
     } catch {
       // a host whose log throws synchronously must not turn a successful
@@ -1014,7 +1037,51 @@ async function todayEarn(token, deadline) {
   const { profile, res, body, parsed } = await siteRead(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
   gate(profile, res, body, parsed, token, "账单查询失败")
   const day = todayCN()
-  return { profile, rows: recordsOf(body).filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day)) }
+  const all = recordsOf(body)
+  return { profile, all, rows: all.filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day)) }
+}
+
+// prevDay is the Beijing day before `day`. The rows carry date labels with no
+// zone attached, so subtracting on the UTC date is right: the label is a
+// calendar day, not an instant.
+const prevDay = (day) => {
+  const d = new Date(`${day}T00:00:00Z`)
+  d.setUTCDate(d.getUTCDate() - 1)
+  return d.toISOString().slice(0, 10)
+}
+
+// streakOf is how many consecutive days up to `day` carried a daily grant: a
+// run of daily-rule EARN rows, one Beijing day per step, ending today (or
+// undefined when today's grant is not in the rows at all). The page holds
+// only the newest PAGE_SIZE rows — a fortnight or so — so a run that reaches
+// past the oldest row shown cannot be told apart from one that continues off
+// the page, unless the page has room to hold the account's whole history. Not
+// knowing, the streak is left unsaid rather than understated: the host prints
+// "{n}-day streak" only for a number it has, and a wrong number is worse than
+// none.
+function streakOf(records, day) {
+  const days = new Set()
+  for (const r of records) {
+    const stamp = typeof r?.gmt_created === "string" ? r.gmt_created.slice(0, 10) : ""
+    if (r?.type === "EARN" && DAILY_RULES.includes(r?.rule_key) && /^\d{4}-\d{2}-\d{2}/.test(stamp)) days.add(stamp)
+  }
+  if (!days.has(day)) return undefined
+  let n = 1
+  let d = day
+  for (;;) {
+    const prev = prevDay(d)
+    if (days.has(prev)) {
+      n++
+      d = prev
+      continue
+    }
+    // The run stops at a day with no grant. That is a real break when a row
+    // older than it is on the page — the ledger goes on past the gap — and
+    // when the page is not full (nothing was cut off). A full page with no
+    // older row visible may have lost the rest of the run to page 2.
+    const older = records.some((r) => typeof r?.gmt_created === "string" && r.gmt_created.slice(0, 10) < prev)
+    return older || records.length < PAGE_SIZE ? n : undefined
+  }
 }
 
 // SURE_HOUR is magpie's checkinSureHour (workbuddy_checkin.go): before noon,
@@ -1171,6 +1238,13 @@ export async function MsmoliPlugin(input) {
           }
         }
 
+        // The site the token was found on is kept on the sign-in, so a
+        // restarted host goes straight there instead of handing the token to
+        // the domestic site for a 401 first. A value that is not one of the
+        // two is ignored and the token probed again.
+        const kept = profileForSite(auth?.site)
+        if (kept && !sites.has(token)) rememberSite(token, kept)
+
         // The nickname is written back after the answer is made, not between
         // the touch and the reads that reconcile it: magpie's auth.set takes
         // plugin-auth.json's lock synchronously (host.js's lockAuth, up to
@@ -1178,10 +1252,14 @@ export async function MsmoliPlugin(input) {
         // wait came out of this hook's 25s — a claim that had landed was then
         // answered "budget used up" and shown as failed for half an hour.
         let name = ""
+        // the site the reads found the token on, for the write-back after the
+        // answer; null until the first read has answered
+        let probe = null
         const answer = await (async () => {
         try {
           const before = await todayEarn(token, deadline)
           const profile = before.profile
+          probe = profile
           const beforeDaily = before.rows.filter((r) => DAILY_RULES.includes(r?.rule_key))
           const claimed = before.rows.some((r) => r?.rule_key === "daily_active")
           // What this run granted is the ledger's growth, not a new key: the
@@ -1257,7 +1335,16 @@ export async function MsmoliPlugin(input) {
             // named — the user can see which ones — but the amount stops at
             // zero, the way the usage card's limit already does.
             const shown = Math.max(0, credit)
-            return { outcome: "done", credit: shown, message: `今日已领取 ${shown} 魔粒` + (which ? `（${which}）` : "") }
+            // The streak is read from the page **before** the touch here too:
+            // the touch grants nothing new for an account already claimed, so
+            // the two readings answer the same thing, and this one is the page
+            // the totals above were taken from.
+            return {
+              outcome: "done",
+              credit: shown,
+              streak: streakOf(before.all, today),
+              message: `今日已领取 ${shown} 魔粒` + (which ? `（${which}）` : ""),
+            }
           }
 
           const gained = (rows) => {
@@ -1276,8 +1363,16 @@ export async function MsmoliPlugin(input) {
             return { credit, which }
           }
 
-          const daily = gained((await todayEarn(token, deadline)).rows.filter((r) => DAILY_RULES.includes(r?.rule_key)))
-          if (daily) return { outcome: "claimed", credit: daily.credit, message: `领取 ${daily.credit} 魔粒：${daily.which}` }
+          const fresh = await todayEarn(token, deadline)
+          probe = fresh.profile
+          const daily = gained(fresh.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)))
+          if (daily)
+            return {
+              outcome: "claimed",
+              credit: daily.credit,
+              streak: streakOf(fresh.all, today),
+              message: `领取 ${daily.credit} 魔粒：${daily.which}`,
+            }
           // Touched, yet no credit record: the ledger may not be written yet
           // (grants are asynchronous), or this account may simply not be in the
           // campaign. Read the ledger once more to confirm, and do not drop a
@@ -1289,8 +1384,16 @@ export async function MsmoliPlugin(input) {
           // by checkinSureHour). From noon the host settles the day, so in the
           // afternoon the plugin asks for one more ask half an hour later itself,
           // via until.
-          const later = gained((await todayEarn(token, deadline)).rows.filter((r) => DAILY_RULES.includes(r?.rule_key)))
-          if (later) return { outcome: "claimed", credit: later.credit, message: `领取 ${later.credit} 魔粒：${later.which}` }
+          const again = await todayEarn(token, deadline)
+          probe = again.profile
+          const later = gained(again.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)))
+          if (later)
+            return {
+              outcome: "claimed",
+              credit: later.credit,
+              streak: streakOf(again.all, today),
+              message: `领取 ${later.credit} 魔粒：${later.which}`,
+            }
           const hourCN = Math.floor(minuteCN() / 60)
           if (hourCN >= SURE_HOUR && deferred.get(token) !== today) {
             for (const [k, d] of deferred) if (d !== today) deferred.delete(k)
@@ -1310,7 +1413,7 @@ export async function MsmoliPlugin(input) {
         // catches its own failures, and anything it could still throw (an
         // unreadable providers.json read) must not undo the answer above
         try {
-          await rememberAccountName(client, token, name, auth, configDir)
+          await rememberAccountFields(client, token, { name, profile: probe }, auth, configDir)
         } catch {}
         return answer
       },
@@ -1328,6 +1431,10 @@ export async function MsmoliPlugin(input) {
           return { error: hostText(whyOf(e)) || "用量查询失败", signIn: signedOut(e) ? "expired" : "" }
         }
         if (!token) return { error: unusableKey(auth) ? "令牌内容无法识别，请重新登录" : "没有登录信息", signIn: "" }
+        // the same seeding as the check-in's: a site kept on the sign-in saves
+        // the domestic-site 401 a restarted host would otherwise pay first
+        const kept = profileForSite(auth?.site)
+        if (kept && !sites.has(token)) rememberSite(token, kept)
         const deadline = Date.now() + USAGE_BUDGET_MS
         // the name is only known from login/info, which usage must never
         // reach; a check-in in this process leaves it here for the card, and
@@ -1476,7 +1583,7 @@ export async function MsmoliPlugin(input) {
           // write (a poll answered before it would race the very retry this
           // exists for), while the reads above have already had the budget to
           // themselves.
-          await rememberAccountName(client, token, names.get(token) ?? "", auth, configDir)
+          await rememberAccountFields(client, token, { name: names.get(token) ?? "", profile }, auth, configDir)
 
           return {
             plan: profile.plan,

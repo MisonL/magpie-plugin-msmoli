@@ -253,7 +253,9 @@ other way round), so the plugin works out each account's site from its token:
 
 1. The first read goes to the domestic site.
 2. Only a 401 sends it on to the international one.
-3. The answer is remembered for the rest of the process.
+3. The answer is remembered for the rest of the process, and an international
+   one is also kept on the sign-in (`site`), so a restarted host goes straight
+   there instead of paying the 401 again.
 
 The card's plan line tells you which site an account is on (`魔搭社区` or
 `魔搭社区（国际版）`), and a 401 names the site that refused.
@@ -347,6 +349,13 @@ flowchart LR
 When the touch went through but the ledger still shows nothing, the plugin
 asks magpie to look again half an hour later (`until`), once. Before Beijing
 noon magpie's own 30-minute re-ask already covers it.
+
+A `done` or `claimed` also carries the streak: how many Beijing days in a row
+the ledger shows a daily grant, today included. magpie prints it as
+`3-day streak` beside the outcome. It is counted from the same one page of the
+ledger the rest of the plugin reads, so it only ever reports a run it can see
+the end of — a run still going at the oldest row on a full page is left unsaid
+rather than printed short.
 
 <details>
 <summary><b>Endpoints and the ledger</b></summary>
@@ -490,9 +499,12 @@ parsed. The token lives only in magpie's own `plugin-auth.json`: the plugin
 never writes it anywhere, never logs it, and never sends it anywhere but the
 site it came from.
 
-The one thing it writes is that nickname, as `accountId` on the sign-in it
-already has, through the host's own `client.auth.set`. It hands back what the
-host gave it with the name added, so the token is still stored once.
+The plugin writes two things, both onto the sign-in it already has and through
+the host's own `client.auth.set`: the nickname, as `accountId` (so the card
+reads "Mison" instead of "API key …a1b2"), and, for an international account,
+the site as `site`. It hands back what the host gave it with those fields
+added, so the token is still stored once. An account on the domestic site
+carries no `site`: a probe tries that one first anyway.
 
 It reads `providers.json` for one thing only: whether you already named the
 account yourself. If you have, it writes nothing.

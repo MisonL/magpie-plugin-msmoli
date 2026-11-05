@@ -334,6 +334,153 @@ test("the site is remembered, so a later poll does not ask the other site", asyn
   assert.deepEqual(origins, [INTL_ORIGIN], "the second poll must not probe .cn again")
 })
 
+test("the check-in reads the kept site directly too, with no domestic probe", async () => {
+  // the check-in seeds the same cache the usage read does. Without it, the
+  // first thing a restarted host does for an international account — the
+  // check-in round — pays the domestic-site 401 even though the sign-in says
+  // which site it is.
+  testables.sites.clear()
+  const dir = tmpDir("msmoli-checkseedsite-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const token = "ms-intl-0000-0000-0000-000000000025"
+    const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async () => {} } } })
+    const responses = {
+      [TX_PATH]: bySite(
+        { status: 401, body: {} },
+        { body: { success: true, data: { records: [day()] } } },
+      ),
+      "/api/v1/users/login/info": bySite(
+        { status: 401, body: {} },
+        { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      ),
+    }
+    const { r, origins } = await withUrlFetch(responses, async (urls) => {
+      const r = await p.auth.checkin(async () => ({ type: "api", key: token, site: INTL_ORIGIN }))
+      return { r, origins: [...new Set(urls.map((u) => new URL(u).origin))] }
+    })
+    assert.equal(r.outcome, "done", r.message)
+    assert.deepEqual(origins, [INTL_ORIGIN], `a kept site is read directly: ${origins}`)
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("the site is written onto the sign-in, so a restarted host skips the 401", async () => {
+  // The in-memory cache above dies with the process. What survives is the
+  // sign-in in plugin-auth.json, and the host round-trips fields it does not
+  // know (parseAuth is plain JSON.parse, writeAuth serializes the whole
+  // object), so `site` is written there once instead of being re-probed after
+  // every restart.
+  testables.sites.clear()
+  const dir = tmpDir("msmoli-sitesave-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const token = "ms-intl-0000-0000-0000-000000000021"
+    const writes = []
+    const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
+    const responses = {
+      [TX_PATH]: bySite(
+        { status: 401, body: { message: "unauthorized" } },
+        { body: { success: true, data: { records: [] } } },
+      ),
+      "/api/v1/users/login/info": bySite(
+        { status: 401, body: { message: "unauthorized" } },
+        { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      ),
+    }
+    await withUrlFetch(responses, async () => {
+      await p.auth.checkin(async () => ({ type: "api", key: token }))
+    })
+    assert.equal(writes.length, 1, `the name and the site share one write: ${JSON.stringify(writes)}`)
+    assert.equal(writes[0].body.site, INTL_ORIGIN, "the site the token was found on is kept")
+    assert.equal(writes[0].body.accountId, "alice", "the name is written in the same write, not a second one")
+    assert.equal(writes[0].body.key, token)
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a sign-in carrying the site is read there directly, with no domestic probe", async () => {
+  // What the write above is for: after a restart, the memory is empty and only
+  // the sign-in remembers. The domestic site is not asked at all — the kept
+  // value is authoritative, not a hint that saves nothing.
+  testables.sites.clear()
+  const token = "ms-intl-0000-0000-0000-000000000022"
+  const responses = {
+    [BALANCE_PATH]: bySite(
+      { status: 401, body: {} },
+      { body: { success: true, data: { available_balance: 3 } } },
+    ),
+    [TX_PATH]: bySite({ status: 401, body: {} }, { body: { success: true, data: { records: [] } } }),
+  }
+  const { out, origins } = await withUrlFetch(responses, async (urls) => {
+    const out = await auth.usage(async () => ({ type: "api", key: token, site: INTL_ORIGIN }))
+    return { out, origins: [...new Set(urls.map((u) => new URL(u).origin))] }
+  })
+  assert.ok(!out.error, out.error)
+  assert.equal(out.plan, "魔搭社区（国际版）")
+  assert.deepEqual(origins, [INTL_ORIGIN], `a kept site must not be probed again: ${origins}`)
+})
+
+test("a site value the plugin does not know is ignored, not trusted", async () => {
+  // A hand-edited file, or a field a future host writes for its own reasons.
+  // Only the two sites the plugin serves are taken, and anything else falls
+  // back to the probe — a value read as a site would send the token, and
+  // through it the session, to an origin this plugin never chose.
+  testables.sites.clear()
+  const token = "ms-intl-0000-0000-0000-000000000023"
+  const responses = {
+    [BALANCE_PATH]: bySite(
+      { status: 401, body: {} },
+      { body: { success: true, data: { available_balance: 3 } } },
+    ),
+    [TX_PATH]: bySite({ status: 401, body: {} }, { body: { success: true, data: { records: [] } } }),
+  }
+  const { out, origins } = await withUrlFetch(responses, async (urls) => {
+    const out = await auth.usage(async () => ({ type: "api", key: token, site: "https://modelscope.evil.example" }))
+    return { out, origins: [...new Set(urls.map((u) => new URL(u).origin))] }
+  })
+  assert.ok(!out.error, out.error)
+  assert.deepEqual(origins, [CN_ORIGIN, INTL_ORIGIN], `an unknown site is not a site: ${origins}`)
+})
+
+test("a domestic sign-in carries no site field, because the probe tries it first", async () => {
+  // Writing the domestic site would cost a locked auth.set on every account
+  // and save no request: a probe already goes there first.
+  testables.sites.clear()
+  const dir = tmpDir("msmoli-cnsite-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+          body: { success: true, data: { records: [day()] } },
+        },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      },
+      async () => {
+        await p.auth.checkin(async () => ({ type: "api", key: "ms-cnsite-0000-0000-0000-000000000024" }))
+      },
+    )
+    assert.equal(writes.length, 1, "the name alone is worth a write")
+    assert.equal(writes[0].body.site, undefined, "the domestic site is not written")
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
 test("a domestic site that cannot be reached still lets an international token be found", async () => {
   // The domestic site can be unreachable on a network where the international
   // one answers — and the token is a fact, not a guess made from whichever
@@ -543,6 +690,111 @@ test("checkin reports done when the day already had daily_active", async () => {
       const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
       assert.equal(r.outcome, "done")
       assert.equal(r.credit, 200)
+    },
+  )
+})
+
+// ── The streak ──────────────────────────────────────────────────────────────
+// The host prints "{n}-day streak" beside a done/claimed answer only when the
+// result carries a streak (host.js: r.streak ? … : "" — num() reads anything
+// but a finite number as 0), so the plugin's whole job is to count the run
+// the ledger shows, and to say nothing when it cannot see the whole run.
+
+// daysBack is the Beijing date label `n` days before today, the shape
+// streakOf walks over.
+const daysBack = (n) =>
+  new Date(Date.parse(`${today}T00:00:00Z`) - n * 86400e3).toISOString().slice(0, 10)
+
+test("the check-in reports the run of daily grants ending today", async () => {
+  const records = [day(), day({ gmt_created: daysBack(1) }), day({ gmt_created: daysBack(2) })]
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000031" }))
+      assert.equal(r.outcome, "done")
+      assert.equal(r.streak, 3, `three days in a row: ${JSON.stringify(r)}`)
+    },
+  )
+})
+
+test("a day without a grant ends the run, and what came before it is not counted", async () => {
+  // today, no grant yesterday, grants on the two days before: the run is 1,
+  // not 3 — a streak counts consecutive days, not days.
+  const records = [day(), day({ gmt_created: daysBack(2) }), day({ gmt_created: daysBack(3) })]
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000032" }))
+      assert.equal(r.streak, 1, `a gap yesterday restarts the count: ${JSON.stringify(r)}`)
+    },
+  )
+})
+
+test("a claim that just landed reports the streak from the page it landed on", async () => {
+  // the claimed path reads the ledger again after the touch; the run has to
+  // come from that read, not from the empty one before it.
+  const real = globalThis.fetch
+  let reads = 0
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname !== "/openapi/v1/magicubes/transactions") {
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    reads += 1
+    const records = reads === 1 ? [] : [day(), day({ gmt_created: daysBack(1) })]
+    return reply({ body: { success: true, data: { records } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000033" }))
+    assert.equal(r.outcome, "claimed", r.message)
+    assert.equal(r.streak, 2, `today and yesterday: ${JSON.stringify(r)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a full page that may hide more of the run leaves the streak unsaid", async () => {
+  // PAGE_SIZE rows, all consecutive grants, no gap before the oldest one: the
+  // walk runs out of page with the run still going. Reporting the rows it saw
+  // would print a streak shorter than the real one, which is a wrong number
+  // on the card; the host prints nothing when the field is absent.
+  const records = Array.from({ length: 50 }, (_, i) => day({ gmt_created: daysBack(i) }))
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000034" }))
+      assert.equal(r.outcome, "done")
+      assert.equal(r.streak, undefined, `a run cut by the page is not a streak: ${JSON.stringify(r)}`)
+    },
+  )
+})
+
+test("a gap inside a full page still ends the run, and the count is kept", async () => {
+  // the truncation case above must not swallow the ordinary one: with a real
+  // gap in view — rows older than the gap are on the page — the run is known,
+  // and a full page does not change that.
+  const records = [
+    day(),
+    day({ gmt_created: daysBack(1) }),
+    ...Array.from({ length: 48 }, (_, i) => day({ gmt_created: daysBack(i + 3) })),
+  ]
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000035" }))
+      assert.equal(r.streak, 2, `today and yesterday, then a gap: ${JSON.stringify(r)}`)
     },
   )
 })
@@ -2010,7 +2262,7 @@ test("a write-back failure is retried later, and never logs the token", async ()
         await withClient.auth.checkin(async () => ({ type: "api", key: token }))
         assert.equal(attempts, 1)
         const logged = logs.map((l) => l.body?.message ?? "").join("\n")
-        assert.ok(logged.includes("account name not written back"), "the failure is logged")
+        assert.ok(logged.includes("account facts not written back"), "the failure is logged")
         // the two fields that decide where the line lands in magpie's log: a
         // wrong level buries it, a wrong service hides it from the filter
         assert.equal(logs[0].body.level, "warn", "it is a warning, not a debug line")
@@ -5252,7 +5504,7 @@ test("a host with no auth.set still gets its check-in, with the name simply not 
 })
 
 test("the nickname is written back before the hook answers", async () => {
-  // rememberAccountName is awaited on both paths: the host labels the account
+  // rememberAccountFields is awaited on both paths: the host labels the account
   // by the accountId, and a write that is still in flight when the card is
   // answered has not landed anywhere yet. Dropped, the check-in answers first
   // and the write races it — on a host that closes the plugin the moment the
