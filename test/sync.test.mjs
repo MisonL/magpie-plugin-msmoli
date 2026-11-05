@@ -20,7 +20,7 @@ import {
   sameFolder,
 } from "../bin/sync.mjs"
 
-// 假令牌：形状对，但明显不是真的（README 里的样例也是这个形状）
+// Fake token: the shape is right, but it is obviously not real (the sample in the README has the same shape)
 const A = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
 const B = "ms-bbbb1111-cccc-2222-dddd-333344445555"
 
@@ -43,7 +43,7 @@ test("presetCandidates finds the preset by id or by preset name", () => {
   ]
   assert.equal(presetCandidates(ps).length, 1)
   assert.equal(presetCandidates(ps)[0].id, "modelscope")
-  // --from 指定别的 id 时不去猜
+  // when --from names a different id, do not guess
   assert.equal(presetCandidates(ps, "nope").length, 0)
 })
 
@@ -223,9 +223,10 @@ test("every install location is probed, not only the first one on each OS", () =
   assert.ok(win.some((p) => p.startsWith("C:\\Program Files")), win.join(", "))
 })
 
-// Windows 下 Node 把 "/" 开头的参数翻成 "C:\..."，所以探测层的断言全部走
-// join()/pathToFileURL 生成期望值，而不是写死 POSIX 字面量——这些测试在
-// Linux/macOS 上跑出同样的值，在 Windows 上跑出各自的值。
+// On Windows, Node turns an argument starting with "/" into "C:\...", so every
+// assertion in the probing layer builds its expected value with
+// join()/pathToFileURL instead of hard-coding a POSIX literal—these tests
+// produce the same values on Linux/macOS and each platform's own values on Windows.
 test("findConfigDir reads XDG_CONFIG_HOME, then ~/.config, and nothing that isn't magpie's", () => {
   const xdgBase = pathToFileURL("/xdg").pathname.replace(/\/$/, "")
   const homeBase = pathToFileURL("/h").pathname.replace(/\/$/, "")
@@ -701,7 +702,7 @@ test("a failed login after a successful logout says how to recover", async () =>
 
 test("a providers.json with a BOM reads as JSON, not as nothing", () => {
   // Windows editors (and magpie's own #1821) write a BOM; Go strips it, so
-  // must the tool, or the preset would read as "未配置". The test goes
+  // must the tool, or the preset would read as "not configured". The test goes
   // through readJson — the tool's own reader — rather than stripping the BOM
   // itself, which would only prove the test can.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-bom-"))
@@ -712,7 +713,7 @@ test("a providers.json with a BOM reads as JSON, not as nothing", () => {
     assert.ok(raw && typeof raw === "object", "a BOM must not make the file unreadable")
     assert.deepEqual(presetCandidates(raw.providers).map((p) => p.id), ["modelscope"])
 
-    // and the whole tool sees it: a BOM'd config is not "未配置"
+    // and the whole tool sees it: a BOM'd config is not "not configured"
     const r = run(["--dir", dir, "--status"])
     assert.equal(r.status, 0, r.stderr)
     assert.doesNotMatch(r.stdout, /未配置/, "a BOM must not hide the preset")
@@ -2061,10 +2062,11 @@ test("a child killed by a signal is not reported as an exit code of null", async
 
 test("a failed login after a successful logout does not claim a logout on the first step", async () => {
   // e.recover is set for every step but the first: the first step is what
-  // FAILED, so nothing has run yet and "前面的步骤已经执行，现有登录已被登出"
-  // would be a lie that reads as "your sign-in is gone". As `i > -1` every
-  // step carries it. The two-step tests above assert the line's presence on
-  // later steps; nothing asserted its absence on the first.
+  // FAILED, so nothing has run yet, and the line saying the earlier steps ran
+  // and the existing sign-in was logged out would be a lie that reads as "your
+  // sign-in is gone". As `i > -1` every step carries it. The two-step tests
+  // above assert the line's presence on later steps; nothing asserted its
+  // absence on the first.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-step0-"))
   try {
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
@@ -2181,8 +2183,8 @@ test("--to-preset refuses a token the plugin itself could not send", async () =>
 test("--to-plugin refuses a key the plugin itself could not send", async () => {
   // The same rule, the other direction: the plugin refuses a key with
   // anything but visible ASCII in it (tokenOf), so logging one in signs the
-  // account in and leaves every check-in saying "令牌内容无法识别" — a
-  // success the tool reports for a key that cannot work.
+  // account in and leaves every check-in saying the token content is
+  // unrecognized — a success the tool reports for a key that cannot work.
   for (const bad of ["ms-bbbb1111-cccc-2222-ddd d-333344445555", "ms-bbbb1111-cccc-2222-ddd​d-333344445555"]) {
     const plan = planToPlugin({ preset: presetOf(bad), accounts: [], force: false })
     assert.equal(plan.action, "refuse", JSON.stringify(bad))
@@ -2330,9 +2332,9 @@ test("a folder named providers.json is not magpie's file, as appdir's hasFiles s
 
 test("--to-preset is a no-op when a second account already holds the preset's token", () => {
   // The state a forced replace leaves behind: only msmoli#xxxxxx exists, and
-  // its token is the one the preset already has. --to-plugin answers 无需操作
-  // for the same pair of files; --to-preset used to refuse with "主账号没有
-  // 登录", which reads as "your plugin is signed out".
+  // its token is the one the preset already has. --to-plugin answers "nothing
+  // to do" for the same pair of files; --to-preset used to refuse saying the
+  // main account was not signed in, which reads as "your plugin is signed out".
   const p = planToPreset({ preset: presetOf(A), accounts: [{ name: "msmoli#abc123", token: A }], force: false })
   assert.equal(p.action, "noop")
   assert.match(p.lines.join("\n"), /无需操作/)
@@ -2340,7 +2342,7 @@ test("--to-preset is a no-op when a second account already holds the preset's to
 
 test("a provider that is ours but has no key is told to fill it in, not to add it again", async () => {
   // providers.json keeps providers without keys (magpie writes its own plugin
-  // providers that way). "添加 ModelScope" names one the user already has, and
+  // providers that way). "Add ModelScope" names one the user already has, and
   // with --from the old message said the chat host was not ModelScope's —
   // about a provider whose chat points at exactly that host.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-keyless-"))
@@ -2450,8 +2452,9 @@ test("two spellings of one folder on a case-folding volume are one folder", () =
   }
 })
 
-// ---- 第 18 轮：宽变异扫描在 bin/sync.mjs 上留下 27 个存活位点，以下钉住其中
-// 确认真实差异的那些（等价变异的判定见各条注释）
+// ---- Round 18: the wide mutation sweep on bin/sync.mjs left 27 surviving
+// sites; the ones below pin down those confirmed to make a real difference
+// (how equivalent mutants are judged is in each comment)
 
 test("a token-shaped run is masked whatever its first character and length", async () => {
   // show() masks token-shaped runs so a key pasted where an id belongs never
@@ -2503,7 +2506,7 @@ test("a second account holding a different token is not 'the same token'", () =>
   // planToPreset's no-op branch is for the state a forced replace leaves: some
   // account already holds the preset's token. Written `a.token || a.token ===
   // preset.key`, any account with any token answers yes, and the tool reports
-  // 无需操作 naming an account whose token is not the preset's — while the
+  // "nothing to do" naming an account whose token is not the preset's — while the
   // user's actual plugin sign-in is missing.
   const p = planToPreset({
     preset: { id: "modelscope", preset: "modelscope", key: A },
@@ -2586,7 +2589,7 @@ test("a provider that is ours by id alone is still ours, and one that is not our
   // any pair, a provider the user added as id=modelscope stops being ours and
   // the tool tells them to add ModelScope over the one they have. And `bare`'s
   // `oursOf && blankKey` read as `||` names any keyless provider — an OpenAI
-  // one — as "内置侧的 openai 在，但还没有 key".
+  // one — as "the built-in side has openai, but no key yet".
   const ours = mkdtempSync(join(tmpdir(), "msmoli-ours-"))
   const notOurs = mkdtempSync(join(tmpdir(), "msmoli-notours2-"))
   try {
@@ -2629,8 +2632,8 @@ test("a key that is not a string does not take the check-in down with it", async
 test("a --to-plugin --force that lands one account is a success, not a second account", async () => {
   // The read-back counts accounts only when the plan had more than one step
   // *and* the file now holds more than one — both, because either alone is
-  // normal. Read as `||`, every successful forced sync reports "回读发现插件
-  // 现在有 1 个账号" and exits 1.
+  // normal. Read as `||`, every successful forced sync reports that the
+  // read-back found 1 account in the plugin now and exits 1.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-readback-"))
   try {
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", key: B }] }))
@@ -2783,12 +2786,12 @@ test("the shared-folder rule looks in the XDG folder when one is set", () => {
   )
 })
 
-// ── 第二十四轮：操作符与集合判断 ─────────────────────────────────────────
+// ── Round 24: operators and set checks ──────────────────────────────────
 
 test("the preset direction's read-back fails when the list it reads is empty", async () => {
   // `every` on an empty list is vacuously true. A write that lands but leaves
   // providers.json without a candidate — an emptied list, a provider that was
-  // renamed away — then passed the read-back and printed ✓ 完成 with nothing
+  // renamed away — then passed the read-back and printed "✓ done" with nothing
   // written, the one outcome this check exists to prevent.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-emptyback-"))
   try {
@@ -3129,17 +3132,20 @@ test("a line of only spaces in the child's output is not echoed as a line", asyn
   }
 })
 
-// ── 第二十六轮：语句级宽扫 ──────────────────────────────────────────────
-// 与 plugin.test.mjs 同一轮：整条语句被掏空/删掉。下面是探针测出真实差异的
-// 位点；等价变异记录在各条注释里。
+// ── Round 26: statement-level wide sweep ────────────────────────────────
+// The same round as plugin.test.mjs: whole statements hollowed out or deleted.
+// Below are the sites where the probes measured a real difference; equivalent
+// mutants are recorded in each comment.
 
 test("sameFolder's resolved match decides before the volume is asked", () => {
-  // 两边 realpath 之后字符串相等时，第一条守卫直接答 true，根本不去 stat。
-  // 掏空它，每一对相等的路径都落到 inode 比较；报 ino=0 的卷（exFAT、部分
-  // SMB）上没有身份可比，同一个文件夹会被判成两个——正是 --dir 守卫承诺
-  // 不再犯的那个错。
-  // 两处拼写都解析成同一串：identity real 配一条把 "X/." 折成 "X" 的规则，
-  // 平台无关——真机上的 /tmp 与 /private/tmp 是同一形状（macOS 才有）。
+  // When the two realpath strings are equal, the first guard answers true
+  // outright and never stats at all. Hollow it out and every pair of equal
+  // paths falls through to the inode comparison; on volumes that report ino=0
+  // (exFAT, some SMB) there is no identity to compare, and one folder is
+  // judged as two—exactly the mistake the --dir guard promises not to repeat.
+  // Both spellings resolve to the same string: identity real plus a rule that
+  // folds "X/." into "X", platform-independent—on a real machine /tmp and
+  // /private/tmp have the same shape (macOS only).
   const real = (p) => (p.endsWith("/.") ? p.slice(0, -2) : p)
   const statThrows = () => {
     throw new Error("EACCES")
@@ -3151,9 +3157,11 @@ test("sameFolder's resolved match decides before the volume is asked", () => {
 })
 
 test("a folder the volume cannot resolve is never another folder's match", () => {
-  // 第二条守卫在任一边解析失败（""）时直接答 false。掏空它，"" 也会被送去
-  // stat；注入的 stat 若对空路径也给一个身份，两个无从解析的路径就被当成
-  // 同一个文件夹——工具会往 magpie 从未建过的目录里写。
+  // The second guard answers false outright when either side fails to resolve
+  // (""). Hollow it out and "" is sent to stat too; if the injected stat gives
+  // an identity even to an empty path, two paths that cannot be resolved are
+  // taken for the same folder—the tool would write into a directory magpie
+  // never created.
   const real = (p) => (p.startsWith("/nope") ? "" : p)
   const stat = () => ({ ino: 42, dev: 1 })
   assert.equal(sameFolder("/nope", "/tmp", real, stat), false, "missing vs real is not one folder")
@@ -3162,13 +3170,15 @@ test("a folder the volume cannot resolve is never another folder's match", () =>
 })
 
 test("isMain's URL match decides before the volume is asked", () => {
-  // 解析后的入口与 import.meta.url 逐字相等时直接答 true，不问 stat。掏空它，
-  // 一个 stat 抛错的卷（权限墙、掉线的共享）会让 catch 把「这是入口」翻成
-  // 「不是」——整个 sync.mjs 静默跳过，不打印任何东西、退出码 0，用户以为
-  // 同步成功了。
+  // When the resolved entry is literally equal to import.meta.url it answers
+  // true outright, without asking stat. Hollow it out and, on a volume where
+  // stat throws (a permission wall, a dropped share), the catch turns "this is
+  // the entry" into "it is not"—the whole sync.mjs is silently skipped, prints
+  // nothing, exits 0, and the user believes the sync succeeded.
   const real = (p) => p
-  // 用 join 与 pathToFileURL 自己造入口与它的 URL：Windows 上盘符与分隔符
-  // 都不同，写死的 "/x/bin/sync.mjs" 在那边根本对不上
+  // Build the entry and its URL with join and pathToFileURL ourselves: on
+  // Windows both the drive letter and the separator differ, and a hard-coded
+  // "/x/bin/sync.mjs" would not match there at all
   const entry = join("x", "bin", "sync.mjs")
   const self = pathToFileURL(entry).href
   const statZero = () => ({ ino: 0, dev: 1 })
@@ -3181,10 +3191,12 @@ test("isMain's URL match decides before the volume is asked", () => {
 })
 
 test("a chat that is not a string does not make a provider ours", () => {
-  // hostOf 先要求 chat 是字符串再交给 new URL。掏空这条守卫后，new URL 会先
-  // 把数组 / String 对象转成字符串：["https://api-inference.modelscope.cn/v1"]
-  // 转出来正好是那个地址，于是一个 chat 字段形状不对的 provider 被当成内置的
-  // ModelScope 预设——--to-plugin 会把它的 key 当成 ms 令牌登录给插件。
+  // hostOf first requires chat to be a string before handing it to new URL.
+  // Hollow out that guard and new URL stringifies the array / String object
+  // first: ["https://api-inference.modelscope.cn/v1"] stringifies to exactly
+  // that address, so a provider whose chat field has the wrong shape is taken
+  // for the built-in ModelScope preset—--to-plugin would log its key in to
+  // the plugin as an ms token.
   assert.deepEqual(presetCandidates([{ id: "evil", key: A, chat: ["https://api-inference.modelscope.cn/v1"] }]), [])
   assert.deepEqual(
     presetCandidates([{ id: "evil", key: A, chat: new String("https://api-inference.modelscope.cn/v1") }]),
@@ -3254,7 +3266,7 @@ test("planToPreset's refusals name the account and where the preset comes from",
     `✗ 插件主账号（msmoli）没有登录，没有可同步的令牌。`,
     `  先用 magpie plugin login msmoli 登录，或用 --to-plugin 从内置预设同步。`,
   ])
-  // main() 先把缺预设拦下，但 planToPreset 是导出的，direct 调用不能少这两行
+  // main() stops on a missing preset first, but planToPreset is exported, so a direct call must not be missing these two lines
   const noPreset = planToPreset({ preset: null, accounts: [{ name: "msmoli", token: A }], force: false })
   assert.equal(noPreset.action, "refuse")
   assert.deepEqual(noPreset.lines, [
@@ -3299,9 +3311,11 @@ test("planToPreset refuses a plugin token the CLI could not send", () => {
 })
 
 test("a file that is there but unreadable is refused with the don't-guess line", async () => {
-  // 每个「存在但读不出来」的分支都是两行：哪一行文件坏了，以及「别猜它的
-  // 内容」。只留第一行，用户会自己去猜——而猜错就是覆盖一份可能还救得回来
-  // 的状态。四种形状共用第二行，各自走各自的守卫。
+  // Every "present but unreadable" branch is two lines: which file is broken,
+  // and "do not guess its content". Keep only the first line and the user
+  // will guess on their own—and guessing wrong overwrites a state that might
+  // still have been recoverable. All four shapes share the second line, each
+  // through its own guard.
   const cases = [
     { name: "providers.json 不解析", prov: "{ not json", auth: JSON.stringify({ msmoli: { type: "api", key: B } }) },
     { name: "plugin-auth.json 不解析", prov: JSON.stringify({ providers: [presetOf(A)] }), auth: "{ broken" },
@@ -3322,7 +3336,7 @@ test("a file that is there but unreadable is refused with the don't-guess line",
         },
       })
       assert.equal(code, 1, c.name)
-      // 报头（配置目录）在前面，拒绝自己是最后两行
+      // the header (the config folder) comes first; the refusal itself is the last two lines
       const tail = out.slice(-2)
       assert.equal(tail.length, 2, `${c.name}: both lines, got ${JSON.stringify(out)}`)
       assert.match(tail[0], /存在但读不出来|存在但|不是列表/, `${c.name}: the first line says which file and why`)
@@ -3394,22 +3408,22 @@ test("--from and a bare run each say what to do next", async () => {
       rmSync(dir, { recursive: true, force: true })
     }
   }
-  // --from 指向一个我们自己的、但还没有 key 的 provider
+  // --from names one of ours that has no key yet
   let r = await run([{ id: "modelscope", preset: "modelscope" }], ["--from", "modelscope"])
   assert.equal(r.code, 1)
   assert.match(r.text, /✗ "modelscope" 在，但还没有 key，没有可同步的令牌。/)
   assert.match(r.text, /  用 magpie provider key modelscope <key> 写入。/, "and names the command that fills it in")
-  // --from 指向一个存在但不是我们的 provider
+  // --from names a provider that exists but is not ours
   r = await run([{ id: "openai", preset: "openai", key: "sk-x" }], ["--from", "openai"])
   assert.equal(r.code, 1)
   assert.match(r.text, /✗ "openai" 在，但它不是 ModelScope：chat 不指向 api-inference\.modelscope\.cn，id\/preset 也不是 modelscope。/)
   assert.match(r.text, /  这个工具只同步内置的 ModelScope 预设与插件登录态之间的令牌。/, "and says what the tool does sync")
-  // --from 什么都没匹配到
+  // --from matched nothing
   r = await run([{ id: "openai", preset: "openai", key: "sk-x" }], ["--from", "typo"])
   assert.equal(r.code, 1)
   assert.match(r.text, /✗ 内置侧没有 id 为 "typo" 的 provider。/)
   assert.match(r.text, /  用 --status 看现有的，或先 magpie provider add typo <key>。/)
-  // 不带 --from，内置侧一个我们的都没有
+  // no --from, and the built-in side has none of ours
   r = await run([{ id: "openai", preset: "openai", key: "sk-x" }], [])
   assert.equal(r.code, 1)
   assert.match(r.text, /✗ 内置侧没有带 key 的 ModelScope 预设。/)
@@ -3417,9 +3431,10 @@ test("--from and a bare run each say what to do next", async () => {
 })
 
 test("--dir and --magpie pointing at different folders names both", async () => {
-  // 读一个目录、写另一个目录，正是这条守卫存在的理由；三行里的每一行都是
-  // 用户对齐两个参数所需要的信息：读的是哪个、magpie 会写到哪个、为什么
-  // 不能用 --dir 让它跟过来。
+  // Reading one folder and writing another is precisely why this guard
+  // exists; every one of the three lines is information the user needs to
+  // align the two arguments: which one was read, which one magpie will write
+  // to, and why --dir cannot make it follow.
   const home = mkdtempSync(join(tmpdir(), "msmoli-home-"))
   const dir = mkdtempSync(join(tmpdir(), "msmoli-misdir-"))
   try {
@@ -3448,9 +3463,10 @@ test("--dir and --magpie pointing at different folders names both", async () => 
 })
 
 test("a read-back that finds two accounts says the old one was not logged out", async () => {
-  // logout 退出码 0 却没真删时，login 会把新令牌加成第二个账号；「有一个
-  // 账号拿着目标令牌」照样成立，但那正是 planToPlugin 说 --force 不适用的
-  // 状态。回读要数账号，并说清是怎么变成两个的。
+  // When logout exits 0 without really deleting, login adds the new token as a
+  // second account; "one account holds the target token" still holds, but that
+  // is exactly the state planToPlugin says --force does not apply to. The
+  // read-back must count accounts and say how it became two.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-dbl-"))
   try {
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
@@ -3479,8 +3495,9 @@ test("a read-back that finds two accounts says the old one was not logged out", 
 })
 
 test("a read-back that cannot be read says which page to check", async () => {
-  // 读不动是「写入成功了但没法确认」，不是「没找到令牌」——后者会把人推去查
-  // magpie 是否在运行。两个方向看的页面不同，所以 where 也要对。
+  // Unreadable means "the write succeeded but cannot be confirmed", not "the
+  // token was not found"—the latter sends people to check whether magpie is
+  // running. The page to look at differs by direction, so where must be right too.
   let dir = mkdtempSync(join(tmpdir(), "msmoli-rb-"))
   try {
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
@@ -3524,16 +3541,18 @@ test("a read-back that cannot be read says which page to check", async () => {
 })
 
 test("--help answers with a success code", async () => {
-  // 掏空 `return 0` 后 main 返回 undefined；isMain 那段把它塞进 exitCode，
-  // 生产里仍是 0，但 main 的返回值就是它对调用方的契约，每条路径都该是数字。
+  // Hollow out `return 0` and main returns undefined; the isMain block puts
+  // that into exitCode, so production is still 0, but main's return value is
+  // its contract with the caller, and every path should be a number.
   const code = await main({ argv: ["--help"], log: () => {} })
   assert.equal(code, 0)
 })
 
 test("a bare --dry-run says both that it needs a direction and that nothing ran", async () => {
-  // 不带 --to-* 时只报计划：第一行说方向，第二行（只在 --dry-run 时）说没有
-  // 执行。第二行被删掉，一次 --dry-run 的裸跑看起来就像跑过了——用户带着
-  // 「已经同步」的印象离开。两条都要在。
+  // Without --to-* it only reports the plan: the first line says the
+  // direction, the second (only under --dry-run) says nothing ran. Delete the
+  // second line and a bare --dry-run looks as if it ran—the user leaves with
+  // the impression that it already synced. Both lines must be there.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-baredry-"))
   try {
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
@@ -3555,10 +3574,11 @@ test("a bare --dry-run says both that it needs a direction and that nothing ran"
 })
 
 test("a root-relative XDG_CONFIG_HOME is rooted when the OS is simulated as win32", () => {
-  // rooted() 的 os 参数是给「在 mac 上测 windows」用的：真 windows 上
-  // path.isAbsolute("\\rel") 本来就是 true，这一条让模拟走同一条路。少了
-  // 它，模拟出来的 win32 把 \rel 当成相对路径，转去读 ~/.config，判定
-  // 便携 data 文件夹归属时问错了目录。
+  // rooted()'s os parameter exists for "testing Windows on a Mac": on real
+  // Windows path.isAbsolute("\\rel") is already true, and this lets the
+  // simulation take the same path. Without it, the simulated win32 treats
+  // \rel as a relative path, goes off to read ~/.config, and asks the wrong
+  // directory when deciding which portable data folder it belongs to.
   const home = sep === "\\" ? "C:\\u" : "/home/u"
   const xdg = "\\rel"
   const data = join(home, "data")
@@ -3576,9 +3596,10 @@ test("a root-relative XDG_CONFIG_HOME is rooted when the OS is simulated as win3
 })
 
 test("two install locations say which one wins", () => {
-  // 搜索顺序就是优先顺序：两个位置都装了 magpie 时用的是排在前面的那个。
-  // 交换前两个候选，Intel Homebrew 的 /usr/local/bin 会让给 /usr/bin 上
-  // 那个来路不明的二进制——令牌在它手上。
+  // Search order is priority order: when magpie is installed in both places,
+  // the one listed first wins. Swap the first two candidates and Intel
+  // Homebrew's /usr/local/bin yields to the binary of unknown origin in
+  // /usr/bin—and the token is in its hands.
   const both = new Set(["/usr/local/bin/magpie", "/usr/bin/magpie"])
   assert.equal(
     findMagpieBin({ os: "linux", env: {}, home: "/h", exists: (p) => both.has(p) }),
@@ -3587,9 +3608,10 @@ test("two install locations say which one wins", () => {
 })
 
 test("the read-back checks the provider it wrote to, not any provider holding the key", async () => {
-  // --to-preset 写的是 --from 指名的那个 provider。回读如果按默认规则找
-  // （任意 ModelScope 预设），另一个恰好拿着同一把 key 的 provider 就能让
-  // 一次没落地的写入报「✓ 完成」——用户以为同步好了，实际没换。
+  // --to-preset writes to the provider --from named. If the read-back uses
+  // the default rule (any ModelScope preset), another provider that happens to
+  // hold the same key can make a write that never landed report "✓ done"—the
+  // user thinks it synced, but nothing changed.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-rbid-"))
   try {
     writeFileSync(
@@ -3601,7 +3623,7 @@ test("the read-back checks the provider it wrote to, not any provider holding th
     const code = await main({
       argv: ["--dir", dir, "--to-preset", "--from", "alt", "--force", "--magpie", "/nonexistent"],
       log: (s) => out.push(s),
-      // 写入没落地：magpie 退出码 0 却没动手，alt 上还是 A
+      // the write did not land: magpie exited 0 but did nothing, and alt still has A
       spawn: () => ({ status: 0, stdout: "", stderr: "" }),
     })
     assert.equal(code, 1, "the write did not land, and the tool must say so")
@@ -3612,12 +3634,14 @@ test("the read-back checks the provider it wrote to, not any provider holding th
 })
 
 test("the config files are read through the exists main was given", async () => {
-  // exists 是 main 的注入点：一个 stat 得到、读却读不动的文件（正在被写、
-  // 权限被收紧）走的正是这条缝。它决定「有但读不出来」。丢了这个实参，
-  // 同一个文件成了「没配置」——把人引去新建一个已经存在的 provider。
+  // exists is main's injection point: a file stat can see but cannot be read
+  // (being written, permissions tightened) goes through exactly this seam. It
+  // decides "present but unreadable". Drop this argument and the same file
+  // becomes "not configured"—sending the user to create a provider that
+  // already exists.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-seam1-"))
   try {
-    // providers.json 不在盘上，exists 说在：读不动
+    // providers.json is not on disk, but exists says it is: unreadable
     writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
     const out = []
     const code = await main({
@@ -3633,7 +3657,7 @@ test("the config files are read through the exists main was given", async () => 
   }
   const dir2 = mkdtempSync(join(tmpdir(), "msmoli-seam2-"))
   try {
-    // providers.json 在，plugin-auth.json 不在盘上而 exists 说在
+    // providers.json is there; plugin-auth.json is not on disk but exists says it is
     writeFileSync(join(dir2, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
     const out = []
     const code = await main({
@@ -3650,10 +3674,12 @@ test("the config files are read through the exists main was given", async () => 
 })
 
 test("the read-back asks the same exists the pre-check did", async () => {
-  // 写入之后 magpie 可能正在重写文件：exists 说在、读却读不动。回读这时要
-  // 说「写入已执行，但没法确认」，不是「没找到令牌」——后者会把人送去查
-  // magpie 为什么没运行，而写入其实已经落地。丢了这个实参，回读改用
-  // existsSync，两句就换了个说法。
+  // After the write magpie may be rewriting the file: exists says it is there,
+  // the read cannot read it. The read-back must then say "the write ran but
+  // cannot be confirmed", not "the token was not found"—the latter sends people
+  // to check why magpie is not running, when the write actually landed. Drop
+  // this argument, the read-back falls back to existsSync, and the two
+  // sentences say something else.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-seam3-"))
   try {
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
@@ -3664,7 +3690,7 @@ test("the read-back asks the same exists the pre-check did", async () => {
       log: (s) => out.push(s),
       exists: (p) => p === join(dir, "providers.json") || p === join(dir, "plugin-auth.json"),
       spawn: (_cmd, argv) => {
-        // login 之后文件短暂不在盘上；exists 仍然答「在」，读就是读不动
+        // right after login the file is briefly not on disk; exists still answers "yes", so the read cannot read it
         if (argv.includes("login")) rmSync(join(dir, "plugin-auth.json"))
         return { status: 0, stdout: "", stderr: "" }
       },
@@ -3696,30 +3722,33 @@ test("the read-back asks the same exists the pre-check did", async () => {
 })
 
 test("a path that is not given is not the folder named 'undefined'", () => {
-  // norm 的 `String(p ?? "")`：undefined/null 读成空串，norm 早退成 ""，
-  // `sameFolder(undefined, undefined)` 因此是 false——两个「没给路径」不是
-  // 同一个文件夹，正是注释里那条「不存在的两个文件夹永不相等」。漏掉默认
-  // 值，String(undefined) = "undefined" 成了一个非空串，两边都解析成同一个
-  // 词，方法说「是同一个」。
+  // norm's `String(p ?? "")`: undefined/null read as the empty string, norm
+  // returns "" early, and `sameFolder(undefined, undefined)` is therefore
+  // false—two "no path given" values are not the same folder, exactly the
+  // "two nonexistent folders are never equal" rule in the comment. Miss the
+  // default and String(undefined) = "undefined" becomes a non-empty string,
+  // both sides resolve to the same word, and the method says "they are the same".
   const identity = (p) => p
   const stat = () => ({ ino: 1, dev: 1 })
   assert.equal(sameFolder(undefined, undefined, identity, stat), false)
   assert.equal(sameFolder(null, null, identity, stat), false)
   assert.equal(sameFolder(undefined, "undefined", identity, stat), false)
   assert.equal(sameFolder("undefined", undefined, identity, stat), false)
-  // 两个都写着 "undefined" 的字符串仍然是同一个（这是两个真实的词）
+  // two strings both spelled "undefined" are still the same (these are two real words)
   assert.equal(sameFolder("undefined", "undefined", identity, stat), true)
-  // 0 / false 不是 nullish：`??` 保留它们，String 之后是 "0" / "false"，两个
-  // 同一个值仍是同一个文件夹；`||` 会把它们读成空串，一对相等的东西变成
-  // 「都没给路径」。
+  // 0 / false are not nullish: `??` keeps them, and String makes them "0" /
+  // "false", so two of the same value are still the same folder; `||` would
+  // read them as the empty string and turn a pair of equals into "no path was
+  // given".
   assert.equal(sameFolder(0, 0, identity, stat), true)
   assert.equal(sameFolder(false, false, identity, stat), true)
 })
 
 test("a provider with no id is not displayed as 'undefined'", async () => {
-  // show 的 `String(s ?? "")`：providers.json 里一条没有 id 的预设，状态行
-  // 该写「内置 ModelScope：（ms-a…5555）」，不是「undefined（…）」。`||` 那侧
-  // 是数字 0/false 的 id：它们是真值，`String(0)` = "0" 应当显示出来。
+  // show's `String(s ?? "")`: for a preset row in providers.json with no id,
+  // the status line should read "built-in ModelScope: (ms-a…5555)", not
+  // "undefined (…)". The `||` side is numeric 0/false ids: they are truthy,
+  // and `String(0)` = "0" should be displayed.
   for (const [id, want] of [
     [undefined, "内置 ModelScope：（ms-a…0000）"],
     [null, "内置 ModelScope：（ms-a…0000）"],
@@ -3746,12 +3775,14 @@ test("a provider with no id is not displayed as 'undefined'", async () => {
   }
 })
 
-// ── 第三十轮：与插件同一批修复（账号类型规则、空令牌拒绝、片段掩码）──────
+// ── Round 30: same batch of fixes as the plugin (account-type rule, empty-token refusal, fragment masking) ──
 
 test("a plugin account is one the plugin could actually read: type api, key a string", () => {
-  // 插件自己（index.mjs 的 rawKey）只认 type === "api" 的 key。本工具少这一条
-  // 时，一份把令牌放错类型或位置的 plugin-auth.json 会让它说「已用同一把令牌、
-  // 无需操作」，而插件读不到、卡片永远显示未登录——一个静默的错误状态。
+  // The plugin itself (rawKey in index.mjs) only accepts keys with
+  // type === "api". Without that rule the tool, given a plugin-auth.json
+  // whose token sits in the wrong type or place, would say "already using the
+  // same token, nothing to do" while the plugin cannot read it and the card
+  // shows signed out forever—a silently wrong state.
   const auth = {
     msmoli: { type: "api", key: A },
     "msmoli#oauth": { type: "oauth", key: B },
@@ -3765,20 +3796,22 @@ test("a plugin account is one the plugin could actually read: type api, key a st
 })
 
 test("a plugin entry whose token cannot be read is a refusal, not 'tokens differ'", () => {
-  // 全部条目都读不出令牌时，「两边令牌不同」是一句我们说不出的话——插件那一侧
-  // 根本没读到。--force 也帮不上：问题在文件，不在选择。
+  // When no entry yields a token, "the tokens differ" is something we cannot
+  // say—the plugin side was not read at all. --force does not help either: the
+  // problem is the file, not the choice.
   const p = planToPlugin({ preset: presetOf(A), accounts: [{ name: "msmoli", token: "" }], force: false })
   assert.equal(p.action, "refuse")
   assert.match(p.lines.join("\n"), /条目读不出令牌/)
   assert.equal(p.cmds.length, 0)
-  // 只要有一个能读，其余照旧走「不同」那条
+  // as long as one can be read, the rest still take the "differ" branch
   const mixed = planToPlugin({ preset: presetOf(A), accounts: [{ name: "msmoli", token: "" }, { name: "msmoli#x", token: B }], force: false })
   assert.match(mixed.lines.join("\n"), /两边令牌不同/)
 })
 
 test("a fragment of a secret in the child's output is masked too", async () => {
-  // 子进程（或它背后的厂商）回显时可能只带令牌的一段，那不再等于整串，split()
-  // 走过去了。scrub 的 maskEchoes 按「连续子串、长度 ≥ MIN_ECHO」把片段掩掉。
+  // When the child (or the vendor behind it) echoes back only a fragment of
+  // the token, it no longer equals the whole string and split() walks past it.
+  // scrub's maskEchoes masks fragments by "contiguous substring, length >= MIN_ECHO".
   const dir = mkdtempSync(join(tmpdir(), "msmoli-fragmask-"))
   try {
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
@@ -3799,9 +3832,10 @@ test("a fragment of a secret in the child's output is masked too", async () => {
 })
 
 test("a token-shaped run with an underscore in the child's output is masked", async () => {
-  // 老写法 /ms-[A-Za-z0-9][A-Za-z0-9-]{10,}/ 漏掉下划线、点、波浪号；而插件
-  // 的 SENDABLE 允许可打印 ASCII 全部。形状规则要对齐，否则一个真带下划线的
-  // 令牌被 magpie 回显时原样放行。
+  // The old pattern /ms-[A-Za-z0-9][A-Za-z0-9-]{10,}/ missed underscores,
+  // dots and tildes; the plugin's SENDABLE allows all printable ASCII. Shape
+  // rules have to line up, or a real token with an underscore goes through
+  // verbatim when magpie echoes it.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-underscore-"))
   try {
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
@@ -3821,8 +3855,10 @@ test("a token-shaped run with an underscore in the child's output is masked", as
 })
 
 test("a secret echoed as a run of the text keeps the lines around it intact", async () => {
-  // scrub 之前整段过 show()，而 show 的控制字符替换会把 \n 也换成空格，两次
-  // 调用都靠 split("\n") 分行回显/引用。改成逐行 show，行结构不能坏。
+  // Before, scrub passed the whole block through show(), and show's control-
+  // character replacement turns \n into a space too; both calls rely on
+  // split("\n") to echo/quote line by line. Switch to per-line show, and the
+  // line structure must not break.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-lines-"))
   try {
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
@@ -3841,10 +3877,12 @@ test("a secret echoed as a run of the text keeps the lines around it intact", as
 })
 
 test("a secret that is not ms-shaped is masked in the echoed command too", async () => {
-  // hidden() 的 `secret && a === secret` 是掩码用的那一支：只有按位置相等才掩。
-  // 把它拿掉，剩下的 show(a) 只认 ms-… 的形状，一个不以 ms- 开头的真凭据
-  // （--to-preset 写进 argv 的那把，来自插件里存着的任何 key）就原样打印。
-  // 这条是 hidden() 的 secret 分支在「形状规则帮不上忙」时的唯一覆盖。
+  // hidden()'s `secret && a === secret` is the masking branch: mask only on
+  // positional equality. Remove it and the remaining show(a) only recognises
+  // the ms-… shape, so a real credential not starting with ms- (the one
+  // --to-preset puts into argv, any key stored in the plugin) is printed
+  // verbatim. This is the only coverage for hidden()'s secret branch when
+  // shape rules cannot help.
   const plain = "plainsecretvalue1234567890"
   const dir = mkdtempSync(join(tmpdir(), "msmoli-plainsecret-"))
   try {
@@ -3867,8 +3905,9 @@ test("a secret that is not ms-shaped is masked in the echoed command too", async
   }
 })
 
-// ── 第三十一轮：复查批次（不可见字符切开令牌、运行时报错回显路径、写入守卫
-// 在 Windows 扩展名下跳过、非 ms 形状的值、回读的形状、重复参数）──────────
+// ── Round 31: review batch (invisible characters splitting a token, runtime
+// errors echoing a path, the write guard skipped under the Windows extension,
+// non-ms-shaped values, read-back shapes, repeated arguments) ──────────────
 
 // both files written: tests that stub exists() say they are there
 const fixture = (prefix, providers = [presetOf(A)], auth = {}) => {
@@ -3879,8 +3918,10 @@ const fixture = (prefix, providers = [presetOf(A)], auth = {}) => {
 }
 
 test("a token cut by an invisible character is still masked where it is printed", async () => {
-  // show() 先把控制/格式字符换成空格、再按形状掩码：零宽空格（聊天软件复制
-  // 令牌时常夹带）或 \x01 把令牌切成两段，每段都不够长度下限，整串原样上终端。
+  // show() first replaces control/format characters with spaces, then masks
+  // by shape: a zero-width space (often carried along when a token is copied
+  // from a chat app) or \x01 splits the token into two pieces, each below the
+  // length floor, and the whole string reaches the terminal verbatim.
   const dir = fixture("msmoli-zwsp-")
   try {
     for (const cut of ["\u200b", "\x01", "\u2060"]) {
@@ -3899,8 +3940,9 @@ test("a token cut by an invisible character is still masked where it is printed"
 })
 
 test("a secret echoed with an invisible character inside it is masked whole", async () => {
-  // scrub 的 maskEchoes 按连续子串找片段：子进程回显里令牌中间夹一个 \x01，
-  // 前 11 个字符不到 MIN_ECHO，原样留下。不可见字符要被跨过。
+  // scrub's maskEchoes finds fragments as contiguous substrings: when the
+  // child's echo has a \x01 inside the token, the first 11 characters are
+  // below MIN_ECHO and stay as they are. Invisible characters must be skipped over.
   const dir = fixture("msmoli-echocut-")
   try {
     const out = []
@@ -3919,8 +3961,9 @@ test("a secret echoed with an invisible character inside it is masked whole", as
 })
 
 test("the runtime's own failure message is masked like the child's output", async () => {
-  // spawnSync 的 ENOENT 把整条路径写进 message（"spawnSync <path> ENOENT"），
-  // 那半句没过 show()：一个带斜杠的令牌形路径整串上了终端，控制字符也照发。
+  // spawnSync's ENOENT writes the whole path into message ("spawnSync <path>
+  // ENOENT"), and that half never went through show(): a token-shaped path
+  // with a slash reached the terminal whole, control characters and all.
   const dir = fixture("msmoli-enoent-")
   try {
     // no run in common with the preset's A: maskEchoes would mask a shared
@@ -3944,9 +3987,11 @@ test("the runtime's own failure message is masked like the child's output", asyn
 })
 
 test("the outgoing key is masked in a spawn failure that names it too", async () => {
-  // --to-preset 的 provider key 会替换掉预设现有的 key：旧的那把也是真凭据，
-  // 被换掉时一条主机报错可能回显它。它是自建 vendor 的 key，不是 ms- 形状——
-  // 形状测试认不出它，运行时的报错路径此前又只滤当步的 secret，整串漏出去。
+  // --to-preset's provider key replaces the preset's existing key: the old
+  // one is a real credential too, and a host error may echo it when it is
+  // replaced. It is a self-hosted vendor's key, not ms-shaped—the shape test
+  // does not recognise it, and the runtime error path used to filter only the
+  // current step's secret, so the whole string leaked out.
   const old = "ghs_zzzz9999yyyy8888xxxx77776666"
   const dir = fixture("msmoli-alsofail-", [{ id: "modelscope", preset: "modelscope", key: old }], { msmoli: { type: "api", key: B } })
   try {
@@ -3967,9 +4012,10 @@ test("the outgoing key is masked in a spawn failure that names it too", async ()
 })
 
 test("a key that is not ms-shaped is masked where a typed value is echoed", async () => {
-  // show() 只认 ms- 形状。粘错位置的别家 key（ghs_…、sk-…）在 --from、
-  // 未知参数、裸 --magpie 三处被整串回显。一段 16 位以上、字母数字都有的
-  // 串，就是生成出来的 key 的样子，provider id 不长这样。
+  // show() only knows the ms- shape. Another vendor's key pasted in the wrong
+  // place (ghs_…, sk-…) was echoed whole in three places: --from, an unknown
+  // argument, and a bare --magpie. A string of 16+ alphanumerics with letters
+  // and digits is what a generated key looks like; a provider id does not.
   const dir = fixture("msmoli-nonms-")
   const key = "ghs_abcdefghijklmnopqrstuvwxyz012345"
   try {
@@ -3995,9 +4041,10 @@ test("a key that is not ms-shaped is masked where a typed value is echoed", asyn
     })
     assert.ok(!okOut.join("\n").includes(key), `配置目录行把 key 整串回显了:\n${okOut.join("\n")}`)
     assert.match(okOut.join("\n"), /magpie 配置目录：ghs_…2345/)
-    // 一个真 id 照样读得出来：带连字符的名字、纯字母的长名字都不像 key
-    // （modelscope20261031 这类的 16 位小写字母数字串也一样：它就是一个 id，
-    //  第三十二轮就这么定了——下限之下的纯小写串是名字，不是 key）
+    // a real id still reads through: hyphenated names and long all-letter names
+    // do not look like keys (the same goes for a 16-character lowercase
+    // alphanumeric run like modelscope20261031: it is just an id—round 32
+    // settled that—a pure lowercase run below the floor is a name, not a key)
     for (const id of ["modelscope-backup-2025", "my-modelscope-provider", "abcdefghijklmnopqrstuvwxyz", "modelscope20261031"]) {
       const out = []
       await main({ argv: ["--dir", dir, "--status", "--from", id], log: (s) => out.push(s) })
@@ -4009,8 +4056,9 @@ test("a key that is not ms-shaped is masked where a typed value is echoed", asyn
 })
 
 test("on Windows, a --magpie path without .exe is still checked against --dir", async () => {
-  // spawnSync 在 Windows 上把没有扩展名的路径补成 .exe 去跑，existsSync 不补。
-  // 守卫只认 exists(bin) 时就跳过了自己：读的是夹具，写的是真 magpie 的目录。
+  // On Windows spawnSync appends .exe to a path with no extension before
+  // running it; existsSync does not. When the guard only consulted exists(bin)
+  // it skipped itself: reading the fixture while writing the real magpie folder.
   const dir = fixture("msmoli-winext-")
   try {
     const exe = "C:\\Tools\\magpie"
@@ -4028,7 +4076,7 @@ test("on Windows, a --magpie path without .exe is still checked against --dir", 
     assert.equal(code, 1)
     assert.deepEqual(calls, [], "不同目录时一条命令都不该发")
     assert.match(out.join("\n"), /--dir 与 --magpie 指向不同的配置目录/)
-    // 一个真不存在的二进制照旧放过守卫：它跑不起来，写不了任何地方
+    // a truly nonexistent binary still passes the guard: it cannot run, so it cannot write anywhere
     const none = []
     await main({
       argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent/magpie"],
@@ -4043,8 +4091,10 @@ test("on Windows, a --magpie path without .exe is still checked against --dir", 
 })
 
 test("a read-back that is the wrong shape is 'cannot read', not 'not found'", async () => {
-  // 写前的检查认形状（[]、"x"、null 都算读不出来），回读只认 null：一份变成
-  // [] 的 plugin-auth.json 被报成「没找到目标令牌，检查 magpie 是否在运行」。
+  // The pre-write check recognises shapes ([], "x" and null all count as
+  // unreadable); the read-back only recognises null: a plugin-auth.json that
+  // became [] was reported as "target token not found, check whether magpie is
+  // running".
   for (const [to, file, junk, auth] of [
     ["--to-plugin", "plugin-auth.json", [], {}],
     ["--to-preset", "providers.json", "x", { msmoli: { type: "api", key: B } }],
@@ -4069,8 +4119,9 @@ test("a read-back that is the wrong shape is 'cannot read', not 'not found'", as
 })
 
 test("a value flag given twice is refused, and --flag=value is read", async () => {
-  // 两个方向同时给会被拒，三个带值的参数却静默以后者为准：--magpie A
-  // --magpie B 写进了 B。--dir=x 之前被当成未知参数。
+  // Giving both directions at once is refused, but the three value-carrying
+  // parameters silently take the latter: --magpie A --magpie B wrote B.
+  // --dir=x used to be treated as an unknown argument.
   for (const argv of [
     ["--dir", "/a", "--dir", "/b"],
     ["--magpie", "/a/magpie", "--magpie", "/b/magpie"],
@@ -4091,8 +4142,9 @@ test("a value flag given twice is refused, and --flag=value is read", async () =
 })
 
 test("a path is never taken for a key, and a secret split across lines is masked", async () => {
-  // 路径是用户自己的，照样可读：一条带长串字母数字的路径不是 key。被换行切开
-  // 的回显仍是那把令牌，每半不够 MIN_ECHO 也要整串掩掉。
+  // The path is the user's own and stays readable: a path with a long run of
+  // alphanumerics is not a key. An echo split by a newline is still the token,
+  // and each half below MIN_ECHO must be masked whole too.
   const path = "/tmp/abcdefgh12345678ijklmnop/x"
   await assert.rejects(main({ argv: [path], log: () => {} }), (e) => e.message.includes(path))
   const dir = fixture("msmoli-splitecho-")
@@ -4110,23 +4162,25 @@ test("a path is never taken for a key, and a secret split across lines is masked
   }
 })
 
-// ── 第三十二轮：复查批次（逐段掩码、密钥形状补齐、两行一致、空白值）──────
+// ── Round 32: review batch (per-segment masking, key shapes completed, the two lines agreeing, blank values) ──
 
 test("a key of any shape is masked in a typed value, and a path keeps its shape", async () => {
-  // 第三十一轮的形状只认「不含路径分隔符、且有 16+ 位字母数字混排」，于是
-  // 含 / 的 AWS secret、xoxb、UUID 整串漏出；而 path 里嵌的令牌也一样。
+  // Round 31's shape only recognised "no path separator, and a 16+ mix of
+  // letters and digits", so an AWS secret containing /, xoxb and UUIDs leaked
+  // whole; a token embedded in a path did too.
   const dir = fixture("msmoli-shapes-")
   try {
     const keys = [
       "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-      // 拆开拼：GitHub 的推送保护会把整串当成真 Slack 令牌拦下推送。
+      // split and concatenated: GitHub's push protection would take the whole string for a real Slack token and block the push.
       "xoxb-" + "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx",
       "550e8400-e29b-41d4-a716-446655440000",
       "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
       "sk-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2",
       "AKIAIOSFODNN7EXAMPLE",
-      // 自造且已过期（exp 2018，sub=fixture）：密钥扫描服务会把 JWT 形状当成真
-      // 凭据报警，而它们在过期令牌上没有可报的东西；这里要的只是「三段长串」。
+      // self-made and already expired (exp 2018, sub=fixture): secret-scanning
+      // services flag the JWT shape as a real credential, but there is nothing
+      // to report on an expired token; all this needs is "three long segments".
       "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmaXh0dXJlIiwiZXhwIjoxNTE2MjM5MDIyfQ.c3ludGhldGljLWZpeHR1cmUtc2lnbmF0dXJlLW5vdC1hLWNyZWRlbnRpYWw",
       "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
       "AbCdEf0123456789+/xYzAbCdEf0123456789==",
@@ -4138,18 +4192,18 @@ test("a key of any shape is masked in a typed value, and a path keeps its shape"
         const out = []
         await main({ argv, log: (s) => out.push(s) }).catch((e) => out.push(e.message))
         const text = out.join("\n")
-        // 每一段「像密钥」的连续串都不该整段出现
+        // no contiguous "key-like" run may appear whole
         for (const run of k.match(/[A-Za-z0-9]{16,}/g) ?? []) {
           assert.ok(!text.includes(run), `${k} 的 ${run} 漏了：\n${text}`)
         }
         assert.ok(!text.includes(k), `${k} 整串漏了：\n${text}`)
       }
     }
-    // 一个路径读出的是路径：掩掉的是其中像密钥的那一段，目录本身照旧
+    // a path reads out as a path: only the key-like segment inside is masked, the directory itself stays
     const out = []
     await main({ argv: ["--dir", dir, "--status", "--from", "/tmp/ghp_16C7e42F292c6912E7710c838347Ae178B4a"], log: (s) => out.push(s) })
     assert.match(out.join("\n"), /\/tmp\/ghp_16C7…8B4a/, `路径形状保留：\n${out.join("\n")}`)
-    // 正常 id 与路径照旧可读
+    // normal ids and paths stay readable
     for (const good of ["modelscope20261031", "modelscope-backup-2025-east", "C:\\Tools\\magpie", "/tmp/msmoli-fixtures"]) {
       const o = []
       await main({ argv: ["--dir", dir, "--status", "--from", good], log: (s) => o.push(s) })
@@ -4161,8 +4215,10 @@ test("a key of any shape is masked in a typed value, and a path keeps its shape"
 })
 
 test("the folder the report names is masked the same way on every line it names it", async () => {
-  // 配置目录行走的是 arg()，两行后的「读的是」「会写到」却曾是 show()：同一个
-  // 值一处掩、一处整串。让 --dir 与 --magpie 的目录错开来，才走得到那两行。
+  // The config-dir line goes through arg(), but the two lines after it—"read
+  // from" and "will write to"—used to go through show(): the same value
+  // masked in one place and whole in another. Only by making --dir and
+  // --magpie point at different folders do those two lines get reached.
   const home = mkdtempSync(join(tmpdir(), "msmoli-home-"))
   const parent = mkdtempSync(join(tmpdir(), "msmoli-two-line-"))
   const keyed = join(parent, "ghs_abcdefghijklmnopqrstuvwxyz012345")
@@ -4190,17 +4246,19 @@ test("the folder the report names is masked the same way on every line it names 
 })
 
 test("a value of nothing but spaces is a missing value, not a folder named ' '", async () => {
-  // `--dir " "` 被当成合法值，报错行变成「✗   里没有…」，读起来像 bug。
+  // a --dir value of a single space was accepted as legal, and the error line came out as "✗ <space> has no…", reading like a bug.
   for (const argv of [["--dir", " ", "--status"], ["--from", "  "], ["--dir=  ", "--status"]]) {
     await assert.rejects(main({ argv, log: () => {} }), /缺少值/, argv.join(" "))
   }
 })
 
 test("a child's echo of a key that is not the one this run holds is still masked", async () => {
-  // scrub 结尾的 show() 只认 ms- 形状：magpie 报错里回显别家令牌（ghp_…）时
-  // 原样上终端。逐段掩码把已知形状之外的长串也盖上。第三十五轮起，一个词就是
-  // 一把 key 时按整词掩，露出的是它自己的两端（ghp_…8B4a），不再是那一段长串的
-  // 两端——少露了中间那 4 个字符。
+  // The show() at the end of scrub only knows the ms- shape: when a magpie
+  // error echoed another vendor's token (ghp_…), it reached the terminal
+  // verbatim. Per-segment masking covers long runs outside the known shapes
+  // too. From round 35, when one word is a whole key it is masked as a whole
+  // word, revealing its own two ends (ghp_…8B4a) instead of the two ends of
+  // that long run—four fewer characters of the middle are exposed.
   const dir = fixture("msmoli-otherkey-")
   try {
     const foreign = "ghp_16C7e42F292c6912E7710c838347Ae178B4a"
@@ -4219,9 +4277,12 @@ test("a child's echo of a key that is not the one this run holds is still masked
 })
 
 test("a child's output of a hundred thousand control characters is scrubbed in one pass", async () => {
-  // 第三十一轮把 maskEchoes 改成「逐位跳过不可见字符」，在成串的控制字符上
-  // 退化成 O(n²)：20 000 个 \x01 要 79 秒，子进程一句脏输出就能拖死整轮。
-  // 两段式（先收集可见字符，在可见序列上扫一遍，再映射回原串）是线性的。
+  // Round 31 changed maskEchoes to "skip invisible characters position by
+  // position", which degenerates to O(n²) on runs of control characters:
+  // 20,000 \x01s took 79 seconds, and one dirty line from a child process can
+  // stall the whole run. The two-pass form (collect visible characters, scan
+  // once over the visible sequence, then map back to the original string) is
+  // linear.
   const dir = fixture("msmoli-scrubperf-")
   try {
     const body = "\x01".repeat(100_000) + A
@@ -4242,12 +4303,14 @@ test("a child's output of a hundred thousand control characters is scrubbed in o
   }
 })
 
-// ── 第三十三轮：id 字段里粘进来的别家 key ──────────────────────────────
+// ── Round 33: another vendor's key pasted into the id field ──────────────
 
 test("a provider id that is another vendor's key is masked wherever it is named", async () => {
-  // id 与账号名同样来自本机文件、也会被回显，但它们此前只过 show()：show 只认 ms-
-  // 形状，一把 ghp_/AWS/xoxb 形状的 key 粘进 id 字段就会被整串打印（--status 的
-  // 「内置 ModelScope：」那行、计划行、以及 provider key 命令回显）。
+  // Ids and account names also come from local files and are echoed too, but
+  // they used to pass only through show(): show knows just the ms- shape, so
+  // a ghp_/AWS/xoxb-shaped key pasted into the id field was printed whole
+  // (--status's "built-in ModelScope:" line, the plan lines, and the provider
+  // key command echo).
   const foreign = "ghp_16C7e42F292c6912E7710c838347Ae178B4a"
   const dir = fixture("msmoli-idkey-", [{ id: foreign, preset: "modelscope", key: A }], { msmoli: { type: "api", key: B } })
   try {
@@ -4266,7 +4329,7 @@ test("a provider id that is another vendor's key is masked wherever it is named"
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
-  // 正常形状的 id 与路径照旧可读
+  // ids and paths of normal shape stay readable
   const dir2 = fixture("msmoli-okid-", [{ id: "modelscope-backup-2025-east", preset: "modelscope", key: A }])
   try {
     const o = []
@@ -4280,9 +4343,11 @@ test("a provider id that is another vendor's key is masked wherever it is named"
 })
 
 test("an id that is another vendor's key is masked in the ambiguity, bare and read-back lines too", async () => {
-  // 同一个缺陷的另外三个出口：候选歧义提示（两个候选共用同一个 id）、自有 provider
-  // 但还没有 key 的提示、以及回读发现多账号时把账号名排出来那一行。id 与账号名
-  // 都来自本机文件，粘进去的别家 key 在这里同样只能是掩过的。
+  // Three other exits of the same defect: the ambiguity hint (two candidates
+  // sharing one id), the hint for a provider of ours that has no key yet, and
+  // the line listing account names when the read-back finds several accounts.
+  // Ids and account names both come from local files, and a pasted foreign key
+  // must be masked here too.
   const foreign = "ghp_16C7e42F292c6912E7710c838347Ae178B4a"
   const second = "ghp_ZZZZ9999yyyy8888xxxx777766661111"
   const dir = fixture("msmoli-idkey2-", [
@@ -4315,8 +4380,9 @@ test("an id that is another vendor's key is masked in the ambiguity, bare and re
   try {
     const out = []
     await main({
-      // --magpie /nonexistent 让 runnable 为假、跳过「--dir 与 --magpie 目录不一致」
-      // 那道守卫；不给它则会先撞上本机真实的 magpie 目录（实测就是死在那一行）
+      // --magpie /nonexistent makes runnable false and skips the "--dir and
+      // --magpie folders differ" guard; without it the run first hits the real
+      // magpie folder on this machine (measured: that line was where it died)
       argv: ["--dir", dir2, "--to-plugin", "--force", "--magpie", "/nonexistent"],
       spawn: (b, a) => {
         if (a[0] === "plugin" && a[1] === "login") {
@@ -4341,10 +4407,12 @@ test("an id that is another vendor's key is masked in the ambiguity, bare and re
   }
 })
 
-// ── 第三十四轮：含分隔符的密钥（AWS secret 形状）────────────────────────
+// ── Round 34: secrets with separators (the AWS secret shape) ─────────────
 
-// 最长「原样出现在输出里」的连续子串。判据用 12，与 mask/min 的门槛同源：
-// 短于 12 的偶然重合不算泄漏，12 及以上就是有人能拿到的实料。
+// The longest contiguous substring that "appears in the output as-is".
+// The criterion uses 12, from the same source as mask/min's floor: an overlap
+// shorter than 12 is accidental and not a leak; 12 or more is real material
+// someone could get.
 const longestKept = (text, secret) => {
   let best = ""
   for (let i = 0; i < secret.length; i++)
@@ -4356,9 +4424,12 @@ const longestKept = (text, secret) => {
 }
 
 test("a secret with separators in it is masked whole, not just its longest run", async () => {
-  // 判据只按「连续的字母数字段」掩码，于是 AWS secret（wJalr…/K7MDENG/bPxRfi…）
-  // 里只有 18 字符那段被掩，前 26 个字符原样上终端——而它的分段只有 13/7/18 位，
-  // 「16+ 位的段」整条断言看不见。凡是分段成词、又不是路径形状的值，整串掩掉。
+  // The criterion masks only by "contiguous alphanumeric run", so in an AWS
+  // secret (wJalr…/K7MDENG/bPxRfi…) only the 18-character run was masked and
+  // the first 26 characters reached the terminal verbatim—and its segments are
+  // only 13/7/18 long, so the whole "16+ character segment" assertion could
+  // not see it. Any value that splits into words and is not path-shaped is
+  // masked whole.
   const aws = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
   const dir = fixture("msmoli-sepkey-")
   try {
@@ -4379,11 +4450,12 @@ test("a secret with separators in it is masked whole, not just its longest run",
 })
 
 test("a value that starts like a path keeps its shape even when its parts are long", async () => {
-  // 反向：带分隔符不等于密钥。以 / ~ . 、盘符或 UNC 起头的值是路径，保留形状、
-  // 只掩其中像密钥的那一段——否则 --dir 一类的回显会变成 "Docu…oject"。
+  // The reverse: separators do not mean a secret. A value starting with / ~ .
+  // a drive letter or UNC is a path; keep its shape and mask only the key-like
+  // segment inside—otherwise an echo like --dir turns into "Docu…oject".
   const dir = fixture("msmoli-tilde-")
   try {
-    // 路径本身可读（组件都在 16 位以下、不混大小写）；里面像密钥的那一段仍被掩
+    // the path itself stays readable (all components under 16 characters, no mixed case); the key-like segment inside is still masked
     const readable = [
       "/Users/mison/Documents/NewProject",
       "~/.config/magpie",
@@ -4399,29 +4471,34 @@ test("a value that starts like a path keeps its shape even when its parts are lo
       await main({ argv: ["--dir", dir, "--status", "--from", p], log: (s) => out.push(s) })
       assert.ok(out.join("\n").includes(p), `${p} 的路径形状被掩掉了：\n${out.join("\n")}`)
     }
-    // PATHY 那一臂自身：以 / 起头的值就算有两段 12+ 位混合大小写的组件，也是
-    // 路径不是密钥（去掉 !PATHY 后这两条会变成 "（N 字符）"）
+    // the PATHY arm itself: even with two 12+ mixed-case components, a value
+    // starting with / is a path, not a key (remove !PATHY and these two become
+    // "(N characters)")
     for (const p of ["/Documents/NewProject", "/SomeLongDirectoryName/AnotherLongName"]) {
       const o = []
       await main({ argv: ["--dir", dir, "--status", "--from", p], log: (s) => o.push(s) })
       const text = o.join("\n")
-      // 路径的结构在：最后一个组件整段可读，只有前面那个长 camelCase 组件按
-      // 既有规则被掩。整串被当成 key 时整个值只剩 "/Som…Name"，两个组件都看不见。
+      // the path structure survives: the last component stays readable whole,
+      // and only the long camelCase component before it is masked by the
+      // existing rule. When the whole string is taken for a key, the entire
+      // value shrinks to "/Som…Name" and neither component is visible.
       assert.ok(text.includes("/" + p.split("/").at(-1)), `${p} 以 / 起头，后一个组件该可读：\n${text}`)
     }
-    // 普通词组成的相对路径：两段都长（12+），但不混大小写，不该被当成密钥
+    // a relative path of ordinary words: both segments are long (12+), but not mixed case, so it must not be taken for a key
     for (const p of ["documents/mynewprojectfolder", "photographs/vacationphotos", "microservices/documentation"]) {
       const o = []
       await main({ argv: ["--dir", dir, "--status", "--from", p], log: (s) => o.push(s) })
       assert.ok(o.join("\n").includes(p), `${p} 是小写路径组件，不该被掩：\n${o.join("\n")}`)
     }
-    // 嵌在路径里的令牌：路径留着，令牌那段掩掉
+    // a token embedded in a path: the path stays, the token segment is masked
     const withToken = "/tmp/ghp_16C7e42F292c6912E7710c838347Ae178B4a"
     const o = []
     await main({ argv: ["--dir", dir, "--status", "--from", withToken], log: (s) => o.push(s) })
     assert.match(o.join("\n"), /\/tmp\/ghp_16C7…8B4a/, `路径里的令牌该只掩那一段：\n${o.join("\n")}`)
-    // 已知边界（第三十二轮就有的取舍）：一个 16+ 位、大小写混排的单个路径组件
-    // 与一把 key 的「一段」无法区分，会被掩。这里钉住它，免得将来当成新缺陷。
+    // Known boundary (a trade-off already present in round 32): a single
+    // 16+ character mixed-case path component cannot be told apart from "one
+    // segment" of a key, and is masked. This pins it down so it is not
+    // mistaken for a new defect later.
     const camel = "/Users/mison/Documents/SomeLongDirectoryName"
     const c = []
     await main({ argv: ["--dir", dir, "--status", "--from", camel], log: (s) => c.push(s) })
@@ -4431,22 +4508,25 @@ test("a value that starts like a path keeps its shape even when its parts are lo
   }
 })
 
-// ── 第三十五轮：带空白的值与被分隔符拆成短段的 key ──────────────────────
+// ── Round 35: values with whitespace and keys split by separators into short pieces ──
 
 test("a key pasted with a trailing space, or quoted inside a line, is masked whole", async () => {
-  // 判据跑在整个值上，isKey 一见到空白就返回 false：「key 后面粘了个空格」
-  // （从终端或聊天窗口复制最常见的样子）于是整串掉进按段掩码，只有够长的那
-  // 一段被掩，前面 sk-ant-api03-Eyai1pkJrF 这 28 个字符原样上终端。子进程那句
-  // "no key … for provider" 同理。逐词判据：那个词就是 key，整词掩掉。
+  // The criterion runs over the whole value, and isKey returns false as soon
+  // as it sees whitespace: "a key with a trailing space" (the most common
+  // shape when copying from a terminal or chat window) then falls into
+  // per-segment masking, only the long enough segment gets masked, and the
+  // leading 28 characters sk-ant-api03-Eyai1pkJrF reach the terminal verbatim.
+  // The child's "no key … for provider" line is the same. Word-level
+  // criterion: that word is the key, mask the whole word.
   const dir = fixture("msmoli-wordkey-")
   const keys = [
     "sk-ant-api03-Eyai1pkJrF_KbwtQm3Zx8Vd2Nc7Rt5Hs9Lg4Pf6Ba1Ue0YjXLkIhGwSnTvMoDrQpCsAzBxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz",
     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-    // 拆开拼：GitHub 的推送保护会把整串当成真凭据拦下推送。
+    // split and concatenated: GitHub's push protection would take the whole string for a real credential and block the push.
     "xoxb-" + "435186639673-1944724303225-OQaLmNbVcXzAsDwErTyUiOp",
     "github_pat_11ABCDEFG0123456789_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrSt",
     "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
-    // 拆开拼：GitHub 的推送保护会把整串当成真凭据拦下推送。
+    // split and concatenated: GitHub's push protection would take the whole string for a real credential and block the push.
     "sk_live_" + "51AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
   ]
   try {
@@ -4458,7 +4538,7 @@ test("a key pasted with a trailing space, or quoted inside a line, is masked who
         assert.ok(kept.length < 12, `${JSON.stringify(value.slice(0, 30))}…：原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}\n${out.join("\n")}`)
       }
     }
-    // 子进程把 key 夹在一句话里回显时，走的是同一道门（arg 逐词）
+    // when the child echoes the key inside a sentence, it goes through the same door (arg, word by word)
     for (const key of [keys[0], keys[1]]) {
       const out = []
       await main({
@@ -4475,26 +4555,32 @@ test("a key pasted with a trailing space, or quoted inside a line, is masked who
 })
 
 test("a key split into short pieces by separators is masked whole", async () => {
-  // 判据按「连续的字母数字段」掩码：一把被 - _ . 拆成几段、每段都不够 16 位的
-  // key（nUJqxrpd9Bc7-GvG7J--o…、AbCdEfGh.IjKlMnOp.…、9f8e7d6c5b4a3928-1706…）
-  // 没有任何一段合格，整串原样上终端（裸参数位实测 42/42、35/35、33/33）。
+  // The criterion masks by "contiguous alphanumeric run": a key split by
+  // - _ . into pieces, none of them 16 characters long (nUJqxrpd9Bc7-GvG7J--o…,
+  // AbCdEfGh.IjKlMnOp.…, 9f8e7d6c5b4a3928-1706…) has no qualifying segment and
+  // reaches the terminal whole (measured at the bare-argument position:
+  // 42/42, 35/35, 33/33).
   const dir = fixture("msmoli-fragkey-")
   const keys = [
     "nUJqxrpd9Bc7-GvG7J--onUJqxrpd9Bc7-GvG7J--o",
     "AbCdEfGh.IjKlMnOp.QrStUvWx.Yz012345",
     "deadbeef-cafebabe-0123456789abcdef",
     "9f8e7d6c5b4a3928-1706f5e4d3c2b1a0",
-    // 一段 16 位纯 hex（字母与数字都有）：摘要、会话 id。跟 provider id 的日期
-    // 形状（modelscope20261031）不同，它整段都在 0-9a-f 里
+    // one 16-character pure-hex run (letters and digits both): a digest, a
+    // session id. Unlike the provider id's date shape (modelscope20261031),
+    // it lies entirely within 0-9a-f
     "56b3f97586dedd63",
-    // 32 位以上、小写字母加数字、被分隔符拆开，每一段都不到 32——只按段看哪段
-    // 都不合格（不是 hex，也没有大写），合起来才是一把
+    // 32+ characters, lowercase letters plus digits, split by separators, with
+    // no segment reaching 32—looked at per segment none qualifies (not hex, no
+    // uppercase), but together they form one key
     "a1b2c3d4e5f6g7h8i9j0k1l2-o3p4q5r6s7t8u9v0w1",
   ]
-  // 一段 16 位、小写字母与数字混排、不全是 hex 的串不在里面：它与 provider id
-  // 的日期形状（modelscope20261031）在字符上无法区分，下限之下是名字——第三十二
-  // 轮定下的取舍，反向测试钉着它。这里测的是被分隔符拆开、自身每一段都不够格
-  // 的那种，以及整段落在 hex 字母表里的那种
+  // A 16-character run of mixed lowercase letters and digits that is not all
+  // hex is not included: it cannot be told apart character-wise from the
+  // provider id's date shape (modelscope20261031), and below the floor it is
+  // a name—a trade-off settled in round 32, pinned by the reverse test. What
+  // is tested here is the kind split by separators where no segment qualifies
+  // on its own, and the kind whose whole run falls inside the hex alphabet
   try {
     for (const key of keys) {
       for (const value of [key, `${key} `, `no key ${key} refused`, `"${key}"`]) {
@@ -4503,7 +4589,7 @@ test("a key split into short pieces by separators is masked whole", async () => 
         const kept = longestKept(out.join("\n"), key)
         assert.ok(kept.length < 12, `${JSON.stringify(value.slice(0, 30))}…：原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}\n${out.join("\n")}`)
       }
-      // 裸参数位（不认识的参数那条）
+      // the bare-argument position (the unknown-argument branch)
       await assert.rejects(
         main({ argv: [key], log: () => {} }),
         (e) => !e.message.includes(key) && longestKept(e.message, key).length < 12,
@@ -4516,8 +4602,10 @@ test("a key split into short pieces by separators is masked whole", async () => 
 })
 
 test("the new whole-word floor still leaves ordinary names readable", async () => {
-  // 反向：判据从「一段」换成「整词去分隔符」，可能把普通词也带进来。这些是
-  // provider id / 目录名 / 服务端措辞里真会出现的形状，一个字都不该被掩。
+  // The reverse: switching the criterion from "one segment" to "whole word
+  // with separators removed" may drag ordinary words in. These are shapes that
+  // really occur in provider ids / folder names / server wording, and not one
+  // character of them should be masked.
   const dir = fixture("msmoli-wordok-")
   try {
     const good = [
@@ -4540,7 +4628,7 @@ test("the new whole-word floor still leaves ordinary names readable", async () =
       await main({ argv: ["--dir", dir, "--status", "--from", value], log: (s) => out.push(s) })
       assert.ok(out.join("\n").includes(value), `${value} 不该被当成 key 掩掉：\n${out.join("\n")}`)
     }
-    // 路径里的长组件照旧只掩那一段：路径形状保留
+    // long components inside a path are still masked only in that segment: the path shape survives
     const p = "/Users/mison/Documents/SomeLongDirectoryName"
     const out = []
     await main({ argv: ["--dir", dir, "--status", "--from", p], log: (s) => out.push(s) })
@@ -4551,9 +4639,11 @@ test("the new whole-word floor still leaves ordinary names readable", async () =
 })
 
 test("a child's plain key=value words are not masked, and a base64 body still is", async () => {
-  // 「含 +/= 就是 key」单独成一条时，子进程的 host=https://… 这种词被整词掩成
-  // 「（10 字符）」，--from 的 v1.2.3+sha.abc 同理。base64 本体没有被放过：
-  // 它带着 16+ 位的字母数字长串，那一段本身就合格，而且整词仍按形状掩。
+  // When "contains +/= means key" stands alone, the child's word
+  // host=https://… gets masked whole as "(10 characters)", and --from's
+  // v1.2.3+sha.abc likewise. The base64 body itself is not let through: it
+  // carries a 16+ character alphanumeric run, that segment qualifies on its
+  // own, and the whole word is still masked by shape.
   const dir = fixture("msmoli-eqword-")
   try {
     const out = []
@@ -4571,7 +4661,7 @@ test("a child's plain key=value words are not masked, and a base64 body still is
       await main({ argv: ["--dir", dir, "--status", "--from", v], log: (s) => o.push(s) })
       assert.ok(o.join("\n").includes(v), `${v} 被误掩：\n${o.join("\n")}`)
     }
-    // 而一段带 +/= 的 base64 本体仍是 key 的形状
+    // and a base64 body carrying +/= is still key-shaped
     const b64 = "AbCdEf0123456789+/xYzAbCdEf0123456789=="
     const o = []
     await main({ argv: ["--dir", dir, "--status", "--from", b64], log: (s) => o.push(s) })
@@ -4584,11 +4674,14 @@ test("a child's plain key=value words are not masked, and a base64 body still is
 })
 
 test("a short key carrying a base64 symbol is masked, and a query's = is not", async () => {
-  // 第三十五轮把旧的 [+=] 那一臂撤了（它把子进程的 retry=true、id=12345 整词掩成
-  // 「（10 字符）」），撤得过头：低于 16 位下限、靠 + 或 = 才现形的短 key
-  // （AbCdEfGh+IjKlMnOp、dGhpc2lzYQ==）跟着漏了。新的一臂只认「整词全在 key
-  // 字母表里、>=12 位、且带 + 或以 = 结尾」：查询里的 retry=true、id=1234567890
-  // 带着裸 =，code=ENOENT 两样都没有，v1.2.3+sha.abc 的点不在字母表里，都不掩。
+  // Round 35 removed the old [+=] arm (it masked the child's retry=true and
+  // id=12345 whole as "(10 characters)"), and removed too much: short keys
+  // below the 16-character floor that only show up because of a + or =
+  // (AbCdEfGh+IjKlMnOp, dGhpc2lzYQ==) leaked along with it. The new arm only
+  // accepts "the whole word in the key alphabet, >= 12 characters, and either
+  // containing + or ending in =": retry=true and id=1234567890 in a query
+  // carry a bare =, code=ENOENT has neither, and the dots in v1.2.3+sha.abc
+  // are not in the alphabet, so none are masked.
   const dir = fixture("msmoli-b64word-")
   try {
     const masks = [
@@ -4618,22 +4711,27 @@ test("a short key carrying a base64 symbol is masked, and a query's = is not", a
 })
 
 test("the glued arm asks two pieces to alternate, so a hyphenated name survives", async () => {
-  // 合体那一臂原来是「去掉分隔符后 >=20 位、且大小写都有」：provider id
-  // MyProvider-Prod-Edition-2026 去掉连字符后大小写都有，于是被掩成「MyPr…2026」；
-  // Qwen3-Coder-480B-A35B-Instruct 被掩成「Qwen…ruct」。改成按大小写交替判：
-  // 一开始数「段内交替的段数 >= 2」，这把 sk-ant-api03-Eyai1pkJrF_Kbwt 漏了——
-  // 它只有 Ey 一处段内交替（其余段 k 前是分隔符或已是小写），整串可读。那是我
-  // 在 9aa0bcd 引入的回归，r35（5f38d60）本来是掩的。改成数「整词里 [a-z][A-Z]
-  // 出现的总次数」：sk-ant-api03-Eyai1pkJrF_Kbwt 有 Ey 与 Kw 两处，判为 key；
-  // 名字段落首字母大写、段内不再翻转，DeepSeek-V3-2-Chat-Preview 的
-  // 「Preview」以后没有小写接大写，MyProvider-… 的「MyPr」以后也没有，各只算一处。
+  // The glued arm used to be "after removing separators >= 20 characters and
+  // mixed case": the provider id MyProvider-Prod-Edition-2026 has both after
+  // the hyphens are removed, so it was masked as "MyPr…2026";
+  // Qwen3-Coder-480B-A35B-Instruct was masked as "Qwen…ruct". Changed to
+  // judge by case alternation: at first it counted "segments with >= 2
+  // alternations", which missed sk-ant-api03-Eyai1pkJrF_Kbwt—it has only one
+  // in-segment alternation, at Ey (in the other segments the k is preceded by
+  // a separator or is already lowercase), so the whole string stayed readable.
+  // That was a regression I introduced in 9aa0bcd; r35 (5f38d60) used to mask
+  // it. Changed to count the total occurrences of [a-z][A-Z] in the whole
+  // word: sk-ant-api03-Eyai1pkJrF_Kbwt has two, at Ey and Kw, and is judged a
+  // key; a name's segment starts with a capital and never flips inside, so
+  // DeepSeek-V3-2-Chat-Preview has no lowercase-to-uppercase after "Preview"
+  // and MyProvider-… none after "MyPr", each counting only one.
   const dir = fixture("msmoli-glueword-")
   try {
     const keys = [
       "AbCdEfGh.IjKlMnOp.QrStUvWx.Yz012345",
       "nUJqxrpd9Bc7-GvG7J--onUJqxrpd9Bc7-GvG7J--o",
       "wJalrXUtnFEMI-K7MDENG-bPxRfiCYEXAMPLEKEY",
-      // 单处段内交替的厂商密钥：这一条是 9aa0bcd 的回归，缺了它那次的改动不会红
+      // a vendor key with a single in-segment alternation: this is the 9aa0bcd regression; without it, that change would not go red
       "sk-ant-api03-Eyai1pkJrF_Kbwt",
       "sk-ant-api03-Eyai1pkJrF_KbwtQm3Z8Vd2Nc7Rt5Hs",
     ]
@@ -4662,11 +4760,15 @@ test("the glued arm asks two pieces to alternate, so a hyphenated name survives"
 })
 
 test("a word of nothing but punctuation does not stall maskKeys", async () => {
-  // maskKeys 原先用 `word.slice(lead).match(/[^…]*$/)` 找回尾部的标点：锚尾的
-  // 星号式回溯在一个字母开头、字母结尾、中间全是标点的词上，从每个起点重试一遍
-  // 直到穷尽，20 万字符一次匹配实测 117 秒，而服务端能把这样的串放进名字。
-  // 改成两头各一次线性内移后是 0.3ms。全标点的词不行——它在第一个起点就匹配成功，
-  // 旧实现 0.6ms 就过，那样测不出东西
+  // maskKeys used to find trailing punctuation with
+  // `word.slice(lead).match(/[^…]*$/)`: anchored at the tail, the star-style
+  // backtracking retried from every starting position until exhaustion on a
+  // word that starts with a letter, ends with a letter, and is all punctuation
+  // in between; one match over 200,000 characters measured 117 seconds, and a
+  // server can put such a string in a name. After the change it is 0.3ms with
+  // one linear move inward from each end. A word of nothing but punctuation
+  // does not do it—it matches at the first starting position, and the old
+  // implementation got through in 0.6ms, so it would not test anything
   const dir = fixture("msmoli-punct-")
   try {
     const bomb = "a" + "!".repeat(200_000) + "a"
@@ -4682,11 +4784,15 @@ test("a word of nothing but punctuation does not stall maskKeys", async () => {
 })
 
 test("a non-ms key cut by an invisible character is still masked whole", async () => {
-  // 第 31 轮只给 ms- 形状做了「跨不可见字符」（tokenShaped 的 INV*）。别的形状
-  // 没有：一把 27 位的 ghp_ 令牌被零宽空格切成 13+14，两半都低于 16 位下限，
-  // 词级判据都不认，后 14 位原样上终端（实测「92c6912E7710c8」）；sk-ant 本体
-  // 同样留下 12 位。GLUE 在 show() 之前，把「两侧都是 key 字母表字符」的不可见
-  // 字符去掉——真正应算分隔的空格、换行、逗号不在两侧，不受影响。
+  // Round 31 only made the ms- shape "cross invisible characters"
+  // (tokenShaped's INV*). Other shapes did not: a 27-character ghp_ token cut
+  // by a zero-width space into 13+14 leaves both halves below the 16-character
+  // floor, the word-level criterion recognises neither, and the trailing 14
+  // characters reach the terminal verbatim (measured "92c6912E7710c8"); sk-ant
+  // itself likewise leaves 12. GLUE runs before show() and strips invisible
+  // characters that have "key-alphabet characters on both sides"—a space,
+  // newline or comma that really should separate is not on both sides and is
+  // unaffected.
   const dir = fixture("msmoli-gluecut-")
   try {
     const keys = [
@@ -4705,7 +4811,7 @@ test("a non-ms key cut by an invisible character is still masked whole", async (
         assert.ok(kept.length < 12, `${JSON.stringify(key)} 夹 ${JSON.stringify(cut)}：原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}\n${out.join("\n")}`)
       }
     }
-    // 真正该分隔的地方不被粘：两段普通词之间夹不可见字符仍是两段
+    // places that really should separate are not glued: an invisible character between two ordinary words still makes two words
     const o = []
     await main({ argv: ["--dir", dir, "--status", "--from", "alpha​beta"], log: (s) => o.push(s) })
     assert.ok(o.join("\n").includes("alpha"), "普通词不受影响")

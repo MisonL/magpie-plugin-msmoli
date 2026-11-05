@@ -1,19 +1,25 @@
 #!/usr/bin/env node
-// magpie-plugin-msmoli — 把 magpie 里已有的 ModelScope 令牌同步给签到插件，或反过来。
+// magpie-plugin-msmoli — sync the ModelScope token magpie already has to the
+// check-in plugin, or the other way round.
 //
-// 为什么有这个工具：magpie 的内置 ModelScope 预设（providers.json）和本插件
-// 的登录态（plugin-auth.json）是两处独立存储，同一把 ms- 令牌要配两次。
-// 这个工具读一次、写一次，输出里不留令牌。
+// Why this tool exists: magpie's built-in ModelScope preset (providers.json)
+// and this plugin's login state (plugin-auth.json) are two separate stores, so
+// one ms- token has to be configured twice. This tool reads once, writes once,
+// and never leaves the token in its output.
 //
-// 安全边界（改这里之前先想清楚）：
-// - 只读 magpie 的两个文件；写入一律交给 magpie 自己的 CLI
-//   （provider key / plugin login），不裸写任何 magpie 的文件——锁、备份、
-//   .bak 回退、事件通知都归 magpie 管。
-// - 令牌只走 stdin 和进程参数（provider key 的接口如此），日志里只出现
-//   掩码（前 4 + … + 后 4，与 magpie 自己的显示一致）。
-// - 宿主按令牌分账号：同一把令牌重复 login 是幂等的；换一把会新增第二个
-//   账号；logout 会登出该 provider 的全部账号。所以「两边不同」时默认
-//   拒绝改动，只有显式 --force 且插件只有一个账号时才替换。
+// Security boundaries (think these through before changing anything here):
+// - It only reads magpie's two files; every write goes through magpie's own
+//   CLI (provider key / plugin login), never by writing magpie's files
+//   directly — locks, backups, .bak rollback and event notifications are all
+//   magpie's business.
+// - The token only travels over stdin and process arguments (that is the
+//   provider key interface), and the log only shows a mask (first 4 + … + last
+//   4, matching magpie's own display).
+// - The host keys accounts by token: logging in again with the same token is
+//   idempotent; a different token adds a second account; logout signs out
+//   every account of that provider. So when the two sides differ, it refuses
+//   to change anything by default, and only replaces with an explicit --force
+//   and only one account in the plugin.
 
 import { spawnSync } from "node:child_process"
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
@@ -79,7 +85,8 @@ function parseArgs(argv) {
       set(flag, v)
     } else if (VALUE[a]) set(a, take(++i))
     else if (a === "--to-plugin" || a === "--to-preset") {
-      // 两个方向同时给时后者静默获胜，等于悄悄丢掉前一个：说清楚比择一好
+      // When both directions are given, the later one silently wins and the
+      // earlier is quietly dropped: saying so is better than picking one
       const want = a === "--to-plugin" ? "plugin" : "preset"
       if (out.to && out.to !== want) throw new Error("--to-plugin 与 --to-preset 只能给一个")
       out.to = want
@@ -92,8 +99,9 @@ function parseArgs(argv) {
   return out
 }
 
-// ---- 探测：与 magpie 的 appdir 对齐。便携版认可执行文件旁的 data/ 或
-// .portable；安装版认 $XDG_CONFIG_HOME/magpie，否则 ~/.config/magpie。
+// ---- discovery: aligned with magpie's appdir. The portable build accepts a
+// data/ folder or a .portable file beside the executable; the installed build
+// accepts $XDG_CONFIG_HOME/magpie, otherwise ~/.config/magpie.
 
 export function findMagpieBin({ env = process.env, os = platform(), exists = existsSync, home = homedir() } = {}) {
   const cands = []
@@ -287,7 +295,8 @@ export function findConfigDir({
   return looksLikeMagpie(d, exists) ? d : ""
 }
 
-// ---- 读：只读，剥 BOM（magpie 自己也这么做），读不动就当没有
+// ---- reading: read-only, strips the BOM (magpie does the same), and treats
+// an unreadable file as absent
 
 // readJson returns undefined for "not there", null for "there but unreadable".
 // The two are not the same decision: a file that exists and doesn't parse may
@@ -302,7 +311,7 @@ export function readJson(file, exists = existsSync) {
   }
 }
 
-// ---- 领域逻辑（纯函数，导出给测试）
+// ---- domain logic (pure functions, exported for the tests)
 
 // mask reveals only the ends. Under 12 characters there is no middle worth
 // hiding and no tail worth showing: 8 characters would print the whole thing
@@ -318,19 +327,23 @@ export const mask = (t) => {
   return `${show(t.slice(0, 4))}…${show(t.slice(-4))}`
 }
 
-// 内置侧的候选：默认先认 id/preset=modelscope（magpie 预设的正规路径），没有
-// 再按推理域名认用户自建的 vendor。--from 是消歧手段，必须只认 id——默认搜索
-// 按 preset 匹配才产生歧义，消歧若还按 preset 就永远解不开（演练抓出的 bug）。
-// 多于一个候选时工具不猜。
+// The preset-side candidates: by default it accepts id/preset=modelscope first
+// (magpie's proper preset path), and otherwise recognises a user-built vendor
+// by its inference hostname. --from disambiguates and must match by id only —
+// the default search matching by preset is what creates the ambiguity, and a
+// disambiguation that also matched by preset could never resolve it (a bug the
+// rehearsal caught). With more than one candidate the tool does not guess.
 //
-// 域名按 hostname 精确比较，不是子串：includes() 对
-// "api-inference.modelscope.cn.evil.tld" 也为真，而那会把真令牌写进一个
-// chat 指向第三方的 provider（--to-preset）或把第三方的 key 当 cookie 发给
-// modelscope.cn（--to-plugin）。
+// The hostname is compared exactly, not as a substring: includes() is also
+// true for "api-inference.modelscope.cn.evil.tld", and that would write the
+// real token into a provider whose chat points at a third party (--to-preset)
+// or send a third party's key as a cookie to modelscope.cn (--to-plugin).
 //
-// --from 只在这道校验**之内**挑一个：它先是「内置侧」的候选，然后才是消歧。
-// 早先它短路在域名校验之前，于是 `--from openai` 会把 OpenAI 的 key 登录给
-// 插件、或用 ms 令牌覆盖掉那个第三方 provider —— 两个方向都静默写错凭据。
+// --from picks one **inside** that check: it is a "preset-side" candidate
+// first, and only then a disambiguation. It used to short-circuit before the
+// hostname check, so `--from openai` would log OpenAI's key into the plugin,
+// or overwrite that third-party provider with an ms token — both directions
+// silently writing the wrong credential.
 export function presetCandidates(providers, from = "") {
   const list = Array.isArray(providers) ? providers : []
   // the key is trimmed where it is read: a token pasted with a trailing
@@ -554,12 +567,16 @@ function hostOf(chat) {
 const oursOf = (p) => p?.id === PRESET || p?.preset === PRESET || hostOf(p?.chat) === HOST
 const keyedOf = (p) => typeof p?.key === "string" && Boolean(p.key.trim())
 
-// 插件侧的账号：主键 msmoli 与 msmoli#xxxxxx，按令牌区分。
+// The plugin-side accounts: the primary key msmoli plus msmoli#xxxxxx, told
+// apart by token.
 //
-// 令牌只从 type === "api" 的条目上读——和插件自己（index.mjs 的 rawKey）同一条
-// 规则。少这一条时，一份把 key 放错位置或类型写歪的 plugin-auth.json，会让本
-// 工具说「插件已用同一把令牌、无需操作」，而插件读不到令牌、卡片永远显示未登录：
-// 一个静默的错误状态，比报错更难发现。
+// The token is only read from entries with type === "api" — the same rule the
+// plugin itself uses (rawKey in index.mjs). Without that rule, a
+// plugin-auth.json that puts the key in the wrong place or writes the wrong
+// type would make this tool say the plugin already uses the same token and
+// nothing needs doing, while the plugin cannot read the token and the card
+// always shows signed out: a silent wrong state is harder to notice than an
+// error.
 export function pluginAccounts(auth) {
   const obj = auth && typeof auth === "object" && !Array.isArray(auth) ? auth : {}
   return Object.entries(obj)
@@ -577,7 +594,7 @@ export function planToPlugin({ preset, accounts, force }) {
   }
   // The plugin refuses a key with anything but visible ASCII in it (tokenOf:
   // it would go out in a Cookie header), so logging one in would report a
-  // success that leaves every check-in saying "令牌内容无法识别".
+  // success that leaves every check-in reporting that it cannot recognise the token.
   // planToPreset has the same guard for the same reason; this direction was
   // missing it, and a key with a zero-width character in it — invisible in
   // every terminal and in this tool's own mask — went through.
@@ -595,9 +612,10 @@ export function planToPlugin({ preset, accounts, force }) {
     return { action: "run", lines, cmds: [{ argv: ["plugin", "login", ID], stdin: `${preset.key}\n`, secret: preset.key }] }
   }
   // Every entry is there but none carries a token the plugin itself would read
-  // (a msmoli entry of the wrong type, or a key that is not a string). "两边
-  // 令牌不同" is a claim we cannot make here — we never read the plugin's side —
-  // and --force would not help: the file is the problem, not the choice.
+  // (a msmoli entry of the wrong type, or a key that is not a string). "The
+  // tokens differ on the two sides" is a claim we cannot make here — we never
+  // read the plugin's side — and --force would not help: the file is the
+  // problem, not the choice.
   if (accounts.every((a) => !a.token)) {
     lines.push(`✗ 插件里 ${ID} 的条目读不出令牌（type 不是 api，或 key 不是字符串）。`)
     lines.push(`  magpie 也不会把它算作登录。${arg(accounts[0].name)} 那个条目请先删掉或重新登录，再重跑。`)
@@ -621,24 +639,26 @@ export function planToPlugin({ preset, accounts, force }) {
     action: "run",
     lines,
     cmds: [
-      // logout 也带 secret：被换掉的那把是真实凭据，magpie 的报错若回显
-      // 账号（"no key ms-… for provider"）不该把整串放上终端
+      // logout carries the secret too: the key being replaced is a real
+      // credential, and a magpie error that echoes the account ("no key ms-…
+      // for provider") must not put the whole string on the terminal
       { argv: ["plugin", "logout", ID], stdin: "", secret: accounts[0].token },
       { argv: ["plugin", "login", ID], stdin: `${preset.key}\n`, secret: preset.key },
     ],
   }
 }
 
-// provider key 是整条替换主 key，聊天请求正在用它——所以默认也要求 --force。
+// provider key replaces the whole main key and chat requests are using it — so
+// this direction demands --force by default too.
 export function planToPreset({ preset, accounts, force }) {
   const lines = []
   const main = accounts.find((a) => a.name === ID)
   if (!main?.token) {
     // A second account holding the token the preset already has is the state
     // a forced replace leaves behind (or a re-login after a nickname write).
-    // There is nothing to sync, and "主账号没有登录" would read as "your
-    // plugin is signed out" while --to-plugin answers "无需操作" for the very
-    // same pair of files.
+    // There is nothing to sync, and "the main account is not signed in" would
+    // read as "your plugin is signed out" while --to-plugin answers "nothing
+    // to do" for the very same pair of files.
     const same = preset && accounts.find((a) => a.token && a.token === preset.key)
     if (same) {
       lines.push(`✓ 插件的 ${arg(same.name)} 已与内置预设用同一把令牌（${mask(same.token)}），无需操作。`)
@@ -667,8 +687,9 @@ export function planToPreset({ preset, accounts, force }) {
     lines.push(`  先修好插件那边的登录（magpie plugin login ${ID}）。`)
     return { action: "refuse", lines, cmds: [] }
   }
-  // provider key 的第一个参数是 id：一个以 "-" 开头的 id 会被 magpie 的 CLI
-  // 当成 flag（`provider key --help <token>` 只打印帮助、不写 key）。
+  // The first argument of provider key is the id: an id starting with "-"
+  // would be taken as a flag by magpie's CLI (`provider key --help <token>`
+  // only prints help and writes no key).
   if (typeof preset.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(preset.id)) {
     lines.push(`✗ 这个 provider id 不是 magpie 接受的形状（${arg(preset.id)}），不能用 provider key 写入。`)
     return { action: "refuse", lines, cmds: [] }
@@ -685,10 +706,11 @@ export function planToPreset({ preset, accounts, force }) {
   return { action: "run", lines, cmds: [{ argv: ["provider", "key", preset.id, main.token], secret: main.token, also: preset.key }] }
 }
 
-// ---- 执行
+// ---- execution
 
-// 多步序列（--force 的 logout→login）中途失败：logout 已经发生了，用户此刻
-// 是被登出的状态。超时（r.error）与退出码非零（r.status）都要说这句话。
+// A multi-step sequence (--force's logout→login) failing midway: the logout
+// has already happened, so the user is signed out at this moment. Both a
+// timeout (r.error) and a nonzero exit code (r.status) must say this.
 const RECOVER = `注意：前面的步骤已经执行，现有登录已被登出。重新运行同一条命令即可继续（此时插件没有账号，会直接登录，无需 --force）。`
 
 function hidden(argv, secret, log) {
@@ -812,17 +834,19 @@ function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
       throw e
     }
     if (r.status !== 0) {
-      // a child killed by a signal has status null; "退出码 null" tells nobody anything
+      // a child killed by a signal has status null; "exit code null" tells nobody anything
       const why = r.status === null && r.signal ? `被信号 ${r.signal} 终止` : `退出码 ${r.status}`
       const said = scrub(out, secret, ...secrets).split("\n").filter(Boolean).slice(-3).join("\n")
       const e = new Error(`magpie 命令失败（${why}）${said ? `：\n${said}` : ""}`)
-      // 多步序列（--force 的 logout→login）中途失败：logout 已经发生了，
-      // 用户此刻是被登出的状态。说清楚，并告诉他重跑即可续上——
-      // 此时插件已无账号，重跑走的是全新登录那条路，不再需要 --force。
+      // A multi-step sequence (--force's logout→login) failing midway: the
+      // logout has already happened, so the user is signed out at this moment.
+      // Say so, and tell them a rerun simply continues — with no account left
+      // in the plugin, the rerun takes the fresh-login path and needs no --force.
       if (i > 0) e.recover = RECOVER
       throw e
     }
-    // magpie 自己就把令牌显示成掩码；将来若变，这里兜底再滤一遍
+    // magpie itself already displays the token masked; should that ever change,
+    // this filters it again as a backstop
     for (const line of scrub(out, secret, ...secrets).split("\n")) if (line.trim()) log(`  ${line}`)
   }
 }
@@ -951,8 +975,9 @@ export async function main({
     return 1
   }
   const preset = cands[0] ?? null
-  // 无预设时两条方向都该给指引：--to-preset 也有自己的话术（planToPreset 里），
-  // 但这里先统一拦住，免得 null 一路传到 plan 里崩栈
+  // With no preset, both directions deserve guidance: --to-preset has its own
+  // wording (in planToPreset), but it is stopped here first so a null does not
+  // travel all the way into plan and blow the stack
   if (!preset) {
     const all = Array.isArray(providers) ? providers : []
     // A candidate needs a key, and a provider that is ours but has none is not
@@ -991,13 +1016,15 @@ export async function main({
   for (const line of plan.lines) log(line)
   if (plan.action !== "run") return plan.action === "noop" ? 0 : 1
 
-  // --status 是「只报告」，先于方向判断：只给 --status 时该说「这是计划」，
-  // 而不是提示用户去指定方向——他要的就是报告
+  // --status means "report only", and it comes before the direction check: with
+  // only --status it should say "this is the plan", not tell the user to pick
+  // a direction — a report is exactly what they asked for
   if (args.status) {
     log(`(--status：以上是计划，未执行)`)
     return 0
   }
-  // 不带 --to-* 时只报计划：裸跑 npx 不该静默写入一个凭据
+  // Without --to-* it only reports the plan: a bare npx run must not silently
+  // write a credential
   if (!args.to) {
     log(`(要执行请显式指定方向：--to-plugin 或 --to-preset)`)
     if (args.dryRun) log(`(--dry-run：未执行)`)
@@ -1047,9 +1074,11 @@ export async function main({
     return 0
   }
 
-  // 回读验证，别只信退出码（方向判断与上面 plan 那行保持一致）。
-  // 回读读不动（null）是另一回事：把它报成「没找到令牌」会把人推去查
-  // magpie 是否在运行，而写入其实成功了——两种失败要分开说。
+  // Verify by reading back, do not trust only the exit code (the direction
+  // check matches the plan line above). An unreadable read-back (null) is a
+  // different matter: reporting it as "the token was not found" sends people
+  // to check whether magpie is running, when the write actually succeeded —
+  // the two failures must be told apart.
   const want = plan.cmds.at(-1).secret
   if (want) {
     if (args.to === "preset") {
@@ -1064,9 +1093,11 @@ export async function main({
       const raw = readJson(join(dir, "plugin-auth.json"), exists)
       if (raw === null || !shaped(raw)) return unreadableAfter("plugin-auth.json", dir, want, log)
       const after = pluginAccounts(raw)
-      // 回读要数账号：logout 没真删（退出码 0 却没动手）时，login 会把新
-      // 令牌加成第二个账号，而「有一个账号拿着目标令牌」照样成立——那正是
-      // planToPlugin 明说 --force 不适用、工具却亲手造出来的状态。
+      // The read-back must count accounts: when logout did not really delete
+      // (exit code 0 but no action), login adds the new token as a second
+      // account, and "one account holds the target token" still holds — exactly
+      // the state planToPlugin says --force does not apply to and the tool
+      // would have created itself.
       if (plan.cmds.length > 1 && after.length > 1) {
         log(`✗ 回读发现插件现在有 ${after.length} 个账号（${after.map((a) => arg(a.name)).join("、")}）。`)
         log(`  旧账号没被登出，login 追加了一个。请在 magpie 里删掉多余账号后重试。`)
@@ -1082,22 +1113,28 @@ export async function main({
   return 0
 }
 
-// npm 和 npx 通过符号链接调用 bin：argv[1] 是链接的路径，而 import.meta.url
-// 是解析后的真实路径，直接比较字符串会漏掉「作为命令运行」的场景（测试里用
-// node bin/sync.mjs 直跑恰好相等，掩盖了这个 bug）。先把 argv[1] 也 realpath
-// 成真实路径再比。
+// npm and npx invoke bin through a symlink: argv[1] is the link's path while
+// import.meta.url is the resolved real path, so comparing the strings directly
+// misses the "run as a command" case (running `node bin/sync.mjs` directly in
+// the tests happened to be equal and hid this bug). So realpath argv[1] too
+// before comparing.
 //
-// href 还不够的地方有两处，都不涉及大小写：node --preserve-symlinks-main 让
-// import.meta.url 保留链接路径，而 realpathSync 仍把它解开；Windows 的 8.3 短
-// 名（C:\Users\RUNNER~1\…）在 pathToFileURL 里不展开、realpathSync 里展开。
-// 这两种都靠 inode 兜——那是文件的身份，与拼写无关。
+// href falls short in two places, neither about letter case:
+// node --preserve-symlinks-main makes import.meta.url keep the link path while
+// realpathSync still resolves it; Windows 8.3 short names
+// (C:\Users\RUNNER~1\…) are not expanded by pathToFileURL but are by
+// realpathSync. Both fall back to the inode — the file's identity, independent
+// of spelling.
 //
-// 报 ino=0 的卷（exFAT/FAT 的 U 盘、部分 SMB 共享与 subst 映射）没有身份可比，
-// 这时退回比 realpath 之后的字符串：它能覆盖上面两种 href 失配，唯一丢掉的
-// 是大小写翻转，而那个场景 href 本来就命中。不这样做的话 isMain 恒 false，
-// 整个文件被跳过——不打印任何东西、退出码 0，用户会以为同步成功了。
+// A volume that reports ino=0 (exFAT/FAT USB sticks, some SMB shares and subst
+// mappings) has no identity to compare, so it falls back to comparing the
+// realpath-ed strings: that covers the two href mismatches above, and the only
+// thing lost is a letter-case flip, where href matched anyway. Without this,
+// isMain would always be false and the whole file would be skipped — printing
+// nothing and exiting 0, so the user would think the sync succeeded.
 //
-// `stat` 与 `real` 可注入：ino=0 的卷在本机造不出来，测试只能把手伸到这里。
+// `stat` and `real` are injectable: an ino=0 volume cannot be conjured up on
+// this machine, so the tests can only reach in here.
 export function isMain(entry = process.argv[1], self = import.meta.url, stat = statSync, real = realpathSync) {
   if (!entry) return false
   try {

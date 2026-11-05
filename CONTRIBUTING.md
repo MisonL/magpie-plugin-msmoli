@@ -5,7 +5,7 @@ Thanks for looking at this. Two things worth knowing before changing anything.
 ## The one rule
 
 **`GET /api/v1/users/login/info` is also the check-in trigger.** ModelScope
-grants the day's 魔粒 when it sees that endpoint called. It is therefore not
+grants the day's credits when it sees that endpoint called. It is therefore not
 something the usage read may touch: magpie's menu bar asks for usage every few
 minutes, and a usage read that reached it would turn into a check-in request
 every few minutes.
@@ -202,12 +202,13 @@ reason is policy, not code: ModelScope has no check-in endpoint, so the plugin
 gets the daily grant by making the server count a website sign-in — a script
 posing as the browser rather than a person pressing a button the official
 client offers. ModelScope's user agreement forbids tools that interfere with
-the service (4.1.2(1)) and "刷分" by plugin (4.1.2(5)), and lets the platform
-freeze accounts or blacklist users for abuse (2.3.1 and the 魔粒 rules). The
-market's own rule (plugins#230, #150) is that a one-request claim triggered by
-an official button may be automated, but a reward that needs real activity is
-not simulated. A ModelScope account is real-name verified and often tied to
-Aliyun, so the downside for a user is larger than 250 expiring credits.
+the service (4.1.2(1)) and point farming by plugin (4.1.2(5)), and lets the
+platform freeze accounts or blacklist users for abuse (2.3.1 and the credit
+rules). The market's own rule (plugins#230, #150) is that a one-request claim
+triggered by an official button may be automated, but a reward that needs real
+activity is not simulated. A ModelScope account is real-name verified and
+often tied to Aliyun, so the downside for a user is larger than 250 expiring
+credits.
 
 **This project does not submit to the market and will not again** (decision of
 2026-11-04, after the rejection above). The package stays on npm and anyone
@@ -239,7 +240,7 @@ put it there.
   moves on and is what the card reports when both sites fail. The result is
   cached per token (`sites`, bounded), so polls do not re-probe.
   Everything that differs between the sites lives in a profile object —
-  origin, the plan line, and the 国内站/国际站 word in the 401. Only
+  origin, the plan line, and the CN/INT-site word in the 401. Only
   `MsmoliPlugin` is exported: magpie's loader takes every exported function
   as its own provider, so exporting a helper would silently add a second
   card, which is why the guard test asserts the entry list by name; the
@@ -288,11 +289,11 @@ put it there.
   price of the only deferral an outcome offers.
 - **The pre-window message leads with the claim time.** The host renders the
   message verbatim under the red dot, so it is the only text the user sees for
-  those hours; `${clock(target)} 后自动领取（magpie 每半小时问一次，无需操作）`
-  puts the answer before the reason. The config path stays out — it repeated
+  those hours; the line (a claim time, then the half-hourly re-ask) puts the
+  answer before the reason. The config path stays out — it repeated
   on every ask and ended up in users' screenshots — and lives in the README
   instead. Nothing in it is relative: the card keeps the line until the next
-  ask, half an hour later, so a countdown ("约 8 分钟后") is wrong for most of
-  the time it is on screen.
+  ask, half an hour later, so a relative countdown is wrong for most of the
+  time it is on screen.
   `test/plugin.test.mjs` reads the target back out of that line, so changing
   its shape means updating `targetFrom`.

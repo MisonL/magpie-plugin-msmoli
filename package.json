@@ -1,7 +1,7 @@
 {
   "name": "magpie-plugin-msmoli",
   "version": "0.2.0",
-  "description": "ModelScope (魔搭) 魔粒 daily check-in and balance for magpie, for modelscope.cn and modelscope.ai — one check-in a day instead of opening the site",
+  "description": "ModelScope daily credits check-in and balance for magpie, for modelscope.cn and modelscope.ai — one check-in a day instead of opening the site",
   "author": "MisonL",
   "type": "module",
   "repository": {
@@ -21,7 +21,6 @@
     "index.mjs",
     "bin/sync.mjs",
     "README.md",
-    "README.zh-CN.md",
     "LICENSE"
   ],
   "keywords": [
@@ -42,6 +41,6 @@
   "scripts": {
     "test": "node --test",
     "test:clock": "node --import ./tools/ticking-clock.mjs --test",
-    "prepublishOnly": "node --test"
+    "prepublishOnly": "node tools/prepublish.mjs"
   }
 }

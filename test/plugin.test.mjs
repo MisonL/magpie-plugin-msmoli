@@ -1050,9 +1050,10 @@ test("the body cap is 256 KiB: one byte over is refused, the cap itself is not",
   globalThis.fetch = real
 })
 
-// ── 签到时段 ──────────────────────────────────────────────────────────────
-// failed 是宿主唯一会重试的结果：没到点的回答必须是它，别的都会让当天不再
-// 被问。没到点的那一次不该发出任何请求。
+// ── The check-in window ───────────────────────────────────────────────
+// failed is the only outcome the host retries: an answer before the target
+// must be failed — anything else and the day is never asked again. That
+// before-target pass must not send any request.
 test("before the window the check-in asks for nothing and answers failed", async () => {
   await withWindow(["08:30", "10:00"], `${today} 07:00:00`, async () => {
     let asked = 0
@@ -1559,7 +1560,8 @@ test("the same account's target minute is stable within a day", async () => {
   })
 })
 
-// ── 审查第二轮：不可见字符、令牌伪装昵称、非有限数字 ─────────────────────
+// ── Review round two: invisible characters, a token posing as a nickname,
+// non-finite numbers ─────────────────────────────────────────────
 test("invisible characters in a nickname never reach the written-back name", async () => {
   // U+200B/200D (zero-width), U+2060 (word joiner), U+061C (ALM) and the tag
   // characters U+E0000–E007F all survived the earlier sanitizer: two accounts
@@ -1619,7 +1621,7 @@ test("a nickname that is the token itself is not written back", async () => {
 
 test("a non-finite amount from the server never reaches the card", async () => {
   // Number("1e400") is Infinity: a balance we cannot read is not a balance,
-  // and it must not show as "Infinity 魔粒可用" or "0 魔粒可用" either
+  // and it must not show as an Infinity balance or as zero either
   await withFetch(
     {
       "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: "1e400" } } },
@@ -1632,7 +1634,8 @@ test("a non-finite amount from the server never reaches the card", async () => {
     },
   )
   // a ledger row's amount is summed, and an unreadable one is a body we do
-  // not understand: read as 0 it would say "领 0" beside a balance that moved
+  // not understand: read as 0 it would say it claimed 0 beside a balance
+  // that moved
   const body = { success: true, data: { records: [day({ total_amount: "1e400" }), spend("1e400")] } }
   await withFetch(
     {
@@ -1649,7 +1652,8 @@ test("a non-finite amount from the server never reaches the card", async () => {
 
 test("a ledger with a refund in it never shows a negative day", async () => {
   // a refund is recorded as a negative SPEND_CONFIRM. Summed as it comes, the
-  // card would read "今日用 -50 / 领 200" with a negative percentage.
+  // card would read today's spend as -50 against a claim of 200, with a
+  // negative percentage.
   const body = { success: true, data: { records: [day(), spend(200), spend(-250)] } }
   await withFetch(
     {
@@ -1740,7 +1744,7 @@ test("the check-in budget is 25 seconds: one fewer still has a millisecond left"
   // refuses the touch there just as 25 does — and so would 24.999. Only a
   // spend just short of 25 s tells them apart: at 24_999 ms there is 1 ms
   // left, `left <= 0` is false, and the touch goes out. The constant is
-  // documented as 25 seconds, and README.zh-CN says so.
+  // documented as 25 seconds, and the README says so.
   for (const [spend, wantTouch] of [
     [24_999, true],
     [25_000, false],
@@ -1766,10 +1770,11 @@ test("the check-in budget is 25 seconds: one fewer still has a millisecond left"
   }
 })
 
-// ── 时段解析：直接读 windowOf，别依赖当天的哈希落点 ────────────────────────
-// 目标时刻是「日 + 账号」的哈希，端到端测 LAST 截断只在哈希恰好落进
-// 23:00 以后的那些日子才生效（实测约一半的日期会放过回归）。截断本身是
-// 纯函数，直接断言它。
+// ── Window parsing: read windowOf directly, not the day's hash ────────
+// The target instant is the hash of "day + account"; an end-to-end test of
+// the LAST truncation only bites on days whose hash lands past 23:00
+// (measured: about half the dates let the regression through). The
+// truncation itself is a pure function — assert it directly.
 test("the module exports no bare function the host would take for a plugin", async () => {
   // magpie's servers() takes every exported function as a plugin entry when
   // `default` is a function (which it is here), calls it with the plugin input
@@ -1878,7 +1883,8 @@ test("a window whose ends meet is not a window of width zero", () => {
   // what that buys: plan() takes `hash % (end - start)`, so a window of width
   // zero is a modulo by zero. The target comes out NaN, `minuteCN() >= NaN`
   // is false forever, and the account never claims that day — while the card
-  // reads "NaN:NaN 后自动领取". Widening either guard to `>` survives every
+  // reads that it will auto-claim after NaN:NaN. Widening either guard to `>`
+  // survives every
   // other test in this file, so the equality case needs its own.
   const dflt = { start: 8 * 60 + 30, end: 10 * 60 }
   assert.deepEqual(windowOf({ checkinWindow: ["09:00", "09:00"] }), dflt, "equal ends are not a window")
@@ -1902,7 +1908,8 @@ test("a one-minute window pins the target to that minute", async () => {
 
 test("the target minute itself is due, not one minute short", async () => {
   // plan() is `minuteCN() >= target`. Written `>`, an ask landing on the
-  // target's own minute answers "09:28 后自动领取" while the clock reads
+  // target's own minute answers that it will auto-claim after 09:28 while the
+  // clock reads
   // 09:28 — the card contradicting itself — and the claim slips to the next
   // ask, half an hour later. The host asks on its own schedule, so an ask
   // landing exactly on the target is one in thirty.
@@ -1945,10 +1952,12 @@ test("a minute before the target it still waits, not claims early", async () => 
 test("the Beijing day is +8 hours, at the hour it matters", async () => {
   // 23:30 Beijing is 15:30 UTC. A shift one hour off (or the host's own zone)
   // reads that as the next day, and two things break at once: todayCN() stops
-  // matching a ledger row stamped today — the card would say 领 0 next to a
+  // matching a ledger row stamped today — the card would say it claimed 0
+  // next to a
   // balance that had just moved, and the check-in would answer `inactive`,
   // which settles the day — and minuteCN() falls back to 00:30, so a window
-  // that should be long due answers "后自动领取" again. Every other test
+  // that should be long due answers that it will auto-claim after … again.
+  // Every other test
   // computes its fixtures with the same +8, so they move with the constant;
   // this one pins it to a known instant instead.
   await withWindow(["22:00", "23:30"], `${today} 23:30:00`, async () => {
@@ -2202,7 +2211,8 @@ test("an expiry the plugin cannot parse resets nothing, rather than 1970", async
 
 test("the pre-window line outlives the card's 30-minute cache", async () => {
   // magpie renders a check-in answer verbatim until its next ask, half an
-  // hour later. A relative "约 8 分钟后" is false for most of that time;
+  // hour later. A relative wait of about eight minutes is false for most of
+  // that time;
   // seen on a real card at 09:47, still promising the 09:28 claim was eight
   // minutes away while the day's credits had already landed. Both facts in
   // the line are absolute — the target and the host's own cadence. The
@@ -2248,8 +2258,9 @@ test("a login/info that is not JSON fails the check-in rather than settling the 
     async () => {
       const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
       assert.equal(r.outcome, "failed", "an unreadable login/info must not settle the day")
-      // The parse branch's own words, not just "登录接口": the next line down
-      // also says "登录接口失败" (with `HTTP 200` for a body that did not
+      // The parse branch's own words, not just the login endpoint: the next
+      // line down also says the login endpoint failed (with `HTTP 200` for a
+      // body that did not
       // parse, since saidOf of it is empty), so matching the shared prefix
       // left `if (res.status !== 200 || !parsed)` on index.mjs free to be
       // turned into `if (false)` with the suite still green.
@@ -2262,9 +2273,10 @@ test("a login/info that refuses in its own words, or in none at all", async () =
   // The envelope branch (index.mjs): a 200 that parses but says no. Its two
   // arms answer differently on purpose — the server's message when there is
   // one, the status when there is not — and both were unpinned: the only
-  // test on this path asserted /登录接口/, which the server's own message
-  // ("登录接口失败：请先绑定手机号") satisfies, so `|| `HTTP ${res.status}``
-  // could be deleted and an empty "登录接口失败：" shipped unnoticed.
+  // test on this path asserted just the shared login-endpoint prefix, which
+  // the server's own message (asking the user to bind a phone number first)
+  // satisfies, so `|| `HTTP ${res.status}`` could be deleted and an empty
+  // login-failure message shipped unnoticed.
   for (const { bad, want } of [
     { bad: { body: { success: false, message: "请先绑定手机号" } }, want: /登录接口失败：请先绑定手机号$/ },
     { bad: { body: { success: false } }, want: /登录接口失败：HTTP 200$/ },
@@ -2318,7 +2330,8 @@ test("a usage read that meets a dead token marks the sign-in expired, at either 
   // says so. The card's wording is the same at both steps and says the status
   // code, which is what the README's troubleshooting row promises — the
   // ledger path used to answer a bare "HTTP 401" while the check-in said
-  // "令牌失效或不属于国内站（HTTP 401）", so the one condition had two texts.
+  // the token was invalid or not from the CN site (HTTP 401), so the one
+  // condition had two texts.
   for (const at of ["balance", "transactions"]) {
     await withFetch(
       {
@@ -2626,7 +2639,8 @@ test("a check-in whose ledger read is refused by risk control says so", async ()
 
 test("a usage read refused by risk control names it, without 'not JSON' in the message", async () => {
   // the earlier assertion accepted /403/, and the generic refusal for any
-  // non-200 carries "HTTP 403" too — so the branch that says 风控 was never
+  // non-200 carries "HTTP 403" too — so the branch that says risk control
+  // was never
   // actually exercised.
   for (const at of ["balance", "transactions"]) {
     await withFetch(
@@ -2650,10 +2664,11 @@ test("a usage read refused by risk control names it, without 'not JSON' in the m
 
 test("a non-200 that answers JSON repeats what it said, not 'not JSON'", async () => {
   // The status gate said `res.status !== 200 || !parsed` in one line and its
-  // message claimed the body "响应不是 JSON" for both. A 429 or a 500 from the
+  // message called the body "not JSON" for both. A 429 or a 500 from the
   // vendor, or from a proxy that explains itself in JSON, parses perfectly
   // well: reporting it as a parse failure throws away the server's own words
-  // ("请求过于频繁", "系统繁忙") and sends the reader to look at the network.
+  // (too many requests, system busy) and sends the reader to look at the
+  // network.
   // Splitting the two conditions is what this pins — the suite was fully
   // green with the gate widened to `>= 400`, because nothing sent a 2xx other
   // than 200 and no test ever put JSON in a non-200.
@@ -2689,7 +2704,7 @@ test("a non-200 that answers JSON repeats what it said, not 'not JSON'", async (
 
 test("a login/info that answers JSON on a non-200 says what it said", async () => {
   // same split at the check-in's login step, where a 429 with the vendor's
-  // own words was reported as "响应不是 JSON" and those words thrown away.
+  // own words was reported as not-JSON and those words thrown away.
   const r = await withFetch(
     {
       "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
@@ -2711,7 +2726,8 @@ test("a login/info on a 2xx that is not 200 does not settle the day", async () =
   // would not settle whichever way the gate is written. With the gate widened
   // to `>= 400`, and with the status check dropped in favour of `!okOf`
   // alone, the suite stayed green: the well-formed 202 then walked on into
-  // the inactive path and settled the day as "账号可能不在活动范围" — a
+  // the inactive path and settled the day as an account perhaps outside the
+  // active range — a
   // conclusion drawn from an answer the vendor never finished sending.
   for (const status of [202, 206]) {
     const r = await withFetch(
@@ -2730,7 +2746,7 @@ test("a login/info on a 2xx that is not 200 does not settle the day", async () =
 test("a 2xx that is not 200 is a refusal on the usage reads too", async () => {
   // The same widened gate survived on all three usage reads: a 202 carrying a
   // perfectly well-formed success body was read as a real answer, and the
-  // card showed "领 200" from a request the vendor never completed. A 202
+  // card showed a claim of 200 from a request the vendor never completed. A 202
   // means accepted-and-not-done; only 200 is the answer.
   const goodLedger = {
     body: {
@@ -3321,7 +3337,8 @@ test("the window reads the other separators an IME or an editor substitutes", ()
 test("done reports the day's grant from before the trigger, not from a page that changed", async () => {
   // the account was already in today: the credit is what the ledger said
   // before login/info was touched. Reading it again after the trigger lets a
-  // page that changed between the two reads answer "今日已领取 0 魔粒".
+  // page that changed between the two reads answer a claim of 0 credits for
+  // today.
   let reads = 0
   const real = globalThis.fetch
   globalThis.fetch = async (url) => {
@@ -3413,10 +3430,12 @@ test("a stamp that merely mentions the date is not today's row", async () => {
 })
 
 test("a day whose grants were reversed does not claim a negative credit", async () => {
-  // An EARN row can be a reversal (冲正), and a day netting below zero is a
+  // An EARN row can be a reversal (a correcting entry), and a day netting
+  // below zero is a
   // real state. magpie clamps `credit` itself (host.js's num: Math.max(0, v))
   // but passes `message` through verbatim (checkin.go renders it under the
-  // card's row), so the card read "今日已领取 -50 魔粒": a claim of a negative
+  // card's row), so the card read that -50 credits were claimed today: a
+  // claim of a negative
   // amount is not a thing. The rows are still named; the amount stops at zero.
   await withFetch(
     {
@@ -3470,7 +3489,8 @@ test("a day that nets to a positive grant still reports it", async () => {
 
 test("a spent day with no grant today shows a bar that matches the numbers", async () => {
   // before the day's grant, spending comes out of what is left. used=0 next to
-  // "今日用 348.5 / 领 0" says the bar did not move while the text says it did.
+  // a line saying used 348.5 today against 0 claimed says the bar did not
+  // move while the text says it did.
   await withFetch(
     {
       "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 100 } } },
@@ -3506,7 +3526,8 @@ test("a summed credit has no floating-point tail", async () => {
 })
 
 test("a key that is there but cannot be sent is not reported as a missing sign-in", async () => {
-  // the key is present, just unusable (a newline from a paste). "没有登录信息"
+  // the key is present, just unusable (a newline from a paste). A message
+  // about missing login information
   // sends the user to sign in again, which is not what is wrong.
   const withBadKey = async () => ({ type: "api", key: "ms-aaaa1111\nbbbb-2222" })
   const r = await auth.checkin(withBadKey)
@@ -3701,12 +3722,15 @@ test("a body that hangs half-read gives up at its own timeout, and says so", { t
 test("a request cut short by the hook's own deadline does not say 0 seconds", async () => {
   // The per-request cap is what is left of the hook's budget, so the last
   // request can have a few hundred milliseconds. Rounded, that printed
-  // "请求超时（0 秒）", which says neither which limit was hit nor anything
+  // a request-timed-out line of 0 seconds, which says neither which limit
+  // was hit nor anything
   // the user could act on.
   //
-  // The number is the ceiling of the budget in seconds — 300ms is "1 秒",
-  // 1001ms is "2 秒". A divisor written 1001 instead of 1000 rounds the same
-  // 1001ms down to "1 秒" and every other boundary with it; 300ms alone cannot
+  // The number is the ceiling of the budget in seconds — 300ms is reported
+  // as 1 second,
+  // 1001ms as 2. A divisor written 1001 instead of 1000 rounds the same
+  // 1001ms down to one second, and every other boundary with it; 300ms alone
+  // cannot
   // see that, because both divisors call it one second.
   for (const [left, said] of [
     [300, "1 秒"],
@@ -3725,7 +3749,8 @@ test("a request cut short by the hook's own deadline does not say 0 seconds", as
         // clock that keeps advancing spends this test's margin on whatever the
         // machine takes between the hook's deadline and the second request, and
         // a loaded run starts that request with nothing left — it is never
-        // sent, and the hook answers "预算已用完" instead of the timeout under
+        // sent, and the hook answers budget exhausted instead of the timeout
+        // under
         // test (measured on Node 18: 2 failures in 20 runs, at 350ms and
         // 364ms, the length of the margin). Pinned, the hook's deadline is
         // base + 18_000 and the second read sees base + 18_000 - left whatever
@@ -3846,15 +3871,16 @@ test("a balance field that is missing or not a number is a failure, not 0", asyn
     [{ available_balance: null }, "null"],
     // Blank, in every spelling. `rawAvailable === ""` was the only one the
     // guard named, and `Number("   ")` is 0 like `Number("")`, so a field of
-    // spaces answered "0 魔粒可用" — the same definite wrong 0, wearing
+    // spaces answered with a zero balance — the same definite wrong 0,
+    // wearing
     // whitespace. A tab and a newline are the same field read by an editor
     // that put nothing in it.
     [{ available_balance: "" }, "empty"],
     [{ available_balance: "   " }, "spaces"],
     [{ available_balance: "\t\n" }, "tab and newline"],
     // Number([]) is 0 and Number(true) is 1: both finite, both a definite
-    // answer that is wrong. The empty list is the "0 魔粒可用" this guard is
-    // for; the boolean is one 魔粒 nobody granted.
+    // answer that is wrong. The empty list is the zero-balance answer this
+    // guard is for; the boolean is one credit nobody granted.
     [{ available_balance: "1,234" }, "not a number"],
     [{ available_balance: [] }, "not a number"],
     [{ available_balance: true }, "not a number"],
@@ -3893,7 +3919,8 @@ test("a balance field that is missing or not a number is a failure, not 0", asyn
 
 test("a ledger amount we cannot read fails the read, it does not become 0", async () => {
   // A localized "1,200" (or a format change, or a null) is a body we do not
-  // understand. Read as 0 it says "领 0" beside a balance that clearly moved,
+  // understand. Read as 0 it says it claimed 0 beside a balance that
+  // clearly moved,
   // and the check-in answers `inactive` — which settles the day.
   const bad = ["1,200", "１２３", null, {}, true, "", "   ", "\t\n"]
   for (const amount of bad) {
@@ -4108,8 +4135,9 @@ test("a rule that grows during the touch is this run's claim, with the growth", 
 
 test("a growth of one 魔粒 is still this run's claim", async () => {
   // `gain > 0` decides that a rule's growth counts as the claim. As `> 1` a
-  // growth of exactly one 魔粒 — the smallest grant there is — stops being
-  // one: the check-in answers "没有到账记录" for a grant that landed. The
+  // growth of exactly one credit — the smallest grant there is — stops
+  // being one: the check-in answers with a no-credit-record message for a
+  // grant that landed. The
   // growth test above moves by 50, so the switch's own boundary was untested.
   const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10)
   let reads = 0
@@ -4134,7 +4162,8 @@ test("a growth of one 魔粒 is still this run's claim", async () => {
 
 test("a negative grant or a negative balance is not written onto the card as one", async () => {
   // EARN can carry a reversal. Summed as it comes the card reads
-  // "领 -50" and the limit is negative; a negative balance must not turn the
+  // claimed -50 and the limit is negative; a negative balance must not turn
+  // the
   // percentage into NaN.
   const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10)
   await withFetch(
@@ -4155,7 +4184,8 @@ test("a negative grant or a negative balance is not written onto the card as one
     },
   )
   // and the balance itself: the reversal direction can put it below zero, and
-  // "-5 魔粒可用" is not a thing the card can show. The clamp stopped at 0 for
+  // a balance of -5 credits is not a thing the card can show. The clamp
+  // stopped at 0 for
   // the grant, but nothing had ever handed it a negative balance to clamp.
   await withFetch(
     {
@@ -4172,7 +4202,7 @@ test("a negative grant or a negative balance is not written onto the card as one
 
 test("a balance with a floating-point tail is rounded like every other sum", async () => {
   // earned/spent were rounded; the balance was not, and 0.1 + 0.2 came out
-  // as 0.30000000000000004 魔粒可用
+  // as 0.30000000000000004 credits available
   await withFetch(
     {
       "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 0.1 + 0.2 } } },
@@ -4256,8 +4286,9 @@ test("a February that has no 30th is no time at all", async () => {
 })
 
 test("a balance with no data at all is a failure, not a card that says 0 left", async () => {
-  // 余额读成 0 是一个确定又错误的结论：卡片的进度条会满格、gateway 会把
-  // 这个账号当用尽。响应里没有 data 是「没读懂」，得重试。
+  // Reading the balance as 0 is a definite and wrong conclusion: the card's
+  // bar fills up and the gateway takes the account for used up. A response
+  // with no data is an unreadable answer, so it has to be retried.
   await withFetch(
     { "/openapi/v1/magicubes/balance": { body: { success: true } } },
     async () => {
@@ -4344,7 +4375,8 @@ test("with no directory, the config comes from XDG_CONFIG_HOME, else the home fo
 })
 
 test("once the claim is due, the card stops pointing at the moment it was due", async () => {
-  // The hint exists for the hours before the window: "领 0" alone reads like
+  // The hint exists for the hours before the window: a bare claim of 0 alone
+  // reads like
   // something went wrong. Past the target it is a promise about the past —
   // the claim has already been asked for — so it has to go. The hash decides
   // the target, so the clock goes to the window's own end, past any target it
@@ -4699,15 +4731,18 @@ test("usage names an answer it cannot read, at either step and in its own words"
   // `if (false)` on the ledger step's two (index.mjs) left the whole suite
   // green — those lines never executed at all — and the balance step's and
   // todayEarn's parse branches stayed green because the next line's fallback
-  // says almost the same thing ("账单查询失败：HTTP 404" vs "…响应不是
-  // JSON（HTTP 404）") and the fixtures only ever matched the status code.
+  // says almost the same thing (a ledger query failure with HTTP 404 vs a
+  // not-JSON response with HTTP 404) and the fixtures only ever matched the
+  // status code.
   //
-  // Each case keeps its own words — the step's name ("余额" / "账单") and either
+  // Each case keeps its own words — the step's name (balance / ledger) and
+  // either
   // the parse failure (which names the HTTP status) or the server's own message
   // — and the assertion cannot pass on the wrong line's fallback. `saidOf` of a
   // body that did not parse is empty, so the *next* line down prints the status
   // too: matching only /HTTP 200/ would stay green under `if (false)`. Requiring
-  // "不是 JSON" pins the parse branch; requiring the server's words pins the
+  // the not-JSON wording pins the parse branch; requiring the server's words
+  // pins the
   // envelope branch; a body with no message at all pins the `|| HTTP …` arm.
   const okBalance = { body: { success: true, data: { available_balance: 5 } } }
   const okLedger = { body: { success: true, data: { records: [] } } }
@@ -4776,7 +4811,8 @@ test("a data object without a records key is an empty ledger, not an error", asy
   )
   assert.equal(r.outcome, "inactive", "the day is answered on what the empty ledger says")
   // records that is there and null is the same mercy: the null half of the
-  // check, dropped, turns it into "records 不是列表" — a failure over a shape
+  // check, dropped, turns it into a records-not-a-list failure — a failure
+  // over a shape
   // that carries exactly as much as a missing key does.
   await withFetch(
     {
@@ -4791,8 +4827,10 @@ test("a data object without a records key is an empty ledger, not an error", asy
   )
 })
 
-// ---- 第二十三轮：字符串字面量的宽扫（前六轮扫的是布尔、比较与整数）留下的
-// 位点。每条都是「把这一个字改一个字母，整套测试全绿」的写法。
+// ---- Round twenty-three: the spots left by the wide sweep over string
+// literals (the six rounds before swept booleans, comparisons and integers).
+// Each is a "change this one letter to another and the whole suite stays
+// green" case.
 
 test("no request may follow a redirect away from modelscope.cn", async () => {
   // The session cookie is a request header, not a cookie jar: a redirect that
@@ -4967,10 +5005,12 @@ test("with no directory and no XDG_CONFIG_HOME, the config comes from ~/.config/
   }
 })
 
-// ── 第二十四轮：操作符与集合判断 ─────────────────────────────────────────
-// 前几轮把布尔、比较、整数和字符串/正则常量都改过一遍，`??`↔`||`、
-// `.some`↔`.every`、`+=`↔`-=`、`?.` 的有无、`await` 的有无一直没动。
-// 每条变异都在真模块上跑过：下面这些用例是那些变异唯一说得出口的地方。
+// ── Round twenty-four: operators and set predicates ────────────────────
+// The earlier rounds changed booleans, comparisons, integers and string /
+// regex constants; `??`↔`||`, `.some`↔`.every`, `+=`↔`-=`, the presence of
+// `?.` and of `await` were never touched. Every mutation was run against
+// the real module: the cases below are the only places where those mutations
+// show.
 
 test("a body that arrives in pieces is put back together byte for byte", async () => {
   // fetch hands the body over in whatever pieces the socket delivered, and a
@@ -4978,7 +5018,8 @@ test("a body that arrives in pieces is put back together byte for byte", async (
   // often as not. The pieces are joined by byte offset and decoded once:
   // joined with a decreasing offset (`at -=`) the second piece lands before
   // the first and the read throws "offset is out of bounds"; decoded piece by
-  // piece, 魔 becomes two replacement marks and the card's title is rubble.
+  // piece, a multi-byte character becomes two replacement marks and the
+  // card's title is rubble.
   const body = { success: true, data: { records: [day({ title: "注册并登录" })] } }
   await withFetch(
     {
@@ -5284,7 +5325,8 @@ test("a slow name write cannot spend the usage read's budget", async () => {
   // auth.set can spend ~20s of its 25s on a lock (see the test above). The
   // usage hook retries a write the check-in failed, and that retry ran before
   // the two reads: a lock held for 30s turned a card whose numbers were one
-  // request away into 预算已用完. The write belongs before the answer — the
+  // request away into budget exhausted. The write belongs before the answer
+  // — the
   // test above pins that — and after the reads.
   const real = Date.now
   let skew = 0
@@ -5386,7 +5428,8 @@ test("a timeout or a dead network is recognised however the runtime capitalises 
 test("a title and a nickname lose the padding around them before the card sees them", async () => {
   // text() trims after the control-character fold: a title the server padded,
   // or a nickname whose answer carried a stray space, otherwise lands on the
-  // card as "（  首次  ）" and gets written back to plugin-auth.json with the
+  // card still wearing it inside the parentheses and gets written back to
+  // plugin-auth.json with the
   // padding still on — the account then reads "  alice  " in magpie's own UI.
   await withFetch(
     {
@@ -5649,7 +5692,7 @@ test("the usage percentage rounds to two decimals on both denominators", async (
         why: "2 of 3 rounds up at the second decimal",
       },
       // the switch into that branch is `usedToday + available > 0`; as `> 1`
-      // a fractional pair summing to exactly one 魔粒 falls through to 100%,
+      // a fractional pair summing to exactly one credit falls through to 100%,
       // so half of a whole spent reads as everything spent
       {
         claim: [],
@@ -5684,7 +5727,8 @@ test("the usage percentage rounds to two decimals on both denominators", async (
 
 test("a grant of one 魔粒 is today's grant, not a fall-back to the balance", async () => {
   // The denominator switches on `earnedToday > 0`. As `> 1` an exactly-one
-  // grant falls through to the balance denominator, and one 魔粒 earned and
+  // grant falls through to the balance denominator, and one credit earned
+  // and
   // one spent reads "used 0.4" — a rounding test whose smallest grant is 201
   // never reaches the switch's own boundary.
   const dir = tmpDir("msmoli-one-")
@@ -5712,16 +5756,20 @@ test("a grant of one 魔粒 is today's grant, not a fall-back to the balance", a
   }
 })
 
-// ── 第二十六轮：语句级宽扫 ──────────────────────────────────────────────
-// 一轮只改表达式（运算符、字面量、方法名、正则标志）的扫描之后，这一轮改的是
-// 整条语句：掏空一条一行守卫、删掉 return 的值、删掉一条纯调用语句。下面钉住的
-// 是探针测出真实行为差异的那些位点；判为等价的几个记录在各条注释里。
+// ── Round twenty-six: the statement-level sweep ────────────────────────
+// After a round that changed only expressions (operators, literals, method
+// names, regex flags), this round changes whole statements: hollow out a
+// one-line guard, drop a return's value, delete a bare call statement. Pinned
+// below are the spots where the probes measured a real behaviour difference;
+// the few judged equivalent are recorded in each case's comments.
 
 test("a providers.json that parses to an empty object still takes the nickname", async () => {
-  // aliasOf 把 raw.providers 放进候选列表；{} 里没有 providers 键，列表元素
-  // 是 undefined。`if (!Array.isArray(list)) continue` 被掏空后，for...of
-  // undefined 立刻抛 "list is not iterable"，整次签到回答 failed——用户没做错
-  // 任何事，网也通，只因为 providers.json 恰好是个空对象，昵称就永远写不回来。
+  // aliasOf puts raw.providers into the candidate list; {} has no providers
+  // key, so the list element is undefined. With `if (!Array.isArray(list))
+  // continue` hollowed out, for...of over undefined immediately throws "list
+  // is not iterable" and the whole check-in answers failed — the user did
+  // nothing wrong and the network is fine, yet just because providers.json
+  // happens to be an empty object the nickname can never be written back.
   const dir = tmpDir("msmoli-emptyobj-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   writeFileSync(join(dir, "providers.json"), "{}")
@@ -5751,10 +5799,13 @@ test("a providers.json that parses to an empty object still takes the nickname",
 })
 
 test("a claim that landed is answered before the ledger is read a third time", async () => {
-  // 第二次读账本读到发放，回答 claimed。`if (daily) return …` 被掏空后，代码会
-  // 再读第三次——发放已经写出来、签到确实成功，而第三次读的失败把这张卡从
-  // 「领取 200 魔粒」翻成 failed。宿主看到 failed 会重试，但用户这一轮看到的是
-  // 一次假失败；账本已经写出来的事实不因重读的失败而改变。
+  // The second ledger read finds the grant and the answer is claimed. With
+  // `if (daily) return …` hollowed out, the code reads a third time — the
+  // grant has been written out and the check-in really did succeed, yet the
+  // third read's failure flips this card from a claim of 200 credits to
+  // failed. The host retries on failed, but what the user sees this round is
+  // a false failure; the fact that the ledger has already been written does
+  // not change because a re-read failed.
   let reads = 0
   const real = globalThis.fetch
   const grant = { gmt_created: today, type: "EARN", rule_key: "daily_active", title: "注册并登录", total_amount: 200, count: 1 }
@@ -5777,11 +5828,15 @@ test("a claim that landed is answered before the ledger is read a third time", a
 })
 
 test("a finished request leaves no timer armed behind it", async (t) => {
-  // json() 用 setTimeout 给整个请求（fetch 与读完 body）装上限时，finally 里
-  // clearTimeout。删掉那条语句，请求结束后计时器还挂着：逐个账号轮询时，每个
-  // 计时器都把插件的进程按满 TIMEOUT_MS 才放行。用计时器探针数，比数
-  // getActiveResourcesInfo 稳：本机 node 24 可用、bun 1.4.3 报空数组，探针
-  // 先自检「装了计时器看得见」，看不见就跳过，不会静默假绿。
+  // json() arms a limit on the whole request (the fetch and reading the
+  // body) with setTimeout, and clears it with clearTimeout in finally. Delete
+  // that statement and the timer is still pending after the request ends:
+  // polling account by account, every timer holds the plugin's process for
+  // the full TIMEOUT_MS before it is released. Counting with a timer probe is
+  // steadier than counting getActiveResourcesInfo: node 24 works on this
+  // machine and bun 1.4.3 reports an empty array; the probe first self-checks
+  // that an armed timer is visible and skips when it is not, never passing
+  // silently.
   const realSet = globalThis.setTimeout
   const realClear = globalThis.clearTimeout
   const armed = new Set()
@@ -5796,13 +5851,14 @@ test("a finished request leaves no timer armed behind it", async (t) => {
     return realClear(h)
   }
   try {
-    // 自检：探针看得见的计时器才算数
+    // self-check: only a timer the probe can see counts
     const probe = setTimeout(() => {}, 60000)
     const visible = armed.has(probe)
     clearTimeout(probe)
     armed.clear()
     cleared.clear()
-    // 看不见计时器的运行时明说跳过：静默 return 在 CI 里和通过长得一样
+    // a runtime where timers are invisible is skipped out loud: a silent
+    // return looks just like a pass in CI
     if (!visible) return t.skip("this runtime's timers are not visible to the spy")
 
     await withFetch(
@@ -5831,10 +5887,12 @@ const cnDay = (i) =>
   new Date(Date.parse(`${today}T00:00:00+08:00`) + i * 86400e3 + 8 * 3600e3).toISOString().slice(0, 10)
 
 test("the request timer is armed with the request's whole budget", async (t) => {
-  // json() 给整个请求（fetch 与读完 body）装上限时：setTimeout(…, budget)。
-  // 漏掉 budget 这个实参，延时就成了 0——每个请求都在发出去的同时被自己掐断，
-  // 卡片写「请求超时（1 秒）」。探针记下延时，并用 0 毫秒把它真触发一次，
-  // 这样不用等满 8 秒，超时那条文案也照样走到。
+  // json() arms a limit on the whole request (the fetch and reading the
+  // body): setTimeout(…, budget). Miss the budget argument and the delay
+  // becomes 0 — every request is cut off the moment it is sent, and the card
+  // says it timed out after 1 second. The probe records the delay and fires
+  // it for real at 0 ms, so the timeout wording is still exercised without
+  // waiting the full 8 seconds.
   const realSet = globalThis.setTimeout
   const realClear = globalThis.clearTimeout
   const realFetch = globalThis.fetch
@@ -5844,7 +5902,8 @@ test("the request timer is armed with the request's whole budget", async (t) => 
     return realSet(fn, 0, ...a)
   }
   try {
-    // 自检：探针看不见计时器的运行时明说跳过，静默 return 在 CI 里和通过一样
+    // self-check: a runtime where the probe cannot see timers is skipped out
+    // loud; a silent return looks like a pass in CI
     let seen = false
     const probe = setTimeout(() => {
       seen = true
@@ -5878,9 +5937,11 @@ test("the request timer is armed with the request's whole budget", async (t) => 
 })
 
 test("a control character in a name becomes a space, not the word undefined", async () => {
-  // text() 把控制字符替换成一个空格。漏掉替换串，String.replace 会把替换结果
-  // 写成字面量 "undefined"——昵称原样写回成「Miundefinedson」，卡片和
-  // plugin-auth.json 里都是这个。
+  // text() replaces a control character with a single space. Miss the
+  // replacement string and String.replace writes the replacement result as
+  // the literal "undefined" — the nickname is written back as
+  // "Miundefinedson", and that is what shows on the card and in
+  // plugin-auth.json alike.
   const dir = tmpDir("msmoli-cc-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
@@ -5907,9 +5968,10 @@ test("a control character in a name becomes a space, not the word undefined", as
 })
 
 test("a server's own words are cut at the card's 120 characters", async () => {
-  // saidOf 把服务端的 message 截到 120：卡片那一行放不下更多，而 magpie 原样
-  // 渲染 message。丢掉这个实参，截断点退回 cardText 的默认 200，一段两百字的
-  // 代理错误页会整段挤进卡片。
+  // saidOf truncates the server's message to 120: the card line cannot hold
+  // more, and magpie renders the message verbatim. Drop this argument and the
+  // cut-off falls back to cardText's default of 200, so a proxy error page of
+  // two hundred characters is crammed whole into the card.
   const long = "x".repeat(200)
   const r = await withFetch(
     { "/openapi/v1/magicubes/transactions?page=1&page_size=50": { status: 500, body: { Message: long } } },
@@ -5921,9 +5983,10 @@ test("a server's own words are cut at the card's 120 characters", async () => {
 })
 
 test("the day's claim target moves with the date", async () => {
-  // plan() 的 target 是「日期 + 账号」的哈希：同一天同一个账号固定（半小时
-  // 一次的追问要对得上），不同天不同。丢掉 day 这个实参，哈希里就只剩账号，
-  // 一年到头都在同一分钟领取。
+  // plan()'s target is the hash of "date + account": fixed for the same
+  // account on the same day (the half-hourly re-ask has to line up),
+  // different across days. Drop the day argument and the hash holds only the
+  // account, so it claims at the same minute all year round.
   const seen = new Set()
   for (let i = 0; i < 12; i++) {
     await withWindow(["08:30", "10:00"], `${cnDay(i)} 00:00:00`, async () => {
@@ -5934,8 +5997,10 @@ test("the day's claim target moves with the date", async () => {
 })
 
 test("a nickname longer than 40 is cut before it is written back", async () => {
-  // 写回的是 magpie 卡片上的账号名：一行放不下四十个字符以外的部分。丢掉
-  // 这个实参，截断点退回 text 的默认 120，一个长昵称会把卡片撑成两行。
+  // What is written back is the account name on magpie's card: anything past
+  // forty characters does not fit on one line. Drop this argument and the
+  // cut-off falls back to text's default of 120, and a long nickname
+  // stretches the card to two lines.
   const dir = tmpDir("msmoli-nm40-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
@@ -5962,9 +6027,11 @@ test("a nickname longer than 40 is cut before it is written back", async () => {
 })
 
 test("a ledger title in the day's list is cut at 40 characters", async () => {
-  // 两条路径都把账本标题放进卡片：今天已经领过时列的是触发前那一页
-  // （beforeDaily），刚领到时列的是账本长出来的那几行（gained）。两处的
-  // 标题都占卡片一行，都截到 40；截断点退回 200，长标题会把金额挤出去。
+  // Both paths put ledger titles on the card: when the day is already
+  // claimed they list the page from before the trigger (beforeDaily), and
+  // when the claim has just landed they list the rows the ledger grew
+  // (gained). Titles in both places take a card line and are cut to 40; with
+  // the cut-off back at 200, a long title squeezes the amount out.
   const claimed = await withFetch(
     {
       "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
@@ -5986,7 +6053,8 @@ test("a ledger title in the day's list is cut at 40 characters", async () => {
       return reply({ body: { Code: 200, Success: true, Data: { NickName: "Mison" } } })
     }
     reads += 1
-    // 第一次是触发前的账本（空的），第三次是到账后的
+    // the first is the ledger before the trigger (empty), the third is after
+    // the credit landed
     const records =
       reads === 1 ? [] : [day({ rule_key: "aliyun_bindlogin", title: "u".repeat(60), total_amount: 5 })]
     return reply({ body: { success: true, data: { records } } })
@@ -6002,9 +6070,11 @@ test("a ledger title in the day's list is cut at 40 characters", async () => {
 })
 
 test("once the budget is spent, the re-read is not sent", async () => {
-  // 每次请求吃掉 13 秒，25 秒的预算在第二次之后就用完了：第三次账本读取
-  // （到账确认）不该再发出去。丢掉 deadline 这个实参，它按 Infinity 算，
-  // 预算用完也照样发——钩子超时之后还挂着一个请求。
+  // Each request eats 13 seconds, so the 25-second budget runs out after the
+  // second: the third ledger read (the confirmation that the credit landed)
+  // must not be sent. Drop the deadline argument and it counts as Infinity,
+  // so it goes out even with the budget spent — a request still hanging
+  // after the hook has timed out.
   const realNow = Date.now
   const realFetch = globalThis.fetch
   let at = Date.parse(`${today}T10:00:00+08:00`)
@@ -6031,8 +6101,9 @@ test("once the budget is spent, the re-read is not sent", async () => {
 })
 
 test("the usage card's target moves with the date", async () => {
-  // 用量卡片上「· HH:MM 领取」和签到卡是同一个 plan()。丢掉 day，这一天
-  // 里没领到的账号会在卡片上永远写着同一个时刻。
+  // The claim time on the usage card (the "· HH:MM" line) uses the same
+  // plan() as the check-in card. Drop day, and an account that did not claim
+  // that day keeps showing the same instant on the card forever.
   const seen = new Set()
   for (let i = 0; i < 12; i++) {
     await withWindow(["08:30", "10:00"], `${cnDay(i)} 00:00:00`, async () => {
@@ -6054,12 +6125,14 @@ test("the usage card's target moves with the date", async () => {
 })
 
 test("a key that is not a string is no key, not the token 'null'", async () => {
-  // rawKey 的 `String(auth.key ?? "")`：null / undefined 时 `??` 给空串（没有
-  // 钥匙）。漏掉这个默认值就成了 String(null) = "null"——一个 SENDABLE 放行
-  // 的「令牌」，插件拿它去请求，卡片报「不在活动范围」而不是「没有登录信息」。
-  // 反过来，0 / false 是「不是 nullish 的值」：`??` 保留它们，String 之后
-  // 是 "0" / "false"，那确实是一把可以发出去的钥匙；`||` 会把它们读成空串，
-  // 把一把有值的钥匙丢成「没有登录信息」。
+  // rawKey's `String(auth.key ?? "")`: for null / undefined `??` gives the
+  // empty string (no key). Miss this default and it becomes String(null) =
+  // "null" — a token SENDABLE lets through, the plugin requests with it, and
+  // the card reports the account is out of the active range instead of no
+  // login information. Conversely, 0 / false are values that are not nullish:
+  // `??` keeps them, and after String they are "0" / "false", a key that truly
+  // can go out; `||` reads them as the empty string and throws a key that has
+  // a value away as no login information.
   for (const [key, want] of [
     [null, "none"],
     [undefined, "none"],
@@ -6090,11 +6163,13 @@ test("a key that is not a string is no key, not the token 'null'", async () => {
 })
 
 test("a response with no headers object is a length we do not know, not a crash", async () => {
-  // readBounded 用 `res.headers?.get?.(...)` 读长度。一个被代理改写、或被
-  // 宿主的 fetch 实现自己构造的响应，可能根本没有 headers 对象：`?.` 读成
-  // undefined，长度落在 NaN，正文照常读完。读成 `res.headers.get` 会抛
-  // TypeError，被 saidFailure 兜成「网络不通、被代理拦截」——一个拿到了
-  // 回答的请求被报成网络故障。
+  // readBounded reads the length with `res.headers?.get?.(...)`. A response
+  // rewritten by a proxy, or built by the host's fetch implementation itself,
+  // may have no headers object at all: `?.` reads undefined, the length lands
+  // on NaN, and the body is still read to the end. Read as `res.headers.get`
+  // it throws a TypeError, which saidFailure catches as a network failure
+  // blocked by a proxy — a request that got an answer is reported as a
+  // network fault.
   const realFetch = globalThis.fetch
   globalThis.fetch = async () => ({
     status: 200,
@@ -6125,10 +6200,11 @@ test("a response with no headers object is a length we do not know, not a crash"
 })
 
 test("a login answer with no data still finishes the check-in", async () => {
-  // dataOf 的 `?? {}`：login/info 可能只回一个 { Code: 200 }。少了这个
-  // 默认值，dataOf 给了 undefined，`me.NickName` 抛「Cannot read properties
-  // of undefined」——已经落地的领取被兜成 failed。空对象读成「没有昵称」，
-  // 是正常的完成，不是读不懂。
+  // dataOf's `?? {}`: login/info may return only a { Code: 200 }. Without
+  // this default dataOf gives undefined, and `me.NickName` throws "Cannot
+  // read properties of undefined" — a claim that already landed is caught as
+  // failed. An empty object reads as no nickname, which is a normal
+  // completion, not an unreadable answer.
   const r = await withFetch(
     {
       "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
@@ -6141,9 +6217,10 @@ test("a login answer with no data still finishes the check-in", async () => {
 })
 
 test("a ledger row with no title is not named on the card", async () => {
-  // cardText 的 `String(value ?? "")`：title 缺失/为 null 时读成空串，卡片
-  // 只写金额，不列「（undefined）」。0 / false 的标题则原样列上——「（0）」
-  // 是那一行真实的标题，不是没有；`||` 会把它们吞成纯金额。
+  // cardText's `String(value ?? "")`: a missing or null title reads as the
+  // empty string and the card writes only the amount, listing no
+  // "(undefined)". A title of 0 / false is listed as it is — "(0)" is that
+  // row's real title, not absence; `||` would swallow them into a bare amount.
   for (const [title, want] of [
     [undefined, "今日已领取 200 魔粒"],
     [null, "今日已领取 200 魔粒"],
@@ -6156,8 +6233,9 @@ test("a ledger row with no title is not named on the card", async () => {
     const r = await withFetch(
       {
         "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [row] } } },
-        // 已经领过的那一支照样要读 login/info 拿昵称：少了它这里会是 404，
-        // 断言就会钉在「登录接口失败」上，跟 title 没关系
+        // the already-claimed branch still has to read login/info for the
+        // nickname: without it this would be a 404, and the assertion would
+        // pin on a login-endpoint failure, nothing to do with title
         "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
       },
       async () => auth.checkin(async () => ({ type: "api", key: "ms-notitle-0000-0000-0000-00000042" })),
@@ -6168,10 +6246,11 @@ test("a ledger row with no title is not named on the card", async () => {
 })
 
 test("a data field that is an empty string is not shifted to the other spelling", async () => {
-  // dataObjectOf 的 `body?.data ?? body?.Data`：`??` 只在 data 是 nullish 时
-  // 看第二个拼写，`||` 则在一个空的 data 上也换过去。modelScope 两种拼写
-  // 都存在（账本用 data，login 用 Data），一个空字符串的 data 换过去就成了
-  // Data.records——一次真实的「没有 data」被读成「不在活动范围」。
+  // dataObjectOf's `body?.data ?? body?.Data`: `??` only looks at the second
+  // spelling when data is nullish, while `||` switches over even on an empty
+  // data. ModelScope has both spellings (the ledger uses data, login uses
+  // Data); with `||` an empty-string data switches over to Data.records — a
+  // genuine no-data answer read as not in the active range.
   const r = await withFetch(
     {
       "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: "", Data: { records: [] } } },
@@ -6184,10 +6263,12 @@ test("a data field that is an empty string is not shifted to the other spelling"
 })
 
 test("the plugin builds without an input object", async () => {
-  // MsmoliPlugin 的 `input?.directory` / `input?.client`：一个没有参数的调用
-  // （宿主的旧版本、或一个只 import 就调用的壳）该建出一个没有目录、没有
-  // client 的插件，两个字段各自取默认值。读成 `input.directory` 会在工厂里抛
-  // TypeError，插件整个加载失败——宿主只记一行日志，卡片上什么都不出现。
+  // MsmoliPlugin's `input?.directory` / `input?.client`: a call with no
+  // argument (an older host, or a shell that calls it right after import)
+  // should build a plugin with no directory and no client, each field taking
+  // its default. Read as `input.directory` it throws a TypeError in the
+  // factory and the whole plugin fails to load — the host logs one line and
+  // nothing appears on the card.
   for (const arg of [undefined, {}, null]) {
     const hooks = await MsmoliPlugin(arg)
     assert.equal(typeof hooks.auth.checkin, "function", `input=${JSON.stringify(arg)}`)
@@ -6195,13 +6276,15 @@ test("the plugin builds without an input object", async () => {
   }
 })
 
-// ── 第三十轮：全维度审查后的修复批次（有限但巨大的数、被截断的回显、
-// 同 key 多行的标题、客户端能否写入的判断）────────────────────────────
+// ── Round thirty: the fix batch after the full-dimension review (finite but
+// huge numbers, truncated echoes, titles across several rows under one key,
+// whether the client can write) ─────────────────────────────────────
 
 test("a finite amount too large to render is refused, not turned into Infinity", async () => {
-  // Number.isFinite 放过了 1e307：它是有限数，但 yin 的 ×100 溢出成 Infinity，
-  // 卡片会写「Infinity 魔粒可用」——一个读不懂的响应被画成一个确定的数。
-  // 「读不懂就失败」这条规则要覆盖「有限但超出可显示范围」。
+  // Number.isFinite lets 1e307 through: it is finite, but yin's ×100
+  // overflows to Infinity and the card would write an Infinity balance — an
+  // unreadable response drawn as a definite number. The rule that unreadable
+  // means failure has to cover finite but beyond the displayable range.
   await withFetch(
     {
       "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: "1e307" } } },
@@ -6239,8 +6322,10 @@ test("a finite amount too large to render is refused, not turned into Infinity",
 })
 
 test("a sum that overflows only after adding is refused too", async () => {
-  // 每一行单独看都读得懂（1e306 乘 100 仍是有限数），两行加起来越过阈值，
-  // yin 在求和那一步溢出。守卫在 amountOf（单行）之外还要在 yin（求和）上。
+  // Each row on its own is readable (1e306 times 100 is still finite), but
+  // the two together cross the threshold and yin overflows at the summing
+  // step. The guard has to sit on yin (the sum) as well as on amountOf (one
+  // row).
   const rows = [
     day({ total_amount: 1e306 }),
     day({ rule_key: "aliyun_bindlogin", title: "绑定", total_amount: 1e306 }),
@@ -6259,9 +6344,11 @@ test("a sum that overflows only after adding is refused too", async () => {
 })
 
 test("a percentage that overflows is left unsaid, not shown as not-started", async () => {
-  // 两个数量都读得懂，比值却可能大到 ×10000 溢出。宿主对非有限的 used 读作 0
-  // （num 只认有限数），于是「几乎全用光」被画成没动过。算不出就省略 used
-  // （宿主读作「没说」），文字那行仍写真实数量。
+  // Both quantities are readable, but their ratio can be large enough to
+  // overflow at ×10000. The host reads a non-finite used as 0 (num only
+  // accepts finite numbers), so almost-all-used-up is drawn as untouched.
+  // When it cannot be computed, omit used (the host reads that as not
+  // stated); the text line still writes the real quantities.
   const rows = [day({ total_amount: 0.5 }), spend(1e305)]
   const u = await withFetch(
     {
@@ -6277,9 +6364,11 @@ test("a percentage that overflows is left unsaid, not shown as not-started", asy
 })
 
 test("a rule whose first row has no title is still named by a later row", async () => {
-  // 账本按 (day, type, rule_key, model_tier) 聚合，一个 key 可以有多行。取第一
-  // 行的 title，若那一行恰好是服务端没写标题的那条，领取的信息就写成「+50」，
-  // 名字整个丢掉——另一行明明带着名字。
+  // The ledger aggregates by (day, type, rule_key, model_tier), so one key
+  // can have several rows. Taking the first row's title, if that row happens
+  // to be the one the server left untitled, writes the claim's information
+  // as "+50" and drops the name entirely — while another row plainly carries
+  // the name.
   const gained = [
     day({ rule_key: "aliyun_bindlogin", title: "", total_amount: 50 }),
     day({ rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50 }),
@@ -6304,7 +6393,8 @@ test("a rule whose first row has no title is still named by a later row", async 
 })
 
 test("a rule with no title on any row is shown by its amount alone", async () => {
-  // 所有行都没有名字时，信息写成「+100」而不是「 +100」——前面不留一个空位。
+  // When no row has a name, the information reads "+100" and not " +100" —
+  // no blank slot in front.
   const gained = [day({ rule_key: "aliyun_bindlogin", title: "", total_amount: 100 })]
   let reads = 0
   const real = globalThis.fetch
@@ -6324,9 +6414,11 @@ test("a rule with no title on any row is shown by its amount alone", async () =>
 })
 
 test("a fragment of the token echoed back is masked, not just the whole one", async () => {
-  // 服务端（或它前面的代理）回显会话时可能只登出前半段、中段或带前缀的片段，
-  // 那不再等于令牌本身，split() 走过去了。cardText 的 maskEchoes 按「连续子串、
-  // 长度 ≥ MIN_ECHO」把片段也掩掉。
+  // When the server (or the proxy in front of it) echoes the session it may
+  // expose only the first half, the middle, or a prefixed fragment; that no
+  // longer equals the token itself, and split() walks past it. cardText's
+  // maskEchoes masks the fragment too, by "contiguous substring, length ≥
+  // MIN_ECHO".
   const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
   for (const [what, frag] of [
     ["中段", token.slice(6, 30)],
@@ -6344,7 +6436,7 @@ test("a fragment of the token echoed back is masked, not just the whole one", as
     assert.ok(!r.message.includes(frag), `${what}的片段回到了卡片上: ${r.message}`)
     assert.match(r.message, /ms-a…5555/, `${what}应被整串掩码替代: ${r.message}`)
   }
-  // 账本标题那条路一样
+  // the same holds on the ledger-title path
   const frag = token.slice(6, 30)
   const row = { gmt_created: today, type: "EARN", rule_key: "daily_active", title: frag, total_amount: 200 }
   const r = await withFetch(
@@ -6358,9 +6450,11 @@ test("a fragment of the token echoed back is masked, not just the whole one", as
 })
 
 test("a token-shaped run with a character outside the id alphabet is masked", async () => {
-  // 老写法 /ms-[A-Za-z0-9][A-Za-z0-9-]{10,}/ 漏掉下划线、点、波浪号这类字符，
-  // 而插件的 SENDABLE 允许它们（可打印 ASCII 都行）。一个真的带下划线的令牌
-  // 被另一处回显时，形状规则认不出来、原样放行。字符集要与 SENDABLE 对齐。
+  // The old form /ms-[A-Za-z0-9][A-Za-z0-9-]{10,}/ missed characters such
+  // as underscores, dots and tildes, while the plugin's SENDABLE allows them
+  // (any printable ASCII will do). When a token that really carries an
+  // underscore is echoed elsewhere, the shape rule cannot recognise it and
+  // lets it through verbatim. The character set has to line up with SENDABLE.
   const foreign = "ms-other_key-1234-5678-9012"
   const r = await withFetch(
     {
@@ -6373,8 +6467,10 @@ test("a token-shaped run with a character outside the id alphabet is masked", as
   assert.match(r.message, /ms-o…9012/, `它该按形状被掩码: ${r.message}`)
 })
 
-// ── 第三十一轮：复查批次（代理的报错、不听 signal 的 fetch、不可见字符切开的
-// 回显、下午时段的 inactive、已领时的触达、回写的时机与冷却、用量分母）────
+// ── Round thirty-one: the review batch (the proxy's errors, a fetch that
+// does not listen to signal, echoes cut by invisible characters, the
+// afternoon's inactive, the touch when already claimed, write-back timing
+// and cooldown, the usage denominator) ───────────────────────────────
 
 // withNameDir runs fn with a plugin that reads its config from a fresh folder
 // (window off, no providers.json: aliasOf answers "no alias") and records what
@@ -6394,9 +6490,11 @@ const withNameDir = async (prefix, fn) => {
 }
 
 test("a proxy that will not connect is named as the proxy, not as a timeout", async () => {
-  // magpie 设了代理时用它自己的 fetch，代理失败抛的是普通 Error（Go 的原话
-  // "proxyconnect tcp: …"），不是 TypeError：卡片上原样一句英文；带 i/o
-  // timeout 的那种又被 /timeout/ 认成「请求超时（8 秒）」，把人推去查网络。
+  // With a proxy configured magpie uses its own fetch; a proxy failure throws
+  // an ordinary Error (Go's own words "proxyconnect tcp: …"), not a
+  // TypeError: the card carries one plain English sentence; the i/o timeout
+  // kind is taken by /timeout/ as a request timed out after 8 seconds, sending
+  // the user to check the network.
   const real = globalThis.fetch
   try {
     for (const why of ["dial tcp 127.0.0.1:7890: i/o timeout", "dial tcp 127.0.0.1:7890: connect: connection refused"]) {
@@ -6416,8 +6514,9 @@ test("a proxy that will not connect is named as the proxy, not as a timeout", as
 })
 
 test("a fetch that never listens to its signal still gives up at the cap", { timeout: 8000 }, async (t) => {
-  // 宿主的代理 fetch 用自己的计时器拨 CONNECT，不理插件传进去的 signal。只靠
-  // signal 时，钩子就一直等着它：8 秒的单次上限在这条路径上不成立。
+  // The host's proxy fetch dials CONNECT on its own timer and ignores the
+  // signal the plugin passes in. On signal alone the hook waits on it forever:
+  // the 8-second per-request cap does not hold on this path.
   if (!withMockTimers(t)) return
   const real = globalThis.fetch
   try {
@@ -6438,9 +6537,11 @@ test("a fetch that never listens to its signal still gives up at the cap", { tim
 })
 
 test("an echoed token cut by an invisible character is masked whole on the card", async () => {
-  // maskEchoes 按连续子串找片段，零宽空格或 \x01 把回显的令牌切成两段，前段
-  // 不到 MIN_ECHO；text() 随后把那个字符换成空格，令牌前段上了卡片。没有令牌
-  // 在手的出口（hostText）也一样：形状被切开就认不出来。
+  // maskEchoes finds fragments as contiguous substrings; a zero-width space
+  // or \x01 cuts the echoed token into two pieces, the front piece under
+  // MIN_ECHO; text() then turns that character into a space, and the front
+  // piece of the token lands on the card. The exit with no token in hand
+  // (hostText) is the same: once the shape is cut apart it is not recognised.
   const token = "ms-cut00000-1111-2222-3333-444455556666"
   for (const cut of ["​", "\x01", "﻿"]) {
     const echoed = `${token.slice(0, 11)}${cut}${token.slice(11)}`
@@ -6465,9 +6566,12 @@ test("an echoed token cut by an invisible character is masked whole on the card"
 })
 
 test("an afternoon inactive asks once more in half an hour, then settles", async () => {
-  // 12 点起宿主把 inactive 当天了结，不再暂定重问：下午时段里账本晚几秒写出来，
-  // 当天就被记成「账号可能不在活动范围」。插件自己用 until 要一次半小时后的
-  // 重问；只要一次——真不在活动范围的账号仍要当天了结。
+  // From 12 o'clock the host settles an inactive as the day's outcome and
+  // stops the tentative re-ask: in an afternoon window a ledger written a few
+  // seconds late gets the day recorded as an account perhaps outside the
+  // active range. The plugin asks for one re-ask half an hour later itself
+  // via until; only one — an account really outside the range still has to be
+  // settled that day.
   const empty = {
     "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
     "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: {} } },
@@ -6492,8 +6596,10 @@ test("an afternoon inactive asks once more in half an hour, then settles", async
 })
 
 test("a day already claimed does not touch login/info again once the name is known", async () => {
-  // 宿主在 12 点前把没见过领取的 done 每半小时重问一次；触达在「已领」判断
-  // 之前时，每一问都再记一次登录——网站上领过的账号一个上午多出十来次。
+  // Before 12 o'clock the host re-asks every half hour a done that never saw
+  // a claim; with the touch ahead of the already-claimed check, every ask
+  // records another login — an account claimed on the website picks up a
+  // dozen extra logins in one morning.
   const token = "ms-claimedskip-0000-0000-000000000001"
   const responses = {
     "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
@@ -6515,9 +6621,11 @@ test("a day already claimed does not touch login/info again once the name is kno
 })
 
 test("the name write-back waits for the answer, so its lock cannot spend the budget", async () => {
-  // 宿主的 auth.set 同步拿 plugin-auth.json 的锁（lockAuth，被占时最长约 20 秒）。
-  // 回写夹在触达和对账之间时，这段等待算进 25 秒预算，已经到账的签到被答成
-  // 「预算已用完」。
+  // The host's auth.set takes the plugin-auth.json lock synchronously
+  // (lockAuth, up to about 20 seconds while held). When the write-back is
+  // wedged between the touch and the reconciliation, that wait counts against
+  // the 25-second budget, and a check-in that already landed is answered
+  // budget exhausted.
   const real = Date.now
   let skew = 0
   Date.now = () => real() + skew
@@ -6560,9 +6668,11 @@ test("the name write-back waits for the answer, so its lock cannot spend the bud
 })
 
 test("a sign-in that lost its accountId gets the name again, after a cool-down", async () => {
-  // 回写记录是进程级的「写过了」：同一把令牌登出再登录，新的登录没有
-  // accountId，插件却再也不写，卡片一直显示「API key …」直到 magpie 重启。
-  // 改成按时间：一小时内不重写，过了再写。
+  // The write-back record is a process-wide already-written flag: sign out
+  // and back in with the same token and the new login has no accountId, yet
+  // the plugin never writes again and the card keeps showing "API key …"
+  // until magpie restarts. Changed to time-based: no rewrite within an hour,
+  // then write again after that.
   const real = Date.now
   let skew = 0
   Date.now = () => real() + skew
@@ -6589,8 +6699,10 @@ test("a sign-in that lost its accountId gets the name again, after a cool-down",
 })
 
 test("spending yesterday's leftover is not drawn as overspent while the balance holds", async () => {
-  // 每日发放 24 小时过期：昨天 15:00 领的今天 15:00 才失效。分母只算今天领的，
-  // 「昨天 250 + 今天 250、上午用 300」会被画成 120% 的超额，旁边写着余额 200。
+  // The daily grant expires after 24 hours: one claimed yesterday at 15:00
+  // only lapses today at 15:00. The denominator counts only today's claims,
+  // so yesterday's 250 plus today's 250 with 300 used this morning is drawn
+  // as a 120% overage with a balance of 200 beside it.
   const u = await withFetch(
     {
       "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 200 } } },
@@ -6633,8 +6745,10 @@ test("a body that never arrives and ignores the signal still gives up at the cap
 })
 
 test("a key echoed across a line break is still the key, and a shape does not run on past one", async () => {
-  // maskEchoes 认的是真令牌的片段：被换行切成两半、每半都不到 MIN_ECHO 的回显
-  // 仍是那把令牌。形状测试只认形状，不跨行——跨行会把下一行的字吞进掩码。
+  // maskEchoes recognises fragments of the real token: an echo cut in two by
+  // a newline, neither half reaching MIN_ECHO, is still that token. The shape
+  // test only recognises shapes and does not cross lines — crossing lines
+  // would swallow the next line's characters into the mask.
   const token = "ms-split000-1111-2222-3333-444455556666"
   const u = await withFetch(
     { "/openapi/v1/magicubes/balance": { status: 500, body: { success: false, message: `a ${token.slice(0, 11)}\n${token.slice(11, 22)} b` } } },
@@ -6648,10 +6762,12 @@ test("a key echoed across a line break is still the key, and a shape does not ru
 })
 
 test("a body full of control characters is masked in one pass, not one pass per character", async () => {
-  // 第三十一轮的逐码点扫描遇到不可见字符只推进末端、不推进起点，凑不出匹配时
-  // 起点只前进一格：一段不可见字符的每个位置都要重扫一遍它自己。256 KiB 的
-  // 换行（代理的错误页、服务器回显）要跑几分钟，而在 25 秒预算的钩子里——
-  // 宿主的事件循环也一起卡住。
+  // Round thirty-one's code-point scan, on an invisible character, advanced
+  // only the end and not the start; when no match could be assembled the
+  // start moved only one step, so every position in a run of invisible
+  // characters rescanned itself. 256 KiB of newlines (a proxy error page, a
+  // server echo) takes minutes, and inside a 25-second-budget hook the host's
+  // event loop stalls with it.
   const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
   for (const ch of ["\n", "​", "\x01"]) {
     const at = Date.now()
@@ -6666,8 +6782,10 @@ test("a body full of control characters is masked in one pass, not one pass per 
 })
 
 test("masking a long echo keeps every character in place, invisible ones included", async () => {
-  // 逐字符重建（而不是切片拼接）最容易在这里出错：不可见字符掉的、行结构
-  // 并掉的、令牌前后文字少一格的，都在这里现形。
+  // Rebuilding character by character (rather than joining slices) is where
+  // this goes wrong most easily: dropped invisible characters, merged line
+  // structure, text one character short before or after the token — all of
+  // them show up here.
   const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
   const cases = [
     ["all", `${token}`],
@@ -6699,9 +6817,10 @@ test("masking a long echo keeps every character in place, invisible ones include
   assert.match(two.error, /ms-a…5555 and ms-a…5555/, `两处各掩一次: ${two.error}`)
 })
 
-// ── 第三十四轮：卡片上的「别家」密钥 ─────────────────────────────────────
+// ── Round thirty-four: other vendors' keys on the card ────────────────
 
-// 最长「原样出现在文本里」的连续子串；12 与 mask 的门槛同源
+// the longest contiguous substring that appears verbatim in the text; the 12
+// shares mask's threshold
 const longestKeptIn = (text, secret) => {
   let best = ""
   for (let i = 0; i < secret.length; i++)
@@ -6713,14 +6832,17 @@ const longestKeptIn = (text, secret) => {
 }
 
 test("a key the plugin does not hold is masked on the card too", async () => {
-  // cardText 的三道里，前两道都围着「本账号的令牌」转，第三道只认 ms- 形状。
-  // 于是账本 title（服务端可控）里带一把别家的 key 时整段上卡片：实测 ghp 保留
-  // 34/40、AWS 34/40、AKIA 20/20、hex 32/32。卡片的承诺是 key 不上卡片，
-  // 别家的 key 也是 key。
+  // Of cardText's three gates, the first two revolve around this account's
+  // token and the third only recognises the ms- shape. So when the ledger
+  // title (server-controlled) carries another vendor's key, all of it goes
+  // on the card: measured, ghp kept 34/40, AWS 34/40, AKIA 20/20, hex 32/32.
+  // The card's promise is that keys do not go on the card, and another
+  // vendor's key is a key too.
   const foreign = {
     ghp: "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
     aws: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-    // 拆开拼：GitHub 的推送保护会把整串当成真 Slack 令牌拦下推送。
+    // assembled from pieces: GitHub's push protection would take the whole
+    // string for a real Slack token and block the push.
     xoxb: "xoxb-" + "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx",
     akia: "AKIAIOSFODNN7EXAMPLE",
     hex: "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
@@ -6746,8 +6868,10 @@ test("a key the plugin does not hold is masked on the card too", async () => {
 })
 
 test("a real ledger title is not mistaken for a key", async () => {
-  // 反向：判据要宽到能掩 AWS secret，就不能窄到把正常标题也掩了。这些是
-  // ModelScope 账本里真会出现的形状（中文标题、rule_key、模型名、日期）。
+  // The reverse: a criterion wide enough to mask an AWS secret must not be so
+  // narrow that it masks ordinary titles too. These are shapes that really
+  // occur in ModelScope ledgers (Chinese titles, rule_key, model names,
+  // dates).
   const titles = [
     "每日签到",
     "社区任务奖励",
@@ -6770,9 +6894,11 @@ test("a real ledger title is not mistaken for a key", async () => {
     )
     assert.ok((r.message ?? "").includes(title), `真实标题被误掩：${title} → ${r.message}`)
   }
-  // 一个以 / 起头的值就算带着两段 12+ 位混合大小写的组件，也是路径不是 key：
-  // 路径结尾那段照旧可读（整串被当成 key 时只剩 "/Use…Name"）
-  // 卡片把标题截到 40 码点，所以用一条能整条放下的短路径
+  // A value starting with / is a path, not a key, even carrying two 12+
+  // mixed-case components: the end of the path stays readable as before (when
+  // the whole string is taken for a key, all that is left is "/Use…Name").
+  // The card cuts titles to 40 code points, so use a short path that fits
+  // whole
   const pathy = "/SomeLongDirName/AnotherLongNm"
   const ledger = { success: true, data: { records: [day({ title: pathy })], total: 1 } }
   const r = await withFetch(
@@ -6783,7 +6909,7 @@ test("a real ledger title is not mistaken for a key", async () => {
     () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
   )
   assert.ok((r.message ?? "").includes("/AnotherLongNm"), `以 / 起头的值不该整串被掩：${r.message}`)
-  // 盘符与 UNC 也算路径起头（PATHY 的另外两臂）
+  // drive letters and UNC count as path starts too (PATHY's other two arms)
   for (const [v, keep] of [["C:\\SomeLongDirName\\AnotherLongNm", "AnotherLongNm"], ["\\\\srv\\SomeLongDirName\\AnotherLongNm", "AnotherLongNm"]]) {
     const led = { success: true, data: { records: [day({ title: v })], total: 1 } }
     const r2 = await withFetch(
@@ -6795,8 +6921,9 @@ test("a real ledger title is not mistaken for a key", async () => {
     )
     assert.ok((r2.message ?? "").includes(keep), `${v} 是路径起头，不该整串被掩：${r2.message}`)
   }
-  // 服务端自己的报错原话也走同一道门：这些是 magpie 会原样带上卡片的措辞，
-  // 没有一个是 key 的形状，一个字都不该被掩
+  // The server's own error wording goes through the same gate: these are
+  // phrasings magpie carries onto the card verbatim, none of them is key
+  // shaped, and not one character should be masked
   for (const said of [
     "系统繁忙，请稍后重试",
     "请求过于频繁",
@@ -6812,12 +6939,15 @@ test("a real ledger title is not mistaken for a key", async () => {
   }
 })
 
-// ── 第三十五轮：被分隔符拆成短段的 key，与框在文字里的 key ──────────────
+// ── Round thirty-five: keys split into short pieces by separators, and keys
+// framed inside text ───────────────────────────────────────────────
 
 test("a key split into short pieces is masked on the card too", async () => {
-  // keyShaped 按「连续的字母数字段」判：一把被 - _ . 拆成几段、每段都不到 16 位
-  // 的 key 没有一段合格，整把上卡片（实测 42/42、35/35）。合起来判：去掉分隔符
-  // 后整把够长、又混着大小写，或是一段带分隔符的 hex 摘要。
+  // keyShaped judges by contiguous runs of letters and digits: a key split
+  // by - _ . into pieces each under 16 characters has no qualifying piece and
+  // the whole key goes on the card (measured 42/42, 35/35). Judge it as a
+  // whole: after stripping the separators the whole is long enough and mixes
+  // case, or it is a hex digest carrying separators.
   const keys = [
     "nUJqxrpd9Bc7-GvG7J--onUJqxrpd9Bc7-GvG7J--o",
     "AbCdEfGh.IjKlMnOp.QrStUvWx.Yz012345",
@@ -6826,8 +6956,10 @@ test("a key split into short pieces is masked on the card too", async () => {
     "56b3f97586dedd63",
     "a1b2c3d4e5f6g7h8i9j0k1l2-o3p4q5r6s7t8u9v0w1",
   ]
-  // 16 位小写字母数字串、不全是 hex 的（modelscope20261031 那种）不在里面：
-  // 与 provider id 的日期形状不可区分，第三十二轮起就按名字处理，反向测试钉着它
+  // A 16-character lowercase alphanumeric string that is not all hex (the
+  // modelscope20261031 kind) is not among them: indistinguishable from a
+  // provider id's date shape, since round thirty-two it is treated as a name,
+  // and the reverse test pins that
   for (const key of keys) {
     for (const title of [`bonus ${key}`, `bonus: ${key}.`, key]) {
       const ledger = { success: true, data: { records: [day({ title })], total: 1 } }
@@ -6846,10 +6978,13 @@ test("a key split into short pieces is masked on the card too", async () => {
 })
 
 test("a UUID inside a larger word is masked by the run and UUID pass, not left whole", async () => {
-  // maskKeys 对「不是一个 key 的词」还有第三道：词内的 key-like run 与内嵌的
-  // UUID 各掩各的。前两条测试给的是独立 UUID 词，走的是 isKeyWord 整词那条，
-  // 第三道从没被走到。用一个带 / 的词把 UUID 包进去：/ 不在 identity 字母表，
-  // 整词不算 key，于是 UUID_ANY 这一趟才真正跑起来（实测该分支命中 1 次）。
+  // maskKeys has a third gate for words that are not a key: a key-like run
+  // inside a word and an embedded UUID are each masked on their own. The two
+  // earlier tests give standalone UUID words, which take the whole-word
+  // isKeyWord path, and the third gate was never reached. Wrap the UUID in a
+  // word with /: / is not in the identity alphabet, the whole word does not
+  // count as a key, and so the UUID_ANY pass actually runs (measured: that
+  // branch hit once).
   const U = "550e8400-e29b-41d4-a716-446655440000"
   for (const title of [`path/${U}`, `ref/${U}.json`, `${U}/${U}`]) {
     const ledger = { success: true, data: { records: [day({ title })], total: 1 } }
@@ -6867,9 +7002,10 @@ test("a UUID inside a larger word is masked by the run and UUID pass, not left w
 })
 
 test("a server's key=value words are not masked on the card", async () => {
-  // 与 bin/sync.mjs 同一条：「含 +/= 就整词算 key」会把 retry=true、id=12345
-  // 这样的词整词掩掉，卡片上只剩一个「…」。key 的 base64 本体带着 16+ 位长串，
-  // 不受影响。
+  // Same rule as bin/sync.mjs: "contains +/= so the whole word counts as a
+  // key" would mask whole words like retry=true and id=12345, leaving only a
+  // "…" on the card. A key's base64 body carries a 16+ character run and is
+  // unaffected.
   for (const said of [
     "request failed: retry=true, id=12345, host=https://www.modelscope.cn",
     "bonus: retry=true.",
@@ -6884,9 +7020,11 @@ test("a server's key=value words are not masked on the card", async () => {
 })
 
 test("a short base64 key is masked on the card, a query's = is not", async () => {
-  // 与 bin/sync.mjs 的 base64y 同一条：低于 16 位、靠 + 或 = 现形的短 key
-  // （AbCdEfGh+IjKlMnOp、dGhpc2lzYQ==）在卡片上也不能原样留下；而服务端措辞里的
-  // retry=true / id=1234567890 带的是裸 =，不该被整词掩成一个「…」。
+  // Same rule as base64y in bin/sync.mjs: short keys under 16 characters
+  // that show themselves by + or = (AbCdEfGh+IjKlMnOp, dGhpc2lzYQ==) must not
+  // stay verbatim on the card either; and retry=true / id=1234567890 in the
+  // server's wording carry a bare =, and must not be masked whole into a
+  // "…".
   const masks = ["AbCdEfGh+IjKlMnOp", "AbCdEf+GhIjKl=", "abcdefghij0123456789=", "dGhpc2lzYQ=="]
   for (const key of masks) {
     for (const title of [`bonus ${key}`, `bonus: ${key}.`, `优惠码 ${key}，谢谢`]) {
@@ -6912,9 +7050,12 @@ test("a short base64 key is masked on the card, a query's = is not", async () =>
 })
 
 test("a hyphenated provider name survives the card's glued arm", async () => {
-  // 合体那一臂从「去分隔符后大小写都有」改为「至少两段段内大小写交替」：名字
-  // 每段首字母大写、段内不翻转，最多一段合格。Qwen3-Coder-480B-A35B-Instruct、
-  // MyProvider-Prod-Edition-2026 这类 provider id / 模型名不该被掩。
+  // The combined arm changed from has-both-cases-after-stripping-separators
+  // to at-least-two-segments-alternating-case-within-the-segment: a name
+  // capitalises each segment and does not flip inside one, so at most one
+  // segment qualifies. Provider ids / model names like
+  // Qwen3-Coder-480B-A35B-Instruct or MyProvider-Prod-Edition-2026 must not
+  // be masked.
   const names = [
     "Qwen3-Coder-480B-A35B-Instruct",
     "MyProvider-Prod-Edition-2026",
@@ -6936,10 +7077,14 @@ test("a hyphenated provider name survives the card's glued arm", async () => {
 })
 
 test("a card title of nothing but punctuation does not stall maskKeys", async () => {
-  // maskKeys 原先用 `word.slice(lead).match(/[^…]*$/)` 剥离尾部标点：锚尾的星号式
-  // 回溯在一个字母开头、字母结尾、中间全是标点的词上从每个起点重试直到穷尽，20
-  // 万字符一次匹配实测 117 秒，而账簿的 title 是服务端可控的。改成两头各一次线性
-  // 内移后是 0.3ms。全标点的词不行——它在第一个起点就匹配成功，旧实现 0.6ms 就过
+  // maskKeys used to strip trailing punctuation with
+  // `word.slice(lead).match(/[^…]*$/)`: the anchored-star backtracking on a
+  // word that starts with a letter, ends with a letter and is all punctuation
+  // in between retried from every start until exhausted — 200,000 characters
+  // in one match measured 117 seconds, and the ledger's title is
+  // server-controlled. Changed to one linear inward move at each end, it is
+  // 0.3ms. An all-punctuation word does not blow up: it matches at the first
+  // start, where the old implementation got through in 0.6ms
   const bomb = "a" + "!".repeat(200_000) + "a"
   const ledger = { success: true, data: { records: [day({ title: bomb })], total: 1 } }
   const t0 = performance.now()
@@ -6955,17 +7100,21 @@ test("a card title of nothing but punctuation does not stall maskKeys", async ()
 })
 
 test("a nickname that is another vendor's key is not written back as the account name", async () => {
-  // 服务端的 NickName 会被原样写进 plugin-auth.json 的 accountId（磁盘明文，
-  // 卡片的掩码管不到那里）：实测把 ghp_16C7… 写成账号名，sk-ant 本体截到 40 位
-  // 也照样写。unusableName 补上卡片同一套判据（逐词 isKeyWord）后，论键形状的昵称
-  // 不写回；普通昵称（含大小写混排的 Qwen3-Coder）照写。
+  // The server's NickName is written verbatim into plugin-auth.json's
+  // accountId (plain text on disk, where the card's masking cannot reach):
+  // measured, writing ghp_16C7… as the account name, and an sk-ant body cut
+  // to 40 characters still gets written. Once unusableName applies the card's
+  // own criterion (per-word isKeyWord), a key-shaped nickname is not written
+  // back; an ordinary nickname (including the mixed-case Qwen3-Coder) still
+  // is.
   const dir = tmpDir("msmoli-nickkey-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
   try {
-    // 每个用例一个 token：名字按 token 只写回一次（named 冷却），共用一个 token
-    // 会让先通过的那条吃掉后面要断言的写入
+    // one token per case: a name is written back only once per token (the
+    // named cooldown), and a shared token would let the case that passes
+    // first eat the write a later case asserts
     let n = 0
     const run = async (nick) => {
       n += 1
@@ -7004,9 +7153,12 @@ test("a nickname that is another vendor's key is not written back as the account
 })
 
 test("a vendor key with one case flip is masked on the card", async () => {
-  // 合体判据从「段内交替的段数 >= 2」改成「整词里 [a-z][A-Z] 的总次数 >= 2」后，
-  // sk-ant-api03-Eyai1pkJrF_Kbwt（Ey 与 Kw 两处）在卡片上也被掩——它在 9aa0bcd
-  // 之后曾漏过。名字照旧：段首字母大写、段内不翻转，各只算一处。
+  // After the combined criterion changed from at-least-two alternating
+  // segments to a total count of [a-z][A-Z] in the whole word of at least
+  // two, sk-ant-api03-Eyai1pkJrF_Kbwt (Ey and Kw, two places) is masked on
+  // the card too — it had slipped through after 9aa0bcd. Names are as
+  // before: a capitalised segment start with no inner flip counts one place
+  // each.
   const keys = [
     "sk-ant-api03-Eyai1pkJrF_Kbwt",
     "sk-ant-api03-Eyai1pkJrF_KbwtQm3Z8Vd2Nc7Rt5Hs",
@@ -7041,8 +7193,10 @@ test("a vendor key with one case flip is masked on the card", async () => {
 })
 
 test("a non-ms key cut by an invisible character is masked whole on the card", async () => {
-  // 与 bin/sync.mjs 的 GLUE 同一条：非 ms- 形状的密钥被零宽空格/\x01 从中间
-  // 劈开，两半各低于词级门槛，卡片上留下后段（实测 14 位 ghp_、12 位 sk-ant）。
+  // Same rule as GLUE in bin/sync.mjs: a secret not shaped like ms- split
+  // down the middle by a zero-width space or \x01, each half below the
+  // word-level threshold, leaves the later piece on the card (measured: a
+  // 14-character ghp_ and a 12-character sk-ant).
   for (const key of ["ghp_16C7e42F292c6912E7710c8", "sk-ant-api03-Eyai1pkJrF_Kbwt", "abcdefghij0123456789="]) {
     for (const cut of ["​", "\x01", "﻿"]) {
       const at = Math.floor(key.length / 2)
@@ -7058,11 +7212,14 @@ test("a non-ms key cut by an invisible character is masked whole on the card", a
 })
 
 test("no test creates a temp folder outside the tracked helper", async () => {
-  // 每个测试的临时目录都要经 tmpDir 登记，after 钩子统一删。以前有一批测试
-  // 建完临时目录又不 rmSync，$TMPDIR 里累积到 20 万+ 个 msmoli-* 目录。
-  // 这条守卫读本文件源码，凡是带字面量前缀、绕过 tmpDir 登记的建目录调用都是
-  // 会再泄漏的形状；只允许变量前缀的 helper 定义（tmpDir 与 withNameDir，
-  // 后者自清）。
+  // Every test's temp directory has to be registered through tmpDir, and the
+  // after hook deletes them all. A batch of tests used to create temp
+  // directories without rmSync, and $TMPDIR accumulated 200,000+ msmoli-*
+  // directories. This guard reads this file's own source: any directory-
+  // creating call with a literal prefix that bypasses tmpDir registration is
+  // a shape that would leak again; only helper definitions with a variable
+  // prefix are allowed (tmpDir and withNameDir, the latter cleans up after
+  // itself).
   const self = readFileSync(fileURLToPath(import.meta.url), "utf8")
   const raw = self.match(/mkdtempSync\(join\(tmpdir\(\), "/g) ?? []
   assert.equal(raw.length, 0, `有 ${raw.length} 处直接用字面量前缀建临时目录，未经 tmpDir 登记，会泄漏`)

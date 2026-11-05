@@ -1,4 +1,4 @@
-// ModelScope (魔搭) 魔粒 check-in for magpie — one provider that serves both
+// ModelScope credits check-in for magpie — one provider that serves both
 // modelscope.cn and modelscope.ai, each account on the site its token is from.
 //
 // magpie calls auth.checkin once a Beijing day per signed-in account while the
@@ -8,7 +8,7 @@
 // How the claim works: ModelScope's OpenAPI has no check-in endpoint. What it
 // has is a side effect — GET /api/v1/users/login/info counts as a website
 // sign-in, and the server grants that day's credits with it (200 for the
-// "注册并登录" daily grant, 50 for a bound Aliyun account), once per day.
+// "register-and-sign-in" daily grant, 50 for a bound Aliyun account), once per day.
 // modelscope.ai is the same backend with the same paths and the same
 // daily_active rule, but separate accounts and separate tokens: measured, an
 // ms- token authenticates only on the site it came from.
@@ -61,7 +61,8 @@ const TXNS = "/openapi/v1/magicubes/transactions"
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 
-// 每日发放的规则。这类魔粒 24 小时过期，不累积。
+// The daily-grant rules. This kind of credits expires in 24 hours; they do not
+// accumulate.
 const DAILY_RULES = ["daily_active", "aliyun_bindlogin"]
 
 const TIMEOUT_MS = 8000
@@ -145,7 +146,8 @@ const handleOf = (token) => fnv(token).toString(16)
 // magpie's own fetch, behind a proxy, fails in Go's words — a plain Error
 // "proxyconnect tcp: dial tcp 127.0.0.1:7890: i/o timeout" (host.js), not a
 // TypeError — so it is named before the timeout test: its "i/o timeout" is the
-// proxy's dial, and "请求超时（8 秒）" would send the user after the network
+// proxy's dial, and the "request timed out (8 s)" wording would send the user
+// after the network
 // when the proxy is what is down.
 function saidFailure(e, ctl, budget) {
   if (e !== ctl.signal.reason && /^proxyconnect\b/i.test(String(e?.message ?? ""))) {
@@ -154,7 +156,8 @@ function saidFailure(e, ctl, budget) {
   if (e === ctl.signal.reason || /timeout/i.test(String(e?.message ?? ""))) {
     // Ceiling, not round: the budget can be down to a few hundred
     // milliseconds when the hook's own deadline is what cut it short, and
-    // "请求超时（0 秒）" tells the user nothing about which of the two it was.
+    // "request timed out (0 s)" tells the user nothing about which of the two
+    // it was.
     return new Error(`请求超时（${Math.max(1, Math.ceil(budget / 1000))} 秒）`)
   }
   if (e?.name === "TypeError" || /fetch failed/i.test(String(e?.message ?? ""))) {
@@ -407,11 +410,13 @@ function cnTime(value) {
   return Number.isFinite(at) ? new Date(at).toISOString() : ""
 }
 
-// ── 签到时段 ──────────────────────────────────────────────────────────────
-// magpie 在北京日切换时问一次，之后每 30 分钟重试一次失败；插件没有自己的
-// 定时器（见 README 的「上游」一节）。所以在还没到今天这个账号的目标时刻
-// 时，只能回答 failed——那是宿主唯一会重试的结果——其余结果都会让当天就此
-// 了结。夜里这一问一答不发出任何请求，领的动作留给上班时段的那一问。
+// ── Check-in window ───────────────────────────────────────────────────────
+// magpie asks once at the Beijing-day rollover and retries a failure every 30
+// minutes; the plugin has no timer of its own (see the README's "upstream"
+// section). So before today's target moment for this account arrives, the only
+// answer is failed — that is the one outcome the host retries; every other
+// outcome ends the day there and then. That overnight ask-and-answer sends no
+// request; the claim itself is left to the ask during working hours.
 const WINDOW_DEFAULT = ["08:30", "10:00"]
 
 // LAST is the latest minute the window's end is capped at. The host asks
@@ -727,7 +732,7 @@ const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]
 // floor but which together are — a key written as nUJqxrpd9Bc7-GvG7J--o… or
 // AbCdEfGh.IjKlMnOp… (measured on the card before that arm was added: all 34
 // of the first, all 35 of the second). A word does not qualify — which is what
-// keeps "每日签到", a model tier or a rule_key readable on the card.
+// keeps "Daily check-in", a model tier or a rule_key readable on the card.
 const RUN = /[A-Za-z0-9]+/g
 // the characters a key's word can be built from; punctuation outside this set is
 // the frame around it ("…", a trailing full stop, a comma)
@@ -956,11 +961,12 @@ const whyOf = (e) =>
 
 // EXPIRED is what a 401 says, wherever it is met: the ledger read before the
 // touch, the touch itself, or either of usage's two reads. Three wordings
-// used to exist for one condition ("令牌失效或不属于国内站", the same plus
-// "（HTTP 401）", and a bare "HTTP 401" from the balance/ledger path), and the
+// used to exist for one condition ("the token is invalid or not from the CN
+// site", the same plus an HTTP 401 suffix, and a bare "HTTP 401" from the
+// balance/ledger path), and the
 // README's troubleshooting row promises the user will see the status code in
-// it — which only two of the three carried. `where` is the profile's 国内站/
-// 国际站, and stays in the one wording so the card says which site refused
+// it — which only two of the three carried. `where` is the profile's CN site /
+// INT site, and stays in the one wording so the card says which site refused
 // the token.
 const expired = (where) => `令牌失效或不属于${where}（HTTP 401）`
 
@@ -978,16 +984,16 @@ const RISK = "被魔搭风控拒绝（HTTP 403）"
 // gate turns a reply that is not an answer into the error it is, so the four
 // reads that talk to ModelScope (the ledger, the touch, usage's balance and
 // usage's ledger) do not each carry their own copy of the four checks. `what`
-// names the read in the message ("账单查询失败" / "余额查询失败" / "登录接口
-// 失败"); `risk` is the 403 wording, which the touch alone extends with the
-// retry it can promise. `profile` is there for the one site-specific word a
-// 401 carries (国内站/国际站).
+// names the read in the message ("ledger query failed" / "balance query
+// failed" / "login endpoint failed"); `risk` is the 403 wording, which the
+// touch alone extends with the retry it can promise. `profile` is there for
+// the one site-specific word a 401 carries (the CN site / the INT site).
 //
 // The parse check and the status check are separate on purpose: a body that
 // does not parse is not JSON; a body that parses and carries a 429/500 is the
-// server saying why in its own words (「请求过于频繁」「系统繁忙」). Merged,
-// a JSON-carrying 429 was reported as "响应不是 JSON" and sent the user to
-// check their proxy.
+// server saying why in its own words ("too many requests" / "system busy").
+// Merged, a JSON-carrying 429 was reported as "the response is not JSON" and
+// sent the user to check their proxy.
 const gate = (profile, res, body, parsed, token, what, risk = RISK) => {
   if (res.status === 401) throw deadToken(profile.where)
   if (res.status === 403) throw new Error(risk)
@@ -1023,7 +1029,7 @@ const deferred = new Map()
 // nothing but whitespace. The empty string was already refused at both
 // numeric sites; the spaces were not, and `Number("   ")` is 0 — so a blank
 // amount read as "a grant of nothing" (the check-in answers `inactive`, which
-// settles the day) and a blank balance as "0 魔粒可用". A padded number
+// settles the day) and a blank balance as "0 credits available". A padded number
 // (" 251.5 ") is not blank: it says what it means.
 const blankOf = (v) => v === undefined || v === null || (typeof v === "string" && !v.trim())
 
@@ -1032,7 +1038,7 @@ const blankOf = (v) => v === undefined || v === null || (typeof v === "string" &
 // 0: the same rule the whole body gets one level up. A localized "1,200", a
 // format change, a null — each would otherwise make a real grant look like
 // "nothing arrived": the check-in would answer `inactive` (which settles the
-// day) and the card would say 领 0 next to a balance that clearly moved.
+// day) and the card would say claimed 0 next to a balance that clearly moved.
 // Absent is included: a row with no amount cannot be summed either way.
 const amountOf = (row) => {
   const raw = row?.total_amount
@@ -1044,7 +1050,7 @@ const amountOf = (row) => {
   const n = Number(raw)
   // readable, not just isFinite: a huge finite value ("1e307") survives isFinite
   // and only blows up at the card, where yin's ×100 overflows to Infinity — so
-  // "Infinity 魔粒" would be printed for a body we cannot actually read. The
+  // "Infinity credits" would be printed for a body we cannot actually read. The
   // same door the balance read and yin itself use.
   if (!readable(n)) throw new Error("账单格式不认识：total_amount 不是数字")
   return n
@@ -1083,13 +1089,15 @@ export async function MsmoliPlugin(input) {
     auth: {
       provider: ID,
 
-      // 静态令牌签到：粘贴一把 ms- 开头的访问令牌即可。
+      // A static-token check-in: paste an access token that starts with ms-.
       //
-      // 不声明 prompts，也不声明 authorize：magpie 对 api 型方法本来就会单独
-      // 问一次 key，令牌存为 key 本身。声明 prompts 会让它的答案再被写进
-      // metadata，同一把令牌落盘两遍（host.js 的 save()）；而 authorize 只看
-      // 得到 prompts 的答案，看不到那个 key，没法替代它。格式由 placeholder
-      // 提示，错了由第一次签到或用量读取报 401。
+      // Neither prompts nor authorize is declared: magpie already asks for the
+      // key on its own for an api-type method, and the token is stored as the
+      // key itself. Declaring prompts would write its answer into metadata as
+      // well, putting the same token on disk twice (host.js's save()); and
+      // authorize sees only the answers to prompts, not that key, so it cannot
+      // stand in for it. The placeholder hints at the format; a wrong one shows
+      // as a 401 on the first check-in or usage read.
       methods: [
         {
           type: "api",
@@ -1098,13 +1106,16 @@ export async function MsmoliPlugin(input) {
         },
       ],
 
-      // 签到：先看今天到账没有，再触达登录，最后回读对账。直接触达无法区分
-      // 「本次领取」与「早就领过」，而账单能。
+      // The check-in: first see whether today's credits have landed, then touch
+      // the login, and finally read the ledger back to reconcile. A direct touch
+      // cannot tell "just claimed" from "claimed long ago"; the ledger can.
       //
-      // 时段：被问到时若还没到今天这个账号的目标时刻，就在发任何请求之前
-      // 回答 failed——唯一会被宿主重试的结果，别的都会让当天不再被问。
-      // 代价是这段时间卡片上写着「签到失败；magpie 稍后重试」，那是今天
-      // 宿主唯一能表达「还没到点」的说法（上游见 README）。
+      // Timing: when asked, if today's target moment for this account has not
+      // arrived yet, answer failed before sending any request — the one outcome
+      // the host retries; any other one stops the day from being asked again.
+      // The cost is that the card reads "check-in failed; magpie will retry
+      // later" during that stretch, the only way the host has today to say "not
+      // yet time" (see the README's upstream section).
       async checkin(getAuth) {
         let auth, token
         try {
@@ -1138,7 +1149,7 @@ export async function MsmoliPlugin(input) {
             // and it is in the README for whoever wants to change it.
             //
             // No countdown. The host keeps this line on the card until its
-            // next ask, half an hour later, so "约 8 分钟后" outlives the
+            // next ask, half an hour later, so "in about 8 minutes" outlives the
             // eight minutes: a real card still read that at 09:47 for a
             // 09:28 target whose credits had already landed. The target and
             // the cadence are both absolute, and the cadence is also why the
@@ -1160,7 +1171,7 @@ export async function MsmoliPlugin(input) {
         // plugin-auth.json's lock synchronously (host.js's lockAuth, up to
         // twice its 10s stale time when another process holds it), and that
         // wait came out of this hook's 25s — a claim that had landed was then
-        // answered "预算已用完" and shown as failed for half an hour.
+        // answered "budget used up" and shown as failed for half an hour.
         let name = ""
         const answer = await (async () => {
         try {
@@ -1209,7 +1220,8 @@ export async function MsmoliPlugin(input) {
             name = known
           } else {
             const { res, body, parsed } = await json(profile.site, token, LOGIN_INFO, deadline)
-            // 403 是风控，不是令牌坏了：账号可能是好的，只是这次请求被拒
+            // A 403 is risk control, not a bad token: the account may be fine and
+            // only this request was refused.
             gate(profile, res, body, parsed, token, "登录接口失败", `${RISK}，稍后会自动重试`)
 
             const me = dataOf(body)
@@ -1224,19 +1236,21 @@ export async function MsmoliPlugin(input) {
             rememberName(token, name)
           }
 
-          // done 用触发**之前**那一页的合计：今天已经领过，领到的就是那时
-          // 账本上的数。用触发之后那一页的话，两次读之间账本一变（行被挤到
-          // 下一页、或当日合计被重算），卡片会显示「今日已领取 0 魔粒」。
+          // A done uses the totals from the page **before** the touch: if today
+          // was already claimed, what was claimed is the number the ledger held
+          // then. From the page after the touch, a ledger that changed between
+          // the two reads (rows pushed to the next page, or the day's total
+          // recomputed) would make the card say today's claim is 0 credits.
           if (claimed) {
             const credit = sumOf(beforeDaily)
             const which = beforeDaily.map((r) => cardText(r.title, token, 40)).filter(Boolean).join(" + ")
-            // An EARN row can carry a reversal (冲正), and a day whose grants
-            // were reversed nets below zero. magpie clamps the numeric credit
+            // An EARN row can carry a reversal, and a day whose grants were
+            // reversed nets below zero. magpie clamps the numeric credit
             // itself (host.js's num: Math.max(0, v)) but renders `message`
-            // verbatim, so "今日已领取 -50 魔粒" would reach the card: a claim of
-            // a negative amount is not a thing. The rows are still named — the
-            // user can see which ones — but the amount stops at zero, the way
-            // the usage card's limit already does.
+            // verbatim, so a negative claimed-today line would reach the card:
+            // a claim of a negative amount is not a thing. The rows are still
+            // named — the user can see which ones — but the amount stops at
+            // zero, the way the usage card's limit already does.
             const shown = Math.max(0, credit)
             return { outcome: "done", credit: shown, message: `今日已领取 ${shown} 魔粒` + (which ? `（${which}）` : "") }
           }
@@ -1259,13 +1273,17 @@ export async function MsmoliPlugin(input) {
 
           const daily = gained((await todayEarn(token, deadline)).rows.filter((r) => DAILY_RULES.includes(r?.rule_key)))
           if (daily) return { outcome: "claimed", credit: daily.credit, message: `领取 ${daily.credit} 魔粒：${daily.which}` }
-          // 触达了却没有到账记录：可能是账本还没写出来（发放是异步的），
-          // 也可能这个账号本来就不在活动范围。再读一次账本确认，别把刚写
-          // 出来的发放丢掉。这一次重读买不到「等一会儿」——发放若真是几秒
-          // 后才写出来，紧接着的重读也读不到。北京时间 12 点前补上那一段的
-          // 是宿主：还没见到领取的 done/inactive 是暂定答案，每 30 分钟重问
-          // （provisional，由 checkinSureHour 决定）。12 点起宿主就当天了结，
-          // 所以下午的时段由插件自己用 until 要一次半小时后的重问。
+          // Touched, yet no credit record: the ledger may not be written yet
+          // (grants are asynchronous), or this account may simply not be in the
+          // campaign. Read the ledger once more to confirm, and do not drop a
+          // grant that was just written. This re-read buys no "wait a while" —
+          // if the grant really is written a few seconds later, the immediate
+          // re-read cannot see it either. Before Beijing noon the host covers
+          // that stretch: a done/inactive that has not seen a claim is a
+          // provisional answer, re-asked every 30 minutes (provisional, decided
+          // by checkinSureHour). From noon the host settles the day, so in the
+          // afternoon the plugin asks for one more ask half an hour later itself,
+          // via until.
           const later = gained((await todayEarn(token, deadline)).rows.filter((r) => DAILY_RULES.includes(r?.rule_key)))
           if (later) return { outcome: "claimed", credit: later.credit, message: `领取 ${later.credit} 魔粒：${later.which}` }
           const hourCN = Math.floor(minuteCN() / 60)
@@ -1292,7 +1310,7 @@ export async function MsmoliPlugin(input) {
         return answer
       },
 
-      // 魔粒余额与今日消耗，给账号卡片看。
+      // The credits balance and today's usage, for the account card.
       async usage(getAuth) {
         // everything the host could get wrong about the hand-over is the
         // card's problem alone: it must come back as {error}, never as a
@@ -1313,17 +1331,18 @@ export async function MsmoliPlugin(input) {
         // thing before the reads: the host's auth.set can wait out a lock for
         // ~20s (see the check-in's own note), and a wait spent before the
         // reads came out of the 18s the two of them share — the card answered
-        // 预算已用完 for a name it had just written. Everything here is inside
+        // "budget used up" for a name it had just written. Everything here is inside
         // the try, so the hook still promises an {error} and never a
         // rejection, whatever that write or the reads do.
         try {
           const bal = await siteRead(token, BALANCE, deadline)
           const profile = bal.profile
           gate(profile, bal.res, bal.body, bal.parsed, token, "余额查询失败")
-          // data 缺失读成 0 会把「没读懂」翻译成「余额为零」——一个确定又
-          // 错误的结论，卡片会写「0 魔粒可用」。账本那侧的 recordsOf 同理。
-          // 字段这一层也一样：available_balance 缺失、null、或改了名字，
-          // 都不是 0 元的余额。
+          // A missing data read as 0 would turn "did not understand" into a
+          // definite and wrong conclusion, "balance is zero"; the card would
+          // read "0 credits available". recordsOf on the ledger side is the
+          // same. The field layer is too: available_balance absent, null, or
+          // renamed is not a zero balance.
           const balData = dataObjectOf(bal.body, "余额查询失败：响应里没有 data")
           const rawAvailable = balData.available_balance
           if (blankOf(rawAvailable)) {
@@ -1331,17 +1350,17 @@ export async function MsmoliPlugin(input) {
           }
           // A number or a numeric string is a balance. Anything else is not:
           // Number([]) is 0 and Number(true) is 1, both finite, so the plain
-          // isFinite check let an empty list through as "0 魔粒可用" — the
+          // isFinite check let an empty list through as "0 credits available" — the
           // definite wrong answer this guard exists to stop — and a boolean
-          // through as one 魔粒. A formatted string ("1,234") is a number we
+          // through as one credit. A formatted string ("1,234") is a number we
           // cannot read, not 0, and blankOf covers the field that holds
           // nothing but spaces, which `Number` also reads as 0.
           const kind = typeof rawAvailable
           if (kind !== "number" && kind !== "string") throw new Error("余额查询失败：available_balance 不是数字")
           const availableN = Number(rawAvailable)
           if (!readable(availableN)) throw new Error("余额查询失败：available_balance 不是数字")
-          // a balance is not a debt: the server's 冲正 direction can put it
-          // below zero, and "-5 魔粒可用" is not a thing the card can show
+          // a balance is not a debt: the server's reversal direction can put it
+          // below zero, and "-5 credits available" is not a thing the card can show
           const available = Math.max(0, yin(availableN))
 
           const tx = await json(profile.site, token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
@@ -1359,10 +1378,13 @@ export async function MsmoliPlugin(input) {
             // numbers at all" — the opposite of what the rule is for.
             if (onDay(r?.gmt_created, day)) {
               if (r?.type === "EARN") {
-                // 「领」是今天入账的全部，促销一类也算：卡片问的是「今天进来
-                // 多少、用掉多少」，把促销排除会让余额涨了 500 而卡片写「领 0」。
-                // 签到报的 credit 是另一个问题（这次签到领到多少），只算日常
-                // 额度，两个数不一样是各自的答案，不是同一个数的两种算法。
+                // "Claimed" means everything credited today, promotions
+                // included: the card asks "how much came in, how much was
+                // used", and excluding promotions would show "claimed 0" while
+                // the balance rose by 500. The credit the check-in reports is a
+                // different question (how much this check-in claimed), counting
+                // only the daily grants; the two numbers differing is each
+                // giving its own answer, not two ways of computing one number.
                 earned += amountOf(r)
               } else if (r?.type === "SPEND_CONFIRM") {
                 spent += amountOf(r)
@@ -1381,36 +1403,47 @@ export async function MsmoliPlugin(input) {
             }
           }
 
-          // 不截断到 100：magpie 把 used > 100 读作「超额」
-          // （host.js 的 "past 100 when overspent"）。今天没领到任何魔粒
-          // 且余额为零，才算用尽。下限夹到 0：账本里的退款是负数的
-          // SPEND_CONFIRM，不夹就会在卡片上出现「今日用 -50 / 领 200」和
-          // 负百分比——宿主自己会夹，这里再兜一次。
+          // Not truncated at 100: magpie reads used > 100 as "overspent"
+          // (host.js's "past 100 when overspent"). Today's credits being spent
+          // up means nothing was claimed today and the balance is zero. The
+          // lower bound is clamped to 0: refunds in the ledger are negative
+          // SPEND_CONFIRM rows, and without the clamp the card would show a
+          // "used -50 today / claimed 200" combination and a negative
+          // percentage — the host clamps it itself; this is one more safety net.
           // summed in floating point: 0.1 + 0.2 is 0.30000000000000004, and it
           // would go into the card as written
           earned = yin(earned)
           spent = yin(spent)
-          // 入账方向也可能出现负数（冲正、回收）。不夹的话卡片会写
-          // 「领 -50」，而 limit 是负的更没意义。用掉的方向同理。
+          // The credit direction can also come out negative (reversals,
+          // clawbacks). Without the clamp the card would write "claimed -50",
+          // and a negative limit makes even less sense. Same for the spend
+          // direction.
           const earnedToday = Math.max(0, earned)
           const usedToday = Math.max(0, spent)
-          // 没有今天的入账时，百分比的分母换成「今天手里有多少」——用掉的
-          // 加上还剩的。分母为 0 时沿用旧口径：余额也空了才算用尽。
-          // 否则卡片会出现 used=0、今日用 348.5、领 0 的组合，进度条说没动，
-          // 文字说花掉了一堆。
+          // When there is no credit today, the percentage's denominator becomes
+          // "how much is in hand today" — what was used plus what remains. When
+          // that denominator is 0 the old measure stands: only a depleted
+          // balance counts as spent up. Otherwise the card would show the
+          // combination used=0, used 348.5 today, claimed 0 — the progress bar
+          // says nothing moved while the text says a lot was spent.
           //
-          // 记账里两个数都过了 readable()，比值却可能大到 ×10000 溢出成
-          // Infinity；宿主对非有限的 used 读作 0（host.js 的 num 只认有限数），
-          // 于是「几乎全用光」被画成没动过。算不出百分比就交给宿主当「没说」
-          // （used 省略 = null），文字那行仍然写着真实的数量。
+          // Both numbers in the ledger passed readable(), yet the ratio can be
+          // large enough to overflow to Infinity at ×10000; the host reads a
+          // non-finite used as 0 (host.js's num accepts only finite numbers),
+          // and so "almost all used up" was drawn as nothing having moved. When
+          // the percentage cannot be computed it is handed to the host as "not
+          // said" (used omitted = null), and the text line still states the
+          // real amounts.
           const pct = (n, d) => {
             const v = Math.round((n / d) * 10000) / 100
             return Number.isFinite(v) ? v : null
           }
-          // 用掉的超过今天领的、余额却还有：花的是昨天那份还没过期的魔粒，
-          // 不是超额。那时分母同样换成「今天手里有多少」——否则昨天 15:00
-          // 领 250、今天领 250、上午用掉 300，卡片会画成 120% 的超额，旁边
-          // 写着余额 200。超额只在余额也空了时才成立。
+          // More used than claimed today, yet a balance remains: what was spent
+          // is yesterday's not-yet-expired credits, not an overage. The
+          // denominator switches to "how much is in hand today" then too —
+          // otherwise, 250 claimed yesterday at 15:00, 250 claimed today, 300
+          // used this morning, the card would draw a 120% overage beside a
+          // balance of 200. An overage holds only when the balance is empty too.
           const used =
             earnedToday > 0 && (usedToday <= earnedToday || available === 0)
               ? pct(usedToday, earnedToday)
@@ -1418,8 +1451,8 @@ export async function MsmoliPlugin(input) {
                 ? pct(usedToday, usedToday + available)
                 : 100
 
-          // 今天还没领到时，把时段里的目标时刻写在卡片上，别让「领 0」
-          // 看起来像是出了问题。
+          // Before today's credits are claimed, put the window's target moment
+          // on the card, so "claimed 0" does not look like something went wrong.
           //
           // The config is read only when the card actually needs the target:
           // after the day's grant has landed there is no hint to compute, and
@@ -1463,19 +1496,23 @@ export async function MsmoliPlugin(input) {
       },
     },
 
-    // 让 provider 以名字出现，不注册任何模型：聊天仍走 providers.json 里
-    // API key 版的那个 modelscope 预设。
+    // Make the provider show up by name without registering any model: chat
+    // still goes through the API-key modelscope preset in providers.json.
     async config(config) {
-      // 宿主是 `{ provider: {}, ...userConfig }` 拼出来的，用户配置里那个
-      // provider 会盖掉默认的 {}。它不是对象时（旧版本写的字符串、手改的
-      // 数字），下面 `[profile.id] =` 会抛 TypeError，宿主只把 config 钩子
-      // 的错误记进日志——插件照常出现，只是没有名字，看不出哪里错了。
-      // `??=` 只挡 null/undefined，挡不住 ""、0、false；一个装不下 id 的
-      // 容器里没有可保留的东西，整个换掉。
+      // The host builds `{ provider: {}, ...userConfig }`, and the provider in
+      // the user config overrides the default {}. When that is not an object (a
+      // string an old version wrote, a hand-edited number), the `[profile.id] =`
+      // below throws a TypeError, and the host only logs the config hook's
+      // error — the plugin still appears, just without a name, and there is no
+      // sign of what went wrong. `??=` guards only null/undefined, not "", 0, or
+      // false; a container that cannot hold an id has nothing worth keeping, so
+      // the whole thing is replaced.
       if (!config.provider || typeof config.provider !== "object") config.provider = {}
-      // 用户自己改过的名字留着：magpie 把 provider 的名字存在 providers.json
-      // 里，而钩子每次启动都跑一遍——强制写回默认值会把 UI 里的改名悄悄撤销，
-      // 与账号昵称那条「用户命名过就不动」是同一条规矩。值不是对象时当作没有。
+      // Keep the name the user has changed: magpie stores a provider's name in
+      // providers.json, and this hook runs on every start — forcing the default
+      // back would silently undo a rename made in the UI, the same rule as the
+      // account-nickname one ("a user-named thing is left alone"). A value that
+      // is not an object counts as none.
       const was = config.provider[ID] && typeof config.provider[ID] === "object" ? config.provider[ID] : {}
       config.provider[ID] = {
         ...was,

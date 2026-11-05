@@ -54,7 +54,7 @@ test("the tree walk finds the files it is meant to guard", () => {
   for (const rel of ["index.mjs", "bin/sync.mjs", "test/style.test.mjs"]) {
     assert.ok(JS.includes(rel), `the walk missed ${rel}`)
   }
-  assert.ok(MD.length >= 3, `the walk found only ${MD.length} .md files`)
+  assert.ok(MD.length >= 2, `the walk found only ${MD.length} .md files`)
   assert.ok(MD.includes("README.md") && MD.includes("CONTRIBUTING.md"), "the walk missed a markdown file")
 })
 

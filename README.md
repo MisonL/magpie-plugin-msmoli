@@ -2,17 +2,15 @@
 
 # magpie-plugin-msmoli
 
-**ModelScope 魔粒, claimed for you every day.**
+**ModelScope daily credits, claimed for you every day.**
 
 A [magpie](https://github.com/yetone/magpie) plugin that checks in to
-ModelScope (魔搭) once a day and puts the balance and today's spend on the
+ModelScope once a day and puts the balance and today's spend on the
 account's usage card. Works with both **modelscope.cn** and **modelscope.ai**.
 
 [![npm](https://img.shields.io/npm/v/magpie-plugin-msmoli?color=cb3837&logo=npm)](https://www.npmjs.com/package/magpie-plugin-msmoli)
 [![tests](https://github.com/MisonL/magpie-plugin-msmoli/actions/workflows/test.yml/badge.svg)](https://github.com/MisonL/magpie-plugin-msmoli/actions/workflows/test.yml)
 [![license](https://img.shields.io/npm/l/magpie-plugin-msmoli?color=blue)](LICENSE)
-
-English · [简体中文（旧版）](README.zh-CN.md)
 
 </div>
 
@@ -31,7 +29,7 @@ English · [简体中文（旧版）](README.zh-CN.md)
 
 - [Features](#features)
 - [Quick start](#quick-start)
-- [What 魔粒 is](#what-魔粒-is)
+- [What credits are](#what-credits-are)
 - [Purpose, responsibility, and risk](#purpose-responsibility-and-risk)
 - [Install](#install)
 - [Accounts and sites](#accounts-and-sites)
@@ -65,9 +63,9 @@ Get the token from your site's access-token page:
 [modelscope.cn](https://modelscope.cn/my/myaccesstoken) ·
 [modelscope.ai](https://modelscope.ai/my/myaccesstoken).
 
-## What 魔粒 is
+## What credits are
 
-ModelScope's API-Inference is free, paid in 魔粒:
+ModelScope's API-Inference is free, paid in credits:
 
 | Grant | Amount | Expires |
 |---|---|---|
@@ -76,13 +74,13 @@ ModelScope's API-Inference is free, paid in 魔粒:
 | Email / profile / homepage completed | 50 each | 90 days, once |
 
 Daily grants last **24 hours only** and do not accumulate: what you don't
-spend today is gone. A flagship model costs 2 魔粒 per call (mainstream 1,
+spend today is gone. A flagship model costs 2 credits per call (mainstream 1,
 lightweight 0.5), so the daily 250 is roughly 125 calls.
 
 ## Purpose, responsibility, and risk
 
-**What it is for.** A personal utility: it claims the daily 魔粒 grant of the
-ModelScope (魔搭) account *you* sign in, and does nothing else. It is not an
+**What it is for.** A personal utility: it claims the daily credit grant of the
+ModelScope account *you* sign in, and does nothing else. It is not an
 official ModelScope product; it is not affiliated with ModelScope, Alibaba or
 magpie, and it collects nothing about you. The token stays in magpie's own
 `plugin-auth.json`, and every request goes to the site the account signed in
@@ -93,8 +91,8 @@ grant exists for a *real* website sign-in, and this plugin obtains it by
 calling `login/info` once a day with the browser's session cookie: a script
 posing as the browser, not a button the official client offers. ModelScope's
 user agreement forbids plugins that interfere with the service (4.1.2(1)) and
-"刷分" with third-party tools (4.1.2(5)), and lets the platform freeze a
-user's benefits or blacklist them for abuse (2.3.1 and the 魔粒 rules). An
+point farming with third-party tools (4.1.2(5)), and lets the platform freeze a
+user's benefits or blacklist them for abuse (2.3.1 and the credit rules). An
 account is real-name verified and often tied to Aliyun, so what is at stake is
 the account, not the 250 credits that expire the same day. No account has been
 reported frozen for running this, and no one can promise one never will be.
@@ -117,6 +115,11 @@ npm.
 You need magpie itself (<https://usemagpie.ai>). On macOS, `magpie --version`
 tells you whether it is on `PATH`; if not, use the app's full path,
 `/Applications/magpie.app/Contents/MacOS/magpie`.
+
+The plugin relies on the host's plugin API — the account scope a check-in and
+a usage read run in, the provider argument `auth.checkin` is handed, the
+`input.directory` the plugin's own folder comes from, and `auth.set` writing
+back into the same account. It is maintained against **magpie 0.1.3005**.
 
 Pick one of three ways. They all end the same: an `msmoli` row under
 **Settings → Usage → Plugins**. The sign-in is kept per provider id, not per
@@ -260,7 +263,7 @@ lands under the same `msmoli` card:
 
 ```bash
 printf 'ms-your-intl-token\n' | magpie plugin login msmoli
-magpie accounts            # both accounts, each with its own 魔粒 window
+magpie accounts            # both accounts, each with its own credit window
 ```
 
 ### More than one account
@@ -420,7 +423,7 @@ How long it lasts depends on when magpie next asks. On a measured day the
 target was 09:01, magpie asked at 09:00:57 (three seconds early, so `failed`),
 and the claim landed on the next ask at 09:31. That is also why the card names
 the time and the cadence instead of a countdown: the line stays up for half an
-hour, so "约 8 分钟后" would be wrong for most of that time.
+hour, so a countdown ("in about 8 minutes") would be wrong for most of that time.
 
 The cap: magpie's asks run on a 30-minute phase of their own, so the first ask
 after a target can be up to half an hour late, and the retry after a failure
@@ -458,7 +461,7 @@ only carries the sign-in its check-in runs as. The Providers page shows both:
 | | `ModelScope` (preset) | `ModelScope 魔粒` (this plugin) |
 |---|---|---|
 | Serves chat models | yes | no; `magpie models` never lists it |
-| Usage card | none (no balance endpoint) | 魔粒 balance and today's spend |
+| Usage card | none (no balance endpoint) | the credit balance and today's spend |
 | Check-in | not built in | once a day |
 | Used by the gateway | yes | no, so a card at 100% can't block chat |
 
@@ -473,7 +476,7 @@ accounts under the same `msmoli` row, not new rows.
 
 > [!TIP]
 > The preset's card is empty because ModelScope's inference API has no balance
-> endpoint, so the gateway only learns the 魔粒 are gone from the vendor's
+> endpoint, so the gateway only learns the credits are gone from the vendor's
 > `429 insufficient balance`. You can give the preset a reading: in its editor,
 > set Balance URL `https://modelscope.cn/openapi/v1/magicubes/balance` and
 > Balance field `data.available_balance`. `magpie quota modelscope` then shows a
@@ -519,7 +522,7 @@ The terms and risks are in
   grant's title) has any key in it masked before it reaches the card or the log.
 - `MAGPIE_MSMOLI_CONFIG` overrides the config file's path. It exists for the
   test suite, and works in production too.
-- The other 170 魔粒 a day (liking items, posting AIGC works and models) have
+- The other 170 credits a day (liking items, posting AIGC works and models) have
   no API and would mean driving the web UI. This plugin doesn't touch them.
 
 ## Troubleshooting
@@ -527,13 +530,13 @@ The terms and risks are in
 | Symptom | Fix |
 |---|---|
 | `not signed in` | `printf 'ms-token\n' \| magpie plugin login msmoli` |
-| No 魔粒 window on the card, or no check-in | Restart magpie; the plugin host caches. |
+| No credit window on the card, or no check-in | Restart magpie; the plugin host caches. |
 | `failed` with HTTP 401 | The token was revoked, or belongs to the other site; `modelscope.cn` and `modelscope.ai` don't share tokens. The message names the site that refused (国内站 / 国际站). Make a new token there and sign in again. |
 | `failed` with HTTP 403 | ModelScope's risk control refused the request; the token is fine. It retries in 30 minutes. |
 | Before the window: failed, with `09:56 后自动领取（北京时间，magpie 每半小时问一次，无需操作）` | Expected. See [When it claims](#when-it-claims-the-check-in-window). |
 | Check in now before the target minute answers failed with the same line | Expected. A manual press and the host's half-hourly ask reach the plugin the same way, so only the target minute starts the claim. |
 | Always `inactive` | The sign-in works but today's ledger shows nothing: the account may not be eligible, or the grant hasn't been written yet. Before noon magpie re-asks every 30 minutes; from noon the plugin checks once more ("半小时后再核对一次"), and only the second `inactive` stands. |
-| Chat through the `modelscope` preset answers `429 insufficient balance` | The day's 250 魔粒 are spent (~125 flagship calls). Not this plugin: it registers no models. See the tip under [Why its own provider](#why-its-own-provider-with-no-models). |
+| Chat through the `modelscope` preset answers `429 insufficient balance` | The day's 250 credits are spent (~125 flagship calls). Not this plugin: it registers no models. See the tip under [Why its own provider](#why-its-own-provider-with-no-models). |
 | Two accounts with the same nickname, and only one checks in | magpie before 2026-10-20 kept check-ins per display name. Update magpie (fixed in magpie-community/plugins#254). |
 | Edits to a clone do nothing | Path plugins are referenced in place; restart magpie. |
 | `magpie plugin list` says `msmoli` is "served by" one of two copies | It was installed two ways. Remove one with `magpie plugin rm github:MisonL/magpie-plugin-msmoli` or `magpie plugin rm <path>`. The alias is filed with the package it was set against, so you may need to set it again. |
