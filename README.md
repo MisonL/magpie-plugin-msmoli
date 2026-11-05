@@ -352,10 +352,12 @@ noon magpie's own 30-minute re-ask already covers it.
 
 A `done` or `claimed` also carries the streak: how many Beijing days in a row
 the ledger shows a daily grant, today included. magpie prints it as
-`3-day streak` beside the outcome. It is counted from the same one page of the
-ledger the rest of the plugin reads, so it only ever reports a run it can see
-the end of — a run still going at the oldest row on a full page is left unsaid
-rather than printed short.
+`3-day streak` beside the outcome. The ledger's `total` tells the plugin
+whether one page is the whole ledger; when it is not and the run is still
+going at the oldest row, the next page is read, up to eight. A run it could
+not follow to its end — a page that fails, or one longer than those eight
+pages — is left unsaid rather than printed short, because magpie shows any
+number it is given.
 
 <details>
 <summary><b>Endpoints and the ledger</b></summary>
@@ -516,9 +518,11 @@ The terms and risks are in
 
 - **Requests per day.** A check-in is three requests (ledger, touch, ledger);
   a day already claimed answers `done` in two; a ledger that hasn't caught up
-  takes four. Asks before the window send nothing. A usage read is two
-  requests and never touches the sign-in endpoint, so menu-bar polling cannot
-  turn into check-ins.
+  takes four. A run longer than one ledger page adds one read per page walked
+  back, up to seven — only while the streak is still going at the oldest row.
+  Asks before the window send nothing. A usage read is two requests and never
+  touches the sign-in endpoint, so menu-bar polling cannot turn into
+  check-ins.
 - **International accounts cost one extra read, once per process**: the 401
   from the domestic site. A domestic account costs nothing extra.
 - **Time limits.** Every request gives up after 8 seconds, body included, and a

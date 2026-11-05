@@ -1038,7 +1038,19 @@ async function todayEarn(token, deadline) {
   gate(profile, res, body, parsed, token, "账单查询失败")
   const day = todayCN()
   const all = recordsOf(body)
-  return { profile, all, rows: all.filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day)) }
+  return { profile, all, total: totalOf(body, all), rows: all.filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day)) }
+}
+
+// totalOf is how many rows the ledger holds altogether, from the `total` the
+// page carries beside its `records`. It is what tells a full page from a
+// complete one: the page size caps at 50 (the server answers page_size=200
+// with 50), so a page that comes back with 50 rows may be the whole ledger or
+// the first sliver of it, and only `total` says which. A missing or
+// nonsensical total falls back to the rows in hand, which reads the page as
+// complete — the same answer the plugin gave before the field was read at all.
+const totalOf = (body, rows) => {
+  const n = dataObjectOf(body, "账单格式不认识：没有 data").total
+  return Number.isInteger(n) && n >= rows.length ? n : rows.length
 }
 
 // prevDay is the Beijing day before `day`. The rows carry date labels with no
@@ -1050,22 +1062,38 @@ const prevDay = (day) => {
   return d.toISOString().slice(0, 10)
 }
 
-// streakOf is how many consecutive days up to `day` carried a daily grant: a
-// run of daily-rule EARN rows, one Beijing day per step, ending today (or
-// undefined when today's grant is not in the rows at all). The page holds
-// only the newest PAGE_SIZE rows — a fortnight or so — so a run that reaches
-// past the oldest row shown cannot be told apart from one that continues off
-// the page, unless the page has room to hold the account's whole history. Not
-// knowing, the streak is left unsaid rather than understated: the host prints
-// "{n}-day streak" only for a number it has, and a wrong number is worse than
-// none.
-function streakOf(records, day) {
-  const days = new Set()
-  for (const r of records) {
+// STREAK_PAGES caps how far back the streak walk may read. One page reaches
+// back a fortnight or so on a live account (3–7 rows a day); a run longer
+// than that is followed onto the next page, because on the account this was
+// written for the whole ledger held 16 days of daily grants on page 1 and one
+// row on page 2 — without the second page the run was silently unknown. Eight
+// pages is ~100 days of rows: past that the walk stops and the streak is left
+// unsaid, rather than spend a check-in's budget paging through a year.
+const STREAK_PAGES = 8
+
+// daysWithGrant is the set of Beijing days a list of ledger rows grants a
+// daily rule on, in the "YYYY-MM-DD" shape the rows' stamps start with. A
+// stamp that is not a date is skipped rather than read as one.
+const daysWithGrant = (rows, into = new Set()) => {
+  for (const r of rows) {
     const stamp = typeof r?.gmt_created === "string" ? r.gmt_created.slice(0, 10) : ""
-    if (r?.type === "EARN" && DAILY_RULES.includes(r?.rule_key) && /^\d{4}-\d{2}-\d{2}/.test(stamp)) days.add(stamp)
+    if (r?.type === "EARN" && DAILY_RULES.includes(r?.rule_key) && /^\d{4}-\d{2}-\d{2}/.test(stamp)) into.add(stamp)
   }
+  return into
+}
+
+// streakOf is how many consecutive Beijing days up to `day` carried a daily
+// grant — the run magpie prints as "N-day streak" beside a check-in. The
+// first page comes from the check-in's own ledger read; when the run is still
+// going at the oldest row of a page whose `total` says there is more, the
+// next page is read (readPage) and the walk carries on. The answer is
+// undefined when today's grant is not in the rows, and when the walk runs out
+// of pages first: magpie prints any number it is given, so a run it could not
+// see the end of is not told at all rather than told short.
+async function streakOf(records, day, total, readPage, deadline) {
+  const days = daysWithGrant(records)
   if (!days.has(day)) return undefined
+  let held = records.length
   let n = 1
   let d = day
   for (;;) {
@@ -1075,12 +1103,46 @@ function streakOf(records, day) {
       d = prev
       continue
     }
-    // The run stops at a day with no grant. That is a real break when a row
-    // older than it is on the page — the ledger goes on past the gap — and
-    // when the page is not full (nothing was cut off). A full page with no
-    // older row visible may have lost the rest of the run to page 2.
+    // Nothing grants on `prev`. That is a real break when a row older than it
+    // has been read — the ledger goes on past the gap and still says nothing
+    // that day — or when the rows read are the whole ledger.
     const older = records.some((r) => typeof r?.gmt_created === "string" && r.gmt_created.slice(0, 10) < prev)
-    return older || records.length < PAGE_SIZE ? n : undefined
+    if (older || held >= total) return n
+    if (!readPage || deadline <= Date.now()) return undefined
+    const more = await readPage()
+    if (more === null) return undefined
+    // an empty page with `total` still saying there are rows is the ledger
+    // contradicting itself; nothing after this can be trusted to be the end
+    // of the run, so it is left unsaid rather than cut short here
+    if (!more.length) return undefined
+    daysWithGrant(more, days)
+    records = more
+    held += more.length
+  }
+}
+
+// ledgerReader hands streakOf one page at a time, past the page the check-in
+// already read. It gives up — null, which leaves the streak unsaid — when
+// STREAK_PAGES is spent, when a page cannot be read (a 403, a budget already
+// gone), or when the ledger answers with a page that is not a list. A page
+// error must not fail the check-in: the claim has already happened, and the
+// answer it deserves is the one already computed, not a failure the host
+// retries half an hour later.
+const ledgerReader = (profile, token, deadline) => {
+  let page = 1
+  let left = STREAK_PAGES - 1
+  return async () => {
+    if (left <= 0) return null
+    left -= 1
+    page += 1
+    if (deadline <= Date.now()) return null
+    try {
+      const { res, body, parsed } = await json(profile.site, token, `${TXNS}?page=${page}&page_size=${PAGE_SIZE}`, deadline)
+      gate(profile, res, body, parsed, token, "账单查询失败")
+      return recordsOf(body)
+    } catch {
+      return null
+    }
   }
 }
 
@@ -1342,7 +1404,7 @@ export async function MsmoliPlugin(input) {
             return {
               outcome: "done",
               credit: shown,
-              streak: streakOf(before.all, today),
+              streak: await streakOf(before.all, today, before.total, ledgerReader(profile, token, deadline), deadline),
               message: `今日已领取 ${shown} 魔粒` + (which ? `（${which}）` : ""),
             }
           }
@@ -1363,16 +1425,19 @@ export async function MsmoliPlugin(input) {
             return { credit, which }
           }
 
+          // Both claimed exits answer the same way; the streak is computed in
+          // one place so a change to it cannot land in one branch only.
+          const claimedNow = async (page, gain) => ({
+            outcome: "claimed",
+            credit: gain.credit,
+            streak: await streakOf(page.all, today, page.total, ledgerReader(profile, token, deadline), deadline),
+            message: `领取 ${gain.credit} 魔粒：${gain.which}`,
+          })
+
           const fresh = await todayEarn(token, deadline)
           probe = fresh.profile
           const daily = gained(fresh.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)))
-          if (daily)
-            return {
-              outcome: "claimed",
-              credit: daily.credit,
-              streak: streakOf(fresh.all, today),
-              message: `领取 ${daily.credit} 魔粒：${daily.which}`,
-            }
+          if (daily) return await claimedNow(fresh, daily)
           // Touched, yet no credit record: the ledger may not be written yet
           // (grants are asynchronous), or this account may simply not be in the
           // campaign. Read the ledger once more to confirm, and do not drop a
@@ -1387,13 +1452,7 @@ export async function MsmoliPlugin(input) {
           const again = await todayEarn(token, deadline)
           probe = again.profile
           const later = gained(again.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)))
-          if (later)
-            return {
-              outcome: "claimed",
-              credit: later.credit,
-              streak: streakOf(again.all, today),
-              message: `领取 ${later.credit} 魔粒：${later.which}`,
-            }
+          if (later) return await claimedNow(again, later)
           const hourCN = Math.floor(minuteCN() / 60)
           if (hourCN >= SURE_HOUR && deferred.get(token) !== today) {
             for (const [k, d] of deferred) if (d !== today) deferred.delete(k)
@@ -1639,6 +1698,6 @@ export async function MsmoliPlugin(input) {
 // exporting them as functions: magpie's loader treats every exported function
 // as a plugin entry (see windowOf above), but an object it skips. The tests
 // are the only reader.
-export const testables = { windowOf, CN, INTL, sites }
+export const testables = { windowOf, streakOf, CN, INTL, sites }
 
 export default MsmoliPlugin

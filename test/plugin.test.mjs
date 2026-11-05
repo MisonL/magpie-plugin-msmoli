@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url"
 
 import { MsmoliPlugin, testables } from "../index.mjs"
 
-const { windowOf } = testables
+const { windowOf, streakOf } = testables
 
 // The check-in window reads its own config file, which the host would keep at
 // ~/.config/magpie/msmoli.json. Tests point it at a temp file so the suite
@@ -736,6 +736,17 @@ test("a day without a grant ends the run, and what came before it is not counted
   )
 })
 
+test("no run is reported for a ledger holding yesterday's grant but not today's", async () => {
+  // The hooks only ask for a streak on done/claimed, where today's grant is
+  // in hand. Called with a page that stops yesterday, the answer is "not
+  // known" — counting from yesterday would print a run that is not today's.
+  assert.equal(
+    await streakOf([day({ gmt_created: daysBack(1) })], today, 1, null, Date.now() + 1000),
+    undefined,
+  )
+  assert.equal(await streakOf([day()], today, 1, null, Date.now() + 1000), 1, "today alone is a 1-day run")
+})
+
 test("a claim that just landed reports the streak from the page it landed on", async () => {
   // the claimed path reads the ledger again after the touch; the run has to
   // come from that read, not from the empty one before it.
@@ -759,44 +770,157 @@ test("a claim that just landed reports the streak from the page it landed on", a
   }
 })
 
-test("a full page that may hide more of the run leaves the streak unsaid", async () => {
-  // PAGE_SIZE rows, all consecutive grants, no gap before the oldest one: the
-  // walk runs out of page with the run still going. Reporting the rows it saw
-  // would print a streak shorter than the real one, which is a wrong number
-  // on the card; the host prints nothing when the field is absent.
+test("a run that continues past page 1 is followed onto page 2", async () => {
+  // The live account this was written for: page 1 is full (50 rows, 16 days)
+  // and its oldest row is still a daily grant, with one more row on page 2.
+  // `total` is what says page 2 exists; the run's end is only there.
+  const first = Array.from({ length: 50 }, (_, i) => day({ gmt_created: daysBack(i) }))
+  const second = Array.from({ length: 10 }, (_, i) => day({ gmt_created: daysBack(50 + i) }))
+  const real = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname !== "/openapi/v1/magicubes/transactions") {
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    seen.push(u.searchParams.get("page"))
+    const page = Number(u.searchParams.get("page"))
+    return reply({
+      body: { success: true, data: { page, page_size: 50, total: 60, records: page === 1 ? first : second } },
+    })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000034" }))
+    assert.equal(r.outcome, "done")
+    assert.equal(r.streak, 60, `the run runs onto page 2: ${JSON.stringify(r)}`)
+    assert.deepEqual(seen, ["1", "2"], `page 2 is read once, not once per walk step: ${seen}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a page whose total is its own row count is the whole ledger, and no second page is asked for", async () => {
+  // 50 rows in the ledger, 50 on the page: the run really does end at the
+  // oldest row, and the streak is exact — no extra request to prove it.
   const records = Array.from({ length: 50 }, (_, i) => day({ gmt_created: daysBack(i) }))
-  await withFetch(
-    {
-      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records } } },
-      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
-    },
-    async () => {
-      const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000034" }))
-      assert.equal(r.outcome, "done")
-      assert.equal(r.streak, undefined, `a run cut by the page is not a streak: ${JSON.stringify(r)}`)
-    },
-  )
+  const real = globalThis.fetch
+  let ledgerReads = 0
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname !== "/openapi/v1/magicubes/transactions") {
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    ledgerReads += 1
+    return reply({ body: { success: true, data: { page: 1, page_size: 50, total: 50, records } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000035" }))
+    assert.equal(r.streak, 50, `a complete ledger gives an exact run: ${JSON.stringify(r)}`)
+    assert.equal(ledgerReads, 1, "a complete page needs no second read")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a page that cannot be read leaves the streak unsaid, and the check-in still answers", async () => {
+  // A 403 on page 2 says nothing about the claim that already landed. The
+  // streak is dropped; the answer keeps its outcome and credit, and the host
+  // must not be handed a failure for a day that was claimed.
+  const first = Array.from({ length: 50 }, (_, i) => day({ gmt_created: daysBack(i) }))
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname !== "/openapi/v1/magicubes/transactions") {
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    if (u.searchParams.get("page") === "2") return reply({ status: 403, body: { message: "forbidden" } })
+    return reply({ body: { success: true, data: { page: 1, page_size: 50, total: 90, records: first } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000036" }))
+    assert.equal(r.outcome, "done", `the claim stands: ${JSON.stringify(r)}`)
+    assert.equal(r.streak, undefined, `a run it could not see the end of is not a streak: ${JSON.stringify(r)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a run longer than the pages the walk may read is left unsaid", async () => {
+  // STREAK_PAGES stops the walk; what it saw by then is a floor, not the run.
+  // 50 grants a page, a thousand rows in the ledger: the walk stops at page 8.
+  const real = globalThis.fetch
+  let ledgerReads = 0
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname !== "/openapi/v1/magicubes/transactions") {
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    ledgerReads += 1
+    const page = Number(u.searchParams.get("page"))
+    const records = Array.from({ length: 50 }, (_, i) => day({ gmt_created: daysBack((page - 1) * 50 + i) }))
+    return reply({ body: { success: true, data: { page, page_size: 50, total: 1000, records } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000037" }))
+    assert.equal(r.streak, undefined, `a run past the page cap is not a streak: ${JSON.stringify(r)}`)
+    assert.equal(ledgerReads, 8, `the walk stops at STREAK_PAGES: ${ledgerReads}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("an empty page while total still counts rows leaves the run unsaid", async () => {
+  // `total` said 60 rows, 50 came back, and page 2 answers with nothing: the
+  // ledger contradicts itself. Cutting the run at the page boundary would
+  // print a number the plugin has no reason to believe; the streak is dropped.
+  const first = Array.from({ length: 50 }, (_, i) => day({ gmt_created: daysBack(i) }))
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname !== "/openapi/v1/magicubes/transactions") {
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    const page = Number(u.searchParams.get("page"))
+    return reply({
+      body: { success: true, data: { page, page_size: 50, total: 60, records: page === 1 ? first : [] } },
+    })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000039" }))
+    assert.equal(r.outcome, "done", `the claim stands: ${JSON.stringify(r)}`)
+    assert.equal(r.streak, undefined, `an empty page is not the end of the run: ${JSON.stringify(r)}`)
+  } finally {
+    globalThis.fetch = real
+  }
 })
 
 test("a gap inside a full page still ends the run, and the count is kept", async () => {
-  // the truncation case above must not swallow the ordinary one: with a real
+  // the truncation cases above must not swallow the ordinary one: with a real
   // gap in view — rows older than the gap are on the page — the run is known,
-  // and a full page does not change that.
+  // and a page with more behind it does not change that. No second page is
+  // read to prove it.
   const records = [
     day(),
     day({ gmt_created: daysBack(1) }),
     ...Array.from({ length: 48 }, (_, i) => day({ gmt_created: daysBack(i + 3) })),
   ]
-  await withFetch(
-    {
-      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records } } },
-      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
-    },
-    async () => {
-      const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000035" }))
-      assert.equal(r.streak, 2, `today and yesterday, then a gap: ${JSON.stringify(r)}`)
-    },
-  )
+  const real = globalThis.fetch
+  let ledgerReads = 0
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname !== "/openapi/v1/magicubes/transactions") {
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    ledgerReads += 1
+    return reply({ body: { success: true, data: { page: 1, page_size: 50, total: 100, records } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000038" }))
+    assert.equal(r.streak, 2, `today and yesterday, then a gap: ${JSON.stringify(r)}`)
+    assert.equal(ledgerReads, 1, "a gap in view needs no second read")
+  } finally {
+    globalThis.fetch = real
+  }
 })
 
 test("checkin reports inactive when nothing is granted", async () => {
