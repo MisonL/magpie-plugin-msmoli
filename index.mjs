@@ -1146,7 +1146,11 @@ export async function MsmoliPlugin(input) {
             // it runs on the host's next ask, not at the moment it named.
             return {
               outcome: "failed",
-              message: `${clock(p.target)} 后自动领取（magpie 每半小时问一次，无需操作）`,
+              // the zone is named because only the minute is: the target is
+              // Beijing's whatever zone the host's own clock is in, and the
+              // host shows other times (resets, a window's expiry) in the
+              // machine's zone beside it.
+              message: `${clock(p.target)} 后自动领取（北京时间，magpie 每半小时问一次，无需操作）`,
             }
           }
         }
@@ -1425,7 +1429,10 @@ export async function MsmoliPlugin(input) {
           // exactly where `win && earnedToday === 0` used to make it so.
           const win = earnedToday === 0 ? windowOf(configOf(configDir)) : null
           const ahead = win ? plan(win, token, day) : null
-          const hint = ahead && !ahead.due ? ` · ${clock(ahead.target)} 领取` : ""
+          // the minute is Beijing's (minuteCN), while the card's reset time is
+          // the machine's zone: say which one this is, or a reader elsewhere
+          // takes it for their own clock.
+          const hint = ahead && !ahead.due ? ` · ${clock(ahead.target)} 领取（北京时间）` : ""
 
           // last, and awaited: the card must not be answered ahead of the
           // write (a poll answered before it would race the very retry this

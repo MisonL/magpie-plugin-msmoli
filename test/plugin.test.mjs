@@ -1065,6 +1065,8 @@ test("before the window the check-in asks for nothing and answers failed", async
       const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
       assert.equal(r.outcome, "failed")
       assert.match(r.message, /后自动领取/)
+      // the minute is Beijing's; a host in another zone must be told so
+      assert.match(r.message, /（北京时间，/, `the wait line names its zone: ${r.message}`)
       const m = /^(\d{2}):(\d{2}) 后自动领取/.exec(r.message)
       assert.ok(m, `the message says when today's claim will run: ${r.message}`)
       const at = +m[1] * 60 + +m[2]
@@ -1529,7 +1531,8 @@ test("the usage card says when the day's claim will run", async () => {
       },
       async () => {
         const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
-        assert.match(u.windows[0].display, /· 0[89]:\d\d 领取/)
+        // the card's own reset time is the machine's zone; this one is Beijing's
+        assert.match(u.windows[0].display, /· 0[89]:\d\d 领取（北京时间）/)
       },
     )
   })

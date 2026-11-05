@@ -172,6 +172,15 @@ magpie's own folder (`~/.config/magpie` for an installed magpie):
 { "pluginCheckins": { "msmoli": true } }
 ```
 
+One more optional step. The Providers row reads **未暴露模型 / no models
+exposed** — accurate (the plugin registers no models) but it reads like
+something failed. Say it serves none on purpose, and the row reads **仅看用量
+/ usage only**:
+
+```bash
+magpie provider models msmoli none
+```
+
 The same `ms-` token is both the inference `Authorization: Bearer` and the web
 session cookie, so nothing else needs configuring.
 
@@ -266,6 +275,22 @@ asks the check-in once per account. With two tokens:
 - the name read at check-in is cached per token, so one account's nickname
   never appears on another's row.
 
+Three things worth knowing once there are two:
+
+- Signing the **same token in twice** can leave two account rows: magpie folds
+  a repeated sign-in into the first row only while neither row carries a name
+  (host.js's `settle`), so once the nickname is there the second sign-in is a
+  row of its own. Both are asked; the day's grant lands once, and the second
+  answers `done`. Remove one in the editor to quiet it.
+- Dropping **one account** of several: **Remove** on its row in the provider's
+  editor, or `magpie accounts forget msmoli "<the account as its card shows
+  it>"`. `magpie plugin logout msmoli` is the blunt one — it takes no account
+  name, so it forgets the provider's whole sign-in.
+- An **alias** is kept under the account's label of the moment (see [Account
+  names](#account-names)). Remove an account and sign in again and the label
+  resets to the key's tail, so an alias you set under the nickname re-attaches
+  only once the next check-in writes the nickname back — or just set it again.
+
 The check-in switch, the card and the window (`msmoli.json`) are per provider,
 so one setting covers every account, whichever site it is from.
 
@@ -348,7 +373,9 @@ Asking for more doesn't help: the server answers `page_size=200` with 50.
 The claim waits until a time of day, by default an account's own minute in
 **08:30–10:00 Beijing time**, picked from a hash of the day and the account so
 it doesn't move between retries. The traffic looks like a person opening the
-site in the morning, not a script at midnight.
+site in the morning, not a script at midnight. Every clock time the card names
+says **北京时间** — the day ModelScope grants in is Beijing's, wherever magpie's
+own clock is.
 
 Waiting costs nothing: daily grants expire **24 hours after they land**, so
 claiming at 9am leaves the credits good until 9am tomorrow.
@@ -379,9 +406,15 @@ guarantees a re-ask.
 
 What that costs, since a plugin has no other way to defer: until the claim
 runs, the card shows a red dot and magpie's "check-in failed; tries again
-later" wording, under the line `09:56 后自动领取（magpie 每半小时问一次，无需操作）`.
+later" wording, under the line
+`09:56 后自动领取（北京时间，magpie 每半小时问一次，无需操作）`.
 Each such ask rewrites `plugin-checkin.json`, and `magpie accounts checkin` run
 in that period exits non-zero. Turning the window off removes all three.
+
+**Check in now** (Settings → Usage → Plugins) does not claim early either: the
+plugin cannot tell a manual press from the host's half-hourly ask — both reach
+it through the same `auth.checkin` call — so before the target minute it
+answers the same line. After the target, the button claims like any ask.
 
 How long it lasts depends on when magpie next asks. On a measured day the
 target was 09:01, magpie asked at 09:00:57 (three seconds early, so `failed`),
@@ -428,6 +461,10 @@ only carries the sign-in its check-in runs as. The Providers page shows both:
 | Usage card | none (no balance endpoint) | 魔粒 balance and today's spend |
 | Check-in | not built in | once a day |
 | Used by the gateway | yes | no, so a card at 100% can't block chat |
+
+Its row reads 未暴露模型 / no models exposed until told it serves none on
+purpose; `magpie provider models msmoli none` (see [Install](#install)) makes
+it read 仅看用量 / usage only. Either way nothing is served.
 
 Entering the same `ms-` token in both is expected: a preset keeps its key in
 `providers.json`, a plugin in `plugin-auth.json`. They fail independently;
@@ -493,7 +530,8 @@ The terms and risks are in
 | No 魔粒 window on the card, or no check-in | Restart magpie; the plugin host caches. |
 | `failed` with HTTP 401 | The token was revoked, or belongs to the other site; `modelscope.cn` and `modelscope.ai` don't share tokens. The message names the site that refused (国内站 / 国际站). Make a new token there and sign in again. |
 | `failed` with HTTP 403 | ModelScope's risk control refused the request; the token is fine. It retries in 30 minutes. |
-| Before the window: failed, with `09:56 后自动领取（magpie 每半小时问一次，无需操作）` | Expected. See [When it claims](#when-it-claims-the-check-in-window). |
+| Before the window: failed, with `09:56 后自动领取（北京时间，magpie 每半小时问一次，无需操作）` | Expected. See [When it claims](#when-it-claims-the-check-in-window). |
+| Check in now before the target minute answers failed with the same line | Expected. A manual press and the host's half-hourly ask reach the plugin the same way, so only the target minute starts the claim. |
 | Always `inactive` | The sign-in works but today's ledger shows nothing: the account may not be eligible, or the grant hasn't been written yet. Before noon magpie re-asks every 30 minutes; from noon the plugin checks once more ("半小时后再核对一次"), and only the second `inactive` stands. |
 | Chat through the `modelscope` preset answers `429 insufficient balance` | The day's 250 魔粒 are spent (~125 flagship calls). Not this plugin: it registers no models. See the tip under [Why its own provider](#why-its-own-provider-with-no-models). |
 | Two accounts with the same nickname, and only one checks in | magpie before 2026-10-20 kept check-ins per display name. Update magpie (fixed in magpie-community/plugins#254). |
