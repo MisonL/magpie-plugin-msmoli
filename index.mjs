@@ -58,6 +58,11 @@ const LOGIN_INFO = "/api/v1/users/login/info"
 const BALANCE = "/openapi/v1/magicubes/balance"
 const TXNS = "/openapi/v1/magicubes/transactions"
 
+// The sign-in is the site's own web session, so every request carries a
+// browser's UA rather than a bare fetch one — a bare UA is the one shape
+// measured to get a different answer. The string is fixed on purpose (the
+// suite pins it whole): it names a browser version rather than pretending to
+// be one, and nothing here fingerprints beyond it.
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 
