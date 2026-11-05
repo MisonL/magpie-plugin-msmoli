@@ -587,17 +587,10 @@ export function pluginAccounts(auth) {
 // { action: "noop" | "run" | "refuse", lines: string[], cmds: [{ argv, stdin? }] }
 export function planToPlugin({ preset, accounts, force }) {
   const lines = []
-  const same = accounts.find((a) => a.token === preset.key)
-  if (same) {
-    lines.push(`✓ 插件已用同一把令牌（${mask(preset.key)}），无需操作。`)
-    return { action: "noop", lines, cmds: [] }
-  }
-  // The plugin refuses a key with anything but visible ASCII in it (tokenOf:
-  // it would go out in a Cookie header), so logging one in would report a
-  // success that leaves every check-in reporting that it cannot recognise the token.
-  // planToPreset has the same guard for the same reason; this direction was
-  // missing it, and a key with a zero-width character in it — invisible in
-  // every terminal and in this tool's own mask — went through.
+  // The SENDABLE guard runs before the "already the same" check: two files
+  // holding the same key with a space in it are "the same" and unusable, and
+  // reporting noop would tell the user everything is fine while every
+  // check-in reports a token it cannot recognise.
   if (!SENDABLE.test(preset.key)) {
     lines.push(`✗ 内置预设的 key 含空格、换行或非 ASCII 字符，插件发不出去，不登录。`)
     // the provider the user actually has, not the preset's default id: a
@@ -606,6 +599,11 @@ export function planToPlugin({ preset, accounts, force }) {
     // there — or, on a machine that has both, to the wrong one.
     lines.push(`  先修好内置那边的 key（magpie provider key ${arg(preset.id)} <key>）。`)
     return { action: "refuse", lines, cmds: [] }
+  }
+  const same = accounts.find((a) => a.token === preset.key)
+  if (same) {
+    lines.push(`✓ 插件已用同一把令牌（${mask(preset.key)}），无需操作。`)
+    return { action: "noop", lines, cmds: [] }
   }
   if (accounts.length === 0) {
     lines.push(`→ 将把内置预设（${arg(preset.id)}）的令牌登录给插件：magpie plugin login ${ID}（令牌走 stdin）`)

@@ -184,7 +184,16 @@ function saidFailure(e, ctl, budget) {
 // remembered, so later polls go straight to it.
 async function siteRead(token, path, deadline = Infinity) {
   const known = sites.get(token)
-  if (known) return { profile: known, ...(await json(known.site, token, path, deadline)) }
+  if (known) {
+    const got = await json(known.site, token, path, deadline)
+    if (got.res.status !== 401) return { profile: known, ...got }
+    // A 401 where the token was accepted before: the sign-in may have been
+    // re-keyed with a token of the other site, or the remembered site may be
+    // stale (a kept `site` value, a proxy's 200 cached as an answer). Forget
+    // it and let the probe decide, rather than expire an account the other
+    // site would serve.
+    sites.delete(token)
+  }
   // A transport failure is not an answer about the token: the domestic site
   // can be unreachable on a network where the international one works, and an
   // international account must still be found there. The first failure is the
@@ -200,7 +209,13 @@ async function siteRead(token, path, deadline = Infinity) {
       continue
     }
     if (got.res.status !== 401) {
-      rememberSite(token, profile)
+      // Only an answer that actually came from the site's own API chooses it:
+      // a 2xx with a body that parses. A proxy's 200 page, a transient 500,
+      // or a 403 (risk control answers before the token is read) says nothing
+      // about which site holds it, and remembering one would hide the real
+      // site for the rest of the process — an international token would then
+      // be reported dead on the domestic 401.
+      if (got.parsed && got.res.status < 300) rememberSite(token, profile)
       return { profile, ...got }
     }
   }
@@ -664,7 +679,12 @@ const maskEchoes = (s, token) => {
   const at = []
   for (let i = 0; i < s.length; ) {
     const c = String.fromCodePoint(s.codePointAt(i))
-    if (!invisible(c)) {
+    // Whitespace is skipped as well as the invisible characters: an echo
+    // broken into short chunks ("ms-01234567 89abcdef012 …") is still the
+    // token, and a chunk under MIN_ECHO on its own would otherwise survive.
+    // The span put back below covers whatever sat between the pieces, so the
+    // masked output never rejoins into the session.
+    if (!invisible(c) && !WHITESPACE.test(c)) {
       vis.push(c)
       at.push(i)
     }
@@ -699,6 +719,9 @@ const maskEchoes = (s, token) => {
 // same class for the shape test, less the line breaks: a shape is all that is
 // known there, and run on across a line it would mask the next line's words.
 const invisible = (c) => /[\p{Cc}\p{Cf}]/u.test(c)
+// WHITESPACE is what an echo may put between two pieces of the token. A token
+// never holds one, so skipping these cannot hide a real character.
+const WHITESPACE = /\s/u
 const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
 
 // A key of another shape with an invisible character inside it reaches the card
@@ -914,6 +937,24 @@ const unusableName = (name, token) =>
   nameIsKey(name, token) ||
   ["__proto__", "constructor", "prototype"].includes(name)
 
+// WRITE_WAIT_MS caps how long a hook waits for the host's write-back. The
+// lock it takes can block for ~20s (host.js's lockAuth, when another process
+// holds plugin-auth.json), and magpie runs every provider's check-ins under
+// one two-minute budget — one contended account must not eat a third of it
+// for a field the card can live without.
+const WRITE_WAIT_MS = 3000
+
+// waitFor resolves when `p` settles or after `ms`, whichever comes first; the
+// loser is left running. The timer is unref'd so it never holds a process open.
+const waitFor = (p, ms) => {
+  let timer
+  const alarm = new Promise((resolve) => {
+    timer = setTimeout(resolve, ms)
+    if (timer && typeof timer.unref === "function") timer.unref()
+  })
+  return Promise.race([p, alarm]).finally(() => clearTimeout(timer))
+}
+
 // rememberAccountFields tells magpie what the plugin learned about this
 // sign-in: the account's own name (so the card reads "Mison" instead of
 // "API key …a1b2"), and — for an account on the international site — the site
@@ -958,7 +999,16 @@ async function rememberAccountFields(client, token, learned, auth, dir) {
       ...(wantName ? { accountId: name } : {}),
       ...(wantSite ? { site } : {}),
     }
-    await client.auth.set({ path: { id: ID }, body })
+    // auth.set takes plugin-auth.json's lock and, when another process holds
+    // it, can block for up to ~20s (host.js's lockAuth). The answer is worth
+    // more than this best-effort write, and a check-in round serves every
+    // provider under one two-minute budget, so the wait is capped: a write
+    // still waiting past the cap finishes behind the hook instead of holding
+    // it. The rejection handler is attached first so a write that fails after
+    // the hook has stopped waiting is not an unhandled rejection.
+    const writing = client.auth.set({ path: { id: ID }, body })
+    writing.catch?.(() => {})
+    await waitFor(Promise.resolve(writing), WRITE_WAIT_MS)
   } catch (e) {
     // the card keeps the key's tail; nothing else depends on this. Put the
     // token back so the next ask tries the write again, and let the log call
@@ -1042,15 +1092,17 @@ async function todayEarn(token, deadline) {
 }
 
 // totalOf is how many rows the ledger holds altogether, from the `total` the
-// page carries beside its `records`. It is what tells a full page from a
-// complete one: the page size caps at 50 (the server answers page_size=200
-// with 50), so a page that comes back with 50 rows may be the whole ledger or
-// the first sliver of it, and only `total` says which. A missing or
-// nonsensical total falls back to the rows in hand, which reads the page as
-// complete — the same answer the plugin gave before the field was read at all.
+// page carries beside its `records`; null when that cannot be known. It is
+// what tells a full page from a complete one: the page size caps at 50 (the
+// server answers page_size=200 with 50), so a page that comes back with 50
+// rows may be the whole ledger or the first sliver of it. A page with room to
+// spare is complete by definition, so a missing `total` is answered by the
+// rows in hand there; a full page without one is unknown, and the streak walk
+// leaves its answer unsaid rather than treat the page as the whole ledger.
 const totalOf = (body, rows) => {
   const n = dataObjectOf(body, "账单格式不认识：没有 data").total
-  return Number.isInteger(n) && n >= rows.length ? n : rows.length
+  if (Number.isInteger(n) && n >= rows.length) return n
+  return rows.length < PAGE_SIZE ? rows.length : null
 }
 
 // prevDay is the Beijing day before `day`. The rows carry date labels with no
@@ -1074,10 +1126,15 @@ const STREAK_PAGES = 8
 // daysWithGrant is the set of Beijing days a list of ledger rows grants a
 // daily rule on, in the "YYYY-MM-DD" shape the rows' stamps start with. A
 // stamp that is not a date is skipped rather than read as one.
+// daysWithGrant is the set of Beijing days a list of ledger rows grants a
+// daily rule on, in the "YYYY-MM-DD" shape the rows' stamps start with. A
+// stamp that is not a string is skipped. No shape test beyond that is needed:
+// the set is only ever asked whether it holds a date label this plugin
+// computed, so a stamp that is not one of those can never be counted.
 const daysWithGrant = (rows, into = new Set()) => {
   for (const r of rows) {
     const stamp = typeof r?.gmt_created === "string" ? r.gmt_created.slice(0, 10) : ""
-    if (r?.type === "EARN" && DAILY_RULES.includes(r?.rule_key) && /^\d{4}-\d{2}-\d{2}/.test(stamp)) into.add(stamp)
+    if (r?.type === "EARN" && DAILY_RULES.includes(r?.rule_key)) into.add(stamp)
   }
   return into
 }
@@ -1105,9 +1162,13 @@ async function streakOf(records, day, total, readPage, deadline) {
     }
     // Nothing grants on `prev`. That is a real break when a row older than it
     // has been read — the ledger goes on past the gap and still says nothing
-    // that day — or when the rows read are the whole ledger.
+    // that day — or when the rows read are the whole ledger. `total` is null
+    // when a full page did not say how many rows the ledger holds; then
+    // whether the run ends here cannot be known.
     const older = records.some((r) => typeof r?.gmt_created === "string" && r.gmt_created.slice(0, 10) < prev)
-    if (older || held >= total) return n
+    if (older) return n
+    if (total === null) return undefined
+    if (held >= total) return n
     if (!readPage || deadline <= Date.now()) return undefined
     const more = await readPage()
     if (more === null) return undefined
@@ -1135,7 +1196,6 @@ const ledgerReader = (profile, token, deadline) => {
     if (left <= 0) return null
     left -= 1
     page += 1
-    if (deadline <= Date.now()) return null
     try {
       const { res, body, parsed } = await json(profile.site, token, `${TXNS}?page=${page}&page_size=${PAGE_SIZE}`, deadline)
       gate(profile, res, body, parsed, token, "账单查询失败")
@@ -1313,6 +1373,8 @@ export async function MsmoliPlugin(input) {
         // twice its 10s stale time when another process holds it), and that
         // wait came out of this hook's 25s — a claim that had landed was then
         // answered "budget used up" and shown as failed for half an hour.
+        // The write is also capped (WRITE_WAIT_MS) so a locked store cannot
+        // stretch the hook past its budget even from the tail.
         let name = ""
         // the site the reads found the token on, for the write-back after the
         // answer; null until the first read has answered
@@ -1331,11 +1393,21 @@ export async function MsmoliPlugin(input) {
           // aliyun_bindlogin (from the website, say) and gains nothing from
           // the touch must not report "claimed 50" — and one that gains more
           // of a rule it already had must still report it.
+          // Only the daily-rule rows go into the comparison. The ledger also
+          // holds EARN rows of other rules — promotions, bind bonuses — and a
+          // row of one that carries no amount (a server-side adjustment, a
+          // rule added since) would throw here and answer `failed` for a day
+          // whose claim had already landed. Those rows are not what this
+          // comparison is about, so their amounts are never read. It is the
+          // same rule the usage card follows: only the kinds it sums need an
+          // amount.
           const byRule = (rows) => {
             const m = new Map()
             for (const r of rows) m.set(r?.rule_key, (m.get(r?.rule_key) ?? 0) + amountOf(r))
             return m
           }
+          // `beforeDaily` and every `rows` handed to grew(...) are already
+          // filtered to DAILY_RULES by the caller.
           const beforeByRule = byRule(beforeDaily)
           // The name a rule is shown by: the first row of that key that carries
           // one. Rows aggregate per (day, type, rule_key, model_tier), so a key

@@ -451,6 +451,88 @@ test("a site value the plugin does not know is ignored, not trusted", async () =
   assert.deepEqual(origins, [CN_ORIGIN, INTL_ORIGIN], `an unknown site is not a site: ${origins}`)
 })
 
+test("a 200 that is not JSON is not remembered as the token's site", async () => {
+  // A proxy's interstitial page answers 200 with HTML. That says nothing about
+  // which site holds the session, and remembering it would hide the real site
+  // for the rest of the process: the next read would go to .cn, meet a 401,
+  // and report a valid international token as expired.
+  testables.sites.clear()
+  const token = "ms-intl-0000-0000-0000-000000000026"
+  const real = globalThis.fetch
+  let poisoned = true
+  let first = true
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    // only the balance is poisoned: the site is learned on the first read,
+    // and that has to be the read that does not parse
+    if (poisoned && first && u.origin === CN_ORIGIN && u.pathname === BALANCE_PATH) {
+      first = false
+      return reply({ raw: "<html>proxy interstitial</html>" })
+    }
+    if (u.origin === CN_ORIGIN) return reply({ status: 401, body: { message: "unauthorized" } })
+    return reply({ body: { success: true, data: { records: [], available_balance: 4 } } })
+  }
+  try {
+    await auth.usage(async () => ({ type: "api", key: token }))
+    assert.equal(testables.sites.get(token), undefined, "an unreadable 200 is not an answer about the site")
+    poisoned = false
+    const out = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.ok(!out.error, `the real site is still found: ${JSON.stringify(out)}`)
+    assert.equal(out.plan, "魔搭社区（国际版）")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a transient 500 from one site does not choose it either", async () => {
+  // a 500 is the server failing, not the token being accepted there
+  testables.sites.clear()
+  const token = "ms-intl-0000-0000-0000-000000000028"
+  const real = globalThis.fetch
+  let first = true
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (first && u.origin === CN_ORIGIN && u.pathname === BALANCE_PATH) {
+      first = false
+      return reply({ status: 500, body: { message: "internal" } })
+    }
+    if (u.origin === CN_ORIGIN) return reply({ status: 401, body: { message: "unauthorized" } })
+    return reply({ body: { success: true, data: { records: [], available_balance: 4 } } })
+  }
+  try {
+    await auth.usage(async () => ({ type: "api", key: token }))
+    assert.equal(testables.sites.get(token), undefined, "a 500 is not an answer about the site")
+    const out = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.equal(out.plan, "魔搭社区（国际版）", `the international site is found: ${JSON.stringify(out)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a remembered site that answers 401 is forgotten and the token probed again", async () => {
+  // A sign-in re-keyed with a token of the other site keeps the old `site`
+  // until the next write. Trusting it would expire a valid account — so a 401
+  // from the remembered site drops it and lets the probe decide.
+  testables.sites.clear()
+  const token = "ms-cn-rekeyed-0000-0000-0000-00000027"
+  const real = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    seen.push(u.origin)
+    if (u.origin === INTL_ORIGIN) return reply({ status: 401, body: {} })
+    return reply({ body: { success: true, data: { records: [], available_balance: 6 } } })
+  }
+  try {
+    const out = await auth.usage(async () => ({ type: "api", key: token, site: INTL_ORIGIN }))
+    assert.ok(!out.error, `the domestic site serves it: ${JSON.stringify(out)}`)
+    assert.equal(out.plan, "魔搭社区")
+    assert.deepEqual([...new Set(seen)], [INTL_ORIGIN, CN_ORIGIN], `the probe runs after the 401: ${seen}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("a domestic sign-in carries no site field, because the probe tries it first", async () => {
   // Writing the domestic site would cost a locked auth.set on every account
   // and save no request: a probe already goes there first.
@@ -921,6 +1003,136 @@ test("a gap inside a full page still ends the run, and the count is kept", async
   } finally {
     globalThis.fetch = real
   }
+})
+
+test("a full page that does not say how many rows the ledger holds leaves the run unsaid", async () => {
+  // `total` is what makes a full page's ending knowable. Without it, the page
+  // may be the whole ledger or its first 50 rows, and counting the rows seen
+  // would print a run that is shorter than the real one.
+  const records = Array.from({ length: 50 }, (_, i) => day({ gmt_created: daysBack(i) }))
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000041" }))
+      assert.equal(r.streak, undefined, `a full page with no total is not a complete ledger: ${JSON.stringify(r)}`)
+    },
+  )
+})
+
+test("a short page with no total is the whole ledger, and its run is counted", async () => {
+  // the other half of the rule: a page with room to spare cannot have been cut
+  // off, so a missing total costs nothing there
+  const records = [day(), day({ gmt_created: daysBack(1) })]
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000042" }))
+      assert.equal(r.streak, 2, `two rows in a page with room: ${JSON.stringify(r)}`)
+    },
+  )
+})
+
+test("only the daily rules count towards the run", async () => {
+  // a promotion EARN on the day the daily grant is missing must not bridge the
+  // gap: the run is about the daily check-in, not every credit the day brought
+  const records = [
+    day(),
+    day({ rule_key: "infocomplement_profile_experience", title: "完善资料", total_amount: 100, gmt_created: daysBack(1) }),
+    day({ gmt_created: daysBack(2) }),
+  ]
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records, total: 3 } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000043" }))
+      assert.equal(r.streak, 1, `a promotion is not a check-in: ${JSON.stringify(r)}`)
+    },
+  )
+})
+
+test("a grant stamped in another shape is not read as a day", async () => {
+  // the stamps are date labels ("2026-11-05" / "2026-11-05 09:13:40"). A page
+  // that grew a different shape must not have it sliced into a day number.
+  const rows = [
+    day(),
+    day({ gmt_created: "yesterday", rule_key: "daily_active" }),
+    day({ gmt_created: 20261104 }),
+  ]
+  assert.equal(await streakOf(rows, today, 3, null, Date.now() + 1000), 1, "no count from unreadable stamps")
+})
+
+test("a blank amount on a row that is not a daily rule does not fail the check-in", async () => {
+  // the ledger can hold EARN rows of other rules; one without an amount would
+  // throw inside the comparison and turn a day that was just claimed into
+  // `failed`. Only the daily rules are compared.
+  const before = []
+  const after = [
+    day({ total_amount: 200 }),
+    day({ rule_key: "infocomplement_email_verification", title: "邮箱验证", total_amount: undefined }),
+  ]
+  const real = globalThis.fetch
+  let reads = 0
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname !== "/openapi/v1/magicubes/transactions") {
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    reads += 1
+    const records = reads === 1 ? before : after
+    return reply({ body: { success: true, data: { records, total: records.length } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000044" }))
+    assert.equal(r.outcome, "claimed", `a foreign row without an amount is not a failure: ${JSON.stringify(r)}`)
+    assert.equal(r.credit, 200, "only the daily grant is counted")
+    assert.equal(r.streak, 1, "and the run counts the daily day")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a full page whose total is smaller than the rows it shows leaves the run unsaid", async () => {
+  // the ledger contradicting itself (50 rows under a total of 10) is not a
+  // complete page by any reading; treating the total as authoritative would
+  // cut the run at the page edge and print a number that is too small.
+  const records = Array.from({ length: 50 }, (_, i) => day({ gmt_created: daysBack(i) }))
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records, total: 10 } },
+      },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000045" }))
+      assert.equal(r.streak, undefined, `a total under the rows cannot be trusted: ${JSON.stringify(r)}`)
+    },
+  )
+})
+
+test("a run still going when the hook's budget runs out is left unsaid", async () => {
+  // reading the next page would start a request the hook has no time for; the
+  // streak is dropped instead of being cut at the page edge. The rows go back
+  // a day each rather than 40 a page: the ticking clock carries the run across
+  // Beijing midnight, and only then is every row on the page still in it.
+  const records = Array.from({ length: 400 }, (_, i) => day({ gmt_created: daysBack(i) }))
+  let asked = 0
+  const readPage = async () => {
+    asked += 1
+    return records
+  }
+  // the clock the walk reads moved in the ticks above; this is how the
+  // context's clock sees that
+  assert.equal(await streakOf(records, today, 500, readPage, Date.now() - 60000), undefined)
+  assert.equal(asked, 0, "no page is read with the budget gone")
 })
 
 test("checkin reports inactive when nothing is granted", async () => {
@@ -2402,6 +2614,24 @@ test("a write-back failure is retried later, and never logs the token", async ()
   } finally {
     if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
     else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a token echoed in pieces is masked, not left on the card", async () => {
+  // A server (or a proxy in front of it) that echoes the session split into
+  // chunks — each under the 12-character floor on its own — is still echoing
+  // the token: the pieces rejoin into it. The card must show the mask.
+  const token = "ms-chunk-0123456789abcdef0123456789"
+  const chunked = `${token.slice(0, 8)} ${token.slice(8, 19)} ${token.slice(19, 30)} ${token.slice(30)}`
+  const real = globalThis.fetch
+  globalThis.fetch = async () => reply({ status: 400, body: { message: `echo: ${chunked}` } })
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.ok(u.error, "the refusal still reaches the card")
+    assert.ok(!u.error.includes(token.slice(0, 8) + " "), `the pieces must not rejoin on the card: ${u.error}`)
+    assert.match(u.error, /ms-c….{4}/, `the mask stands in for the echo: ${u.error}`)
+  } finally {
+    globalThis.fetch = real
   }
 })
 
@@ -5624,6 +5854,56 @@ test("a host with no auth.set still gets its check-in, with the name simply not 
     if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
     else process.env.MAGPIE_MSMOLI_CONFIG = saved
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a write that never lands does not hold the answer", { timeout: 10000 }, async (t) => {
+  // the host's auth.set takes plugin-auth.json's lock and can wait ~20s for
+  // it (host.js's lockAuth). The answer is already computed by then, and a
+  // check-in round serves every provider under one two-minute budget, so the
+  // wait is capped: past WRITE_WAIT_MS the hook answers and the write is left
+  // behind.
+  if (!withMockTimers(t)) return
+  t.mock.timers.enable({ apis: ["setTimeout"] })
+  const dir = tmpDir("msmoli-writecap-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  let reached
+  const blocked = new Promise((r) => {
+    reached = r
+  })
+  const real = globalThis.fetch
+  try {
+    const p = await MsmoliPlugin({
+      directory: dir,
+      client: {
+        auth: {
+          set: () => {
+            reached()
+            return new Promise(() => {})
+          },
+        },
+        app: { log: () => {} },
+      },
+    })
+    globalThis.fetch = fakeFetch({
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records: [day()], total: 1 } },
+      },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "小明" } } },
+    })
+    const run = p.auth.checkin(async () => ({ type: "api", key: "ms-writecap-0000-000-000000000002" }))
+    await blocked
+    // let the hook reach its wait on that never-settling write
+    await new Promise((r) => setImmediate(r))
+    t.mock.timers.tick(3000)
+    const r = await run
+    assert.equal(r.outcome, "done", `the answer does not wait on a locked store: ${JSON.stringify(r)}`)
+  } finally {
+    globalThis.fetch = real
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
   }
 })
 

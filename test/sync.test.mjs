@@ -90,6 +90,17 @@ test("planToPlugin does nothing when both sides already share the token", () => 
   assert.equal(p.cmds.length, 0)
 })
 
+test("planToPlugin refuses a key both sides share but the plugin cannot send", () => {
+  // "the same token" and "a token that works" are different questions: a key
+  // with a space in it is identical on both sides and unusable — the plugin
+  // would answer every check-in with a token it cannot recognise. Reporting
+  // noop would say everything is fine.
+  const bad = "ms-aaaa 1111-bbbb"
+  const p = planToPlugin({ preset: presetOf(bad), accounts: [{ name: "msmoli", token: bad }], force: false })
+  assert.equal(p.action, "refuse", p.lines.join("\n"))
+  assert.match(p.lines.join("\n"), /发不出去/)
+})
+
 test("planToPlugin logs in when the plugin has no account yet", () => {
   const p = planToPlugin({ preset: presetOf(A), accounts: [], force: false })
   assert.equal(p.action, "run")

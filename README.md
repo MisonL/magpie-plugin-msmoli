@@ -25,6 +25,9 @@ account's usage card. Works with both **modelscope.cn** and **modelscope.ai**.
 ● msmoli  Mison · 魔搭社区（国际版）        魔粒 0%  (今日用 0 / 领 300 · 余额 300)    ↻ tomorrow 10:00
 ```
 
+Before the day's grant lands, the line ends with when it will:
+`今日用 0 / 领 0 · 余额 300 · 09:56 领取（北京时间）`.
+
 ## Contents
 
 - [Features](#features)
@@ -252,13 +255,18 @@ site-specific (a `modelscope.cn` token answers 401 on `modelscope.ai`, and the
 other way round), so the plugin works out each account's site from its token:
 
 1. The first read goes to the domestic site.
-2. Only a 401 sends it on to the international one.
+2. A 401 sends it on to the international one, and so does a failure that is
+   not an answer at all (a transport error, a proxy's page, a 5xx): those say
+   nothing about which site holds the token.
 3. The answer is remembered for the rest of the process, and an international
    one is also kept on the sign-in (`site`), so a restarted host goes straight
-   there instead of paying the 401 again.
+   there instead of paying the 401 again. A 401 from a remembered site drops
+   it and the token is probed again — the sign-in may have been re-keyed with
+   a token of the other site.
 
 The card's plan line tells you which site an account is on (`魔搭社区` or
-`魔搭社区（国际版）`), and a 401 names the site that refused.
+`魔搭社区（国际版）`), and a 401 names the site that refused (or 任一站点 when
+both did).
 
 To add an international account, sign in again with that site's token. It
 lands under the same `msmoli` card:
@@ -307,8 +315,9 @@ token for the same ModelScope user gets `done` rather than another 250.
 The card names an account by its ModelScope nickname. An api-type sign-in has
 no name, so the first check-in that runs writes the nickname back as
 `accountId` on the same sign-in (the token is still stored once). Until then a
-fresh install shows `API key …a1b2`. An account already settled for the day is
-not asked again, so the name may appear only with the next day's check-in.
+fresh install shows `API key …a1b2`. A day already settled is not re-claimed,
+but the name is still worth a `login/info` read, so the nickname appears on
+the first ask after sign-in rather than with the next day's claim.
 
 To choose the name yourself, magpie's own alias wins:
 
@@ -387,16 +396,18 @@ Asking for more doesn't help: the server answers `page_size=200` with 50.
 The claim waits until a time of day, by default an account's own minute in
 **08:30–10:00 Beijing time**, picked from a hash of the day and the account so
 it doesn't move between retries. The traffic looks like a person opening the
-site in the morning, not a script at midnight. Every clock time the card names
-says **北京时间** — the day ModelScope grants in is Beijing's, wherever magpie's
-own clock is.
+site in the morning, not a script at midnight. The times this plugin itself
+names say **北京时间** — the day ModelScope grants in is Beijing's wherever
+magpie's own clock is — while times magpie adds around them (a window's reset)
+are in the machine's zone.
 
 Waiting costs nothing: daily grants expire **24 hours after they land**, so
 claiming at 9am leaves the credits good until 9am tomorrow.
 
 Set the window in `msmoli.json` in magpie's own folder (`~/.config/magpie` for
 an installed magpie, the data folder for a portable one). The file is read on
-every ask, so changes apply without restarting magpie.
+every check-in ask (and by a usage read only while the day has no credit yet
+to show), so changes apply without restarting magpie.
 
 ```json
 { "checkinWindow": ["08:30", "10:00"] }
@@ -405,7 +416,7 @@ every ask, so changes apply without restarting magpie.
 | Value | Effect |
 |---|---|
 | `["08:30", "10:00"]` or `"08:30-10:00"` | claim inside that window |
-| `false` or `"off"` | no window; claim whenever magpie asks |
+| `false`, `"off"`, `"no"` | no window; claim whenever magpie asks |
 | an unusable value (end before start, not a clock time) | falls back to the default |
 | an end past **23:00** | capped at 23:00; a window entirely past it falls back to the default |
 
@@ -509,7 +520,9 @@ added, so the token is still stored once. An account on the domestic site
 carries no `site`: a probe tries that one first anyway.
 
 It reads `providers.json` for one thing only: whether you already named the
-account yourself. If you have, it writes nothing.
+account yourself. A name you chose is never overwritten. The `site` of an
+international account is written even then — it is not a name, and it only
+saves the probe.
 
 ## Scope and limits
 
@@ -517,14 +530,17 @@ The terms and risks are in
 [Purpose, responsibility, and risk](#purpose-responsibility-and-risk).
 
 - **Requests per day.** A check-in is three requests (ledger, touch, ledger);
-  a day already claimed answers `done` in two; a ledger that hasn't caught up
-  takes four. A run longer than one ledger page adds one read per page walked
-  back, up to seven — only while the streak is still going at the oldest row.
-  Asks before the window send nothing. A usage read is two requests and never
+  a day already claimed answers `done` in one ledger read when the nickname
+  is known, two otherwise; a ledger that hasn't caught up takes
+  four. A run longer than one ledger page adds one read per page walked back,
+  up to seven — only while the streak is still going at the oldest row. Asks
+  before the window send nothing. A usage read is two requests and never
   touches the sign-in endpoint, so menu-bar polling cannot turn into
   check-ins.
 - **International accounts cost one extra read, once per process**: the 401
-  from the domestic site. A domestic account costs nothing extra.
+  from the domestic site. A domestic account costs nothing extra. A 401 from
+  a remembered site drops the memory and probes again, which is one more read
+  but not a wrong answer.
 - **Time limits.** Every request gives up after 8 seconds, body included, and a
   body is read to at most 256 KiB. A whole check-in gives up after 25 seconds
   and a usage read after 18, because magpie runs every provider's check-ins
@@ -545,10 +561,10 @@ The terms and risks are in
 
 | Symptom | Fix |
 |---|---|
-| `not signed in` | `printf 'ms-token\n' \| magpie plugin login msmoli` |
+| `没有登录信息，请先登录` | `printf 'ms-token\n' \| magpie plugin login msmoli` |
 | No credit window on the card, or no check-in | Restart magpie; the plugin host caches. |
-| `failed` with HTTP 401 | The token was revoked, or belongs to the other site; `modelscope.cn` and `modelscope.ai` don't share tokens. The message names the site that refused (国内站 / 国际站). Make a new token there and sign in again. |
-| `failed` with HTTP 403 | ModelScope's risk control refused the request; the token is fine. It retries in 30 minutes. |
+| `failed` with HTTP 401 | The token was revoked, or belongs to the other site; `modelscope.cn` and `modelscope.ai` don't share tokens. The message names the site that refused (国内站 / 国际站), or 任一站点 when both did. Make a new token there and sign in again. |
+| `failed` with HTTP 403 | ModelScope's risk control refused the request; the token is fine. A check-in is asked again in 30 minutes; a usage read shows the 403 on the card until the next poll. |
 | Before the window: failed, with `09:56 后自动领取（北京时间，magpie 每半小时问一次，无需操作）` | Expected. See [When it claims](#when-it-claims-the-check-in-window). |
 | Check in now before the target minute answers failed with the same line | Expected. A manual press and the host's half-hourly ask reach the plugin the same way, so only the target minute starts the claim. |
 | Always `inactive` | The sign-in works but today's ledger shows nothing: the account may not be eligible, or the grant hasn't been written yet. Before noon magpie re-asks every 30 minutes; from noon the plugin checks once more ("半小时后再核对一次"), and only the second `inactive` stands. |

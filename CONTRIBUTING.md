@@ -24,20 +24,23 @@ nowhere else. The sign-in method declares neither `prompts` nor `authorize` on
 purpose: a prompt's answer lands in `metadata` as well, which puts the same
 token on disk twice (see `save()` in magpie's `host.js`).
 
-The one write the plugin makes is the account's nickname, as `accountId` on the
-sign-in it already has, so magpie's card can name the account instead of
-showing the end of the key. `client.auth.set` replaces the whole entry, so the
-write starts from the auth the host handed over and adds only the name — the
-token stays in `key` alone. `test/plugin.test.mjs` pins all three: the write
-happens once, the token appears once, and fields the host already had survive.
+The plugin writes two fields onto the sign-in it already has: the account's
+nickname, as `accountId`, so magpie's card can name the account instead of
+showing the end of the key; and, for an account on the international site,
+`site`, so a restarted host does not pay a domestic 401 for a token it already
+knows the home of. `client.auth.set` replaces the whole entry, so the write
+starts from the auth the host handed over and adds only those fields — the
+token stays in `key` alone. `test/plugin.test.mjs` pins the shape: one write,
+the token appears once, and fields the host already had survive.
 
 It reads one file to know when not to write: magpie keeps a user's own account
 names in `providers.json`, keyed by the label the account had when it was
 named, and the write-back changes that label. An account the user has named is
 therefore left as it is — otherwise the alias would be left pointing at a label
 nothing carries, and the user's name would vanish from the card. `aliasOf` in
-`index.mjs` does the read; a test pins both halves (named → no write, unnamed →
-the nickname).
+`index.mjs` does the read; a test pins both halves (named → the nickname is
+not written, unnamed → it is). The `site` field is not a name and is written
+either way.
 
 ## The third
 
@@ -54,7 +57,7 @@ the same de-dup the loader uses.
 
 ## The sync CLI
 
-`bin/sync.mjs` is the sync CLI the READMEs document (run it straight from
+`bin/sync.mjs` is the sync CLI the README documents (run it straight from
 magpie's plugin folder, or `npx magpie-plugin-msmoli` from npm), which copies
 an existing ModelScope key between the built-in preset (`providers.json`) and
 this plugin's sign-in (`plugin-auth.json`). Its tests live in
@@ -176,7 +179,7 @@ Release:
 
 ```bash
 node --test                     # the suite, no network
-npm pack --dry-run             # what goes in: module, sync CLI, both READMEs, licence, package.json
+npm pack --dry-run             # what goes in: module, sync CLI, README, licence, package.json
 npm version patch -m "v%s — <one line>"
 git push origin main --tags
 npm publish                     # prepublishOnly runs the suite again
@@ -220,14 +223,12 @@ correction to this one.
 ### What the package contains
 
 `npm pack --dry-run` before a release if anything under `files` changed. It
-lists the module, the sync CLI, both READMEs, the licence and `package.json`,
+lists the module, the sync CLI, the README, the licence and `package.json`,
 and nothing else — no tests, no tooling, no config.
 
 Once published, `magpie plugin add magpie-plugin-msmoli` installs it the way
 every other plugin is installed, and `magpie plugin update` follows the
-versions. Until the registry entry lands, the Discover tab's search finds it by
-name — this package's `opencode-plugin` and `magpie-plugin` keywords are what
-put it there.
+versions. It is not submitted to the community marketplace.
 
 ## Things that are deliberate
 
