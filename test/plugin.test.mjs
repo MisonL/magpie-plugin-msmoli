@@ -473,8 +473,12 @@ test("a 200 that is not JSON is not remembered as the token's site", async () =>
     return reply({ body: { success: true, data: { records: [], available_balance: 4 } } })
   }
   try {
-    await auth.usage(async () => ({ type: "api", key: token }))
-    assert.equal(testables.sites.get(token), undefined, "an unreadable 200 is not an answer about the site")
+    // the same call now carries on to the other site, so the account works
+    // even while the proxy is in the way
+    const first = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.ok(!first.error, `the other site answers: ${JSON.stringify(first)}`)
+    assert.equal(first.plan, "魔搭社区（国际版）")
+    assert.equal(testables.sites.get(token)?.site, INTL_ORIGIN, "the site that answered is the one kept")
     poisoned = false
     const out = await auth.usage(async () => ({ type: "api", key: token }))
     assert.ok(!out.error, `the real site is still found: ${JSON.stringify(out)}`)
@@ -500,10 +504,57 @@ test("a transient 500 from one site does not choose it either", async () => {
     return reply({ body: { success: true, data: { records: [], available_balance: 4 } } })
   }
   try {
-    await auth.usage(async () => ({ type: "api", key: token }))
-    assert.equal(testables.sites.get(token), undefined, "a 500 is not an answer about the site")
     const out = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.ok(!out.error, `the other site answers: ${JSON.stringify(out)}`)
     assert.equal(out.plan, "魔搭社区（国际版）", `the international site is found: ${JSON.stringify(out)}`)
+    assert.equal(testables.sites.get(token)?.site, INTL_ORIGIN, "a 500 is not an answer about the site")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a 200 whose body denies the token does not choose the site either", async () => {
+  // ModelScope can answer 200 with an envelope that says the request failed.
+  // That is the API saying "not here", not accepting the token: remembering
+  // the site would hide the other one for the rest of the process.
+  testables.sites.clear()
+  const token = "ms-intl-0000-0000-0000-000000000030"
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.origin === CN_ORIGIN) return reply({ body: { success: false, message: "unauthorized user" } })
+    return reply({ body: { success: true, data: { records: [], available_balance: 8 } } })
+  }
+  try {
+    const out = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.ok(!out.error, `the international site answers: ${JSON.stringify(out)}`)
+    assert.equal(out.plan, "魔搭社区（国际版）")
+    assert.equal(testables.sites.get(token)?.site, INTL_ORIGIN, "the denying 200 did not choose the domestic site")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("when neither site gives an answer, the first site's failure is the one shown", async () => {
+  // the domestic site answers 500 and the international one is unreachable:
+  // there is no usable answer anywhere, and the card says what the first site
+  // said rather than inventing one.
+  testables.sites.clear()
+  const token = "ms-nowhere-0000-0000-0000-000000000031"
+  const real = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    seen.push(u.origin)
+    if (u.origin === CN_ORIGIN) return reply({ status: 500, body: { message: "上游错误" } })
+    throw new TypeError("fetch failed")
+  }
+  try {
+    const out = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.ok(out.error, `a failure is reported: ${JSON.stringify(out)}`)
+    assert.match(out.error, /上游错误/, `the first site's failure is the one kept: ${out.error}`)
+    assert.notEqual(out.signIn, "expired", "a 500 is not a dead token")
+    assert.deepEqual([...new Set(seen)], [CN_ORIGIN, INTL_ORIGIN], `both sites are tried: ${seen}`)
   } finally {
     globalThis.fetch = real
   }
@@ -530,6 +581,75 @@ test("a remembered site that answers 401 is forgotten and the token probed again
     assert.deepEqual([...new Set(seen)], [INTL_ORIGIN, CN_ORIGIN], `the probe runs after the 401: ${seen}`)
   } finally {
     globalThis.fetch = real
+  }
+})
+
+test("the site that answered 401 is not asked again in the same probe", async () => {
+  // A 401 is an answer about the token, not a fluke to retry: once the
+  // remembered site has refused it, only the other site's answer can change
+  // the verdict. Probing in the fixed order asks the refusing site a second
+  // time on every poll of a dead token. Pinned on the raw request list — a
+  // set comparison cannot tell the duplicate from the two distinct sites.
+  testables.sites.clear()
+  const token = "ms-cn-rekeyed-0000-0000-0000-000000000028"
+  const seen = []
+  await withUrlFetch(
+    {
+      [BALANCE_PATH]: { status: 401, body: { message: "unauthorized" } },
+    },
+    async (urls) => {
+      const out = await auth.usage(async () => ({ type: "api", key: token, site: INTL_ORIGIN }))
+      assert.equal(out.signIn, "expired")
+      seen.push(...urls.filter((u) => u.includes(BALANCE_PATH)).map((u) => new URL(u).origin))
+    },
+  )
+  assert.deepEqual(seen, [INTL_ORIGIN, CN_ORIGIN], `the refused site is asked once: ${seen}`)
+})
+
+test("a stale site on the sign-in is removed once the probe finds the domestic one", async () => {
+  // The memory drop above only fixes the process it happened in. The sign-in
+  // still names the old site, so without this every restart pays the same 401
+  // again — and the write-back is the only place that can remove it.
+  testables.sites.clear()
+  const dir = tmpDir("msmoli-stalesite-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const token = "ms-cn-stale-0000-0000-0000-000000029"
+    const writes = []
+    const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
+    const real = globalThis.fetch
+    globalThis.fetch = async (url) => {
+      const u = new URL(url)
+      if (u.origin === INTL_ORIGIN) return reply({ status: 401, body: {} })
+      return reply({ body: { success: true, data: { records: [day()], available_balance: 5, total: 1 } } })
+    }
+    try {
+      await withUrlFetch(
+        {
+          [TX_PATH]: bySite(
+            { body: { success: true, data: { records: [day()], total: 1 } } },
+            { status: 401, body: {} },
+          ),
+          "/api/v1/users/login/info": bySite(
+            { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+            { status: 401, body: {} },
+          ),
+        },
+        async () => {
+          await p.auth.checkin(async () => ({ type: "api", key: token, site: INTL_ORIGIN }))
+        },
+      )
+    } finally {
+      globalThis.fetch = real
+    }
+    assert.equal(writes.length, 1, `one write carries the name and the removal: ${JSON.stringify(writes)}`)
+    assert.equal("site" in writes[0].body, false, `the stale site is gone: ${JSON.stringify(writes[0].body)}`)
+    assert.equal(writes[0].body.accountId, "alice", "the name still lands in the same write")
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
   }
 })
 
@@ -904,6 +1024,32 @@ test("a page whose total is its own row count is the whole ledger, and no second
   }
 })
 
+test("an exactly full page with no total reads one more page to learn it was whole", async () => {
+  // 50 rows is the page size: a missing total there cannot say whether the
+  // ledger goes on. Dropping the run would be a number the plugin never
+  // needed to lose — the next page is empty, the ledger ended, and the run is
+  // told.
+  const records = Array.from({ length: 50 }, (_, i) => day({ gmt_created: daysBack(i) }))
+  const real = globalThis.fetch
+  let ledgerReads = 0
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname !== "/openapi/v1/magicubes/transactions") {
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    ledgerReads += 1
+    if (u.searchParams.get("page") === "2") return reply({ body: { success: true, data: { records: [] } } })
+    return reply({ body: { success: true, data: { records } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000047" }))
+    assert.equal(r.streak, 50, `an empty second page says the first was whole: ${JSON.stringify(r)}`)
+    assert.equal(ledgerReads, 2, "one page more to prove the end")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("a page that cannot be read leaves the streak unsaid, and the check-in still answers", async () => {
   // A 403 on page 2 says nothing about the claim that already landed. The
   // streak is dropped; the answer keeps its outcome and credit, and the host
@@ -1058,15 +1204,18 @@ test("only the daily rules count towards the run", async () => {
   )
 })
 
-test("a grant stamped in another shape is not read as a day", async () => {
-  // the stamps are date labels ("2026-11-05" / "2026-11-05 09:13:40"). A page
-  // that grew a different shape must not have it sliced into a day number.
+test("a row whose stamp is not a date label cannot extend the run", async () => {
+  // The stamps are date labels ("2026-11-05" / "2026-11-05 09:13:40"). A row
+  // carrying anything else contributes a key the walk never asks for, so it
+  // neither adds a day nor breaks the count — this pins that the walk is
+  // driven by the labels it computes, not by whatever the page wrote.
   const rows = [
     day(),
-    day({ gmt_created: "yesterday", rule_key: "daily_active" }),
+    day({ gmt_created: "昨天", rule_key: "daily_active" }),
     day({ gmt_created: 20261104 }),
+    day({ gmt_created: daysBack(1) }),
   ]
-  assert.equal(await streakOf(rows, today, 3, null, Date.now() + 1000), 1, "no count from unreadable stamps")
+  assert.equal(await streakOf(rows, today, 4, null, Date.now() + 60000), 2, "only the dated rows count")
 })
 
 test("a blank amount on a row that is not a daily rule does not fail the check-in", async () => {
@@ -1114,6 +1263,25 @@ test("a full page whose total is smaller than the rows it shows leaves the run u
     async () => {
       const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000045" }))
       assert.equal(r.streak, undefined, `a total under the rows cannot be trusted: ${JSON.stringify(r)}`)
+    },
+  )
+})
+
+test("a total under the rows it is printed beside is not trusted on a short page either", async () => {
+  // On a short page the missing-total fallback would call the page whole and
+  // count three days under a total of two — a number the ledger itself says
+  // cannot be right. The contradiction costs the run, not a wrong run.
+  const records = [day(), day({ gmt_created: daysBack(1) }), day({ gmt_created: daysBack(2) })]
+  await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records, total: 2 } },
+      },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000046" }))
+      assert.equal(r.streak, undefined, `a total under the rows is not a complete page: ${JSON.stringify(r)}`)
     },
   )
 })
@@ -2199,6 +2367,37 @@ test("a nickname that is the token itself is not written back", async () => {
       async () => {
         await withClient.auth.checkin(async () => ({ type: "api", key: token }))
         assert.equal(writes.length, 0, "a server that echoes the token back must not get it stored as a name")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a token spaced apart is still the token, not a nickname", async () => {
+  // An echo can come back with a space slipped into it — the same trick a
+  // message body uses — and then `token.includes(name)` is false while every
+  // character of the name is still the token's. Written back, the sign-in
+  // would carry the key twice, spaced out, where the card's mask (which
+  // judges the exact string) does not reach it.
+  const dir = tmpDir("msmoli-spacedname-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    const token = "ms-spaced-0000-0000-0000-000000000013"
+    const spaced = `${token.slice(0, 10)} ${token.slice(10)}`
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: spaced } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      async () => {
+        await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(writes.length, 0, `a spaced echo is still the token: ${JSON.stringify(spaced)}`)
       },
     )
   } finally {
@@ -5864,16 +6063,25 @@ test("a write that never lands does not hold the answer", { timeout: 10000 }, as
   // wait is capped: past WRITE_WAIT_MS the hook answers and the write is left
   // behind.
   if (!withMockTimers(t)) return
-  t.mock.timers.enable({ apis: ["setTimeout"] })
+  try {
+    t.mock.timers.enable({ apis: ["setTimeout"] })
+  } catch {
+    t.mock.timers.enable(["setTimeout"])
+  }
   const dir = tmpDir("msmoli-writecap-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
+  const real = globalThis.fetch
+  // a token nothing else in the suite uses: the name cooldown (named) is
+  // keyed by token and survives between runs, and a token it still holds
+  // would skip the write this test is about
+  const token = `ms-writecap-${process.pid}-${Date.now()}`
+  const key = async () => ({ type: "api", key: token })
   let reached
   const blocked = new Promise((r) => {
     reached = r
   })
-  const real = globalThis.fetch
   try {
     const p = await MsmoliPlugin({
       directory: dir,
@@ -5893,7 +6101,7 @@ test("a write that never lands does not hold the answer", { timeout: 10000 }, as
       },
       "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "小明" } } },
     })
-    const run = p.auth.checkin(async () => ({ type: "api", key: "ms-writecap-0000-000-000000000002" }))
+    const run = p.auth.checkin(key)
     await blocked
     // let the hook reach its wait on that never-settling write
     await new Promise((r) => setImmediate(r))
@@ -5901,6 +6109,145 @@ test("a write that never lands does not hold the answer", { timeout: 10000 }, as
     const r = await run
     assert.equal(r.outcome, "done", `the answer does not wait on a locked store: ${JSON.stringify(r)}`)
   } finally {
+    globalThis.fetch = real
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a write that fails after the cap is still reported and retried", { timeout: 10000 }, async (t) => {
+  // The cap must not turn a failed write into a silent one: the name is put
+  // back so the next ask tries again, and the reason reaches the log. Left
+  // unhandled, the one-hour name cooldown would swallow the retry and the card
+  // would keep the key's tail with nothing said.
+  if (!withMockTimers(t)) return
+  try {
+    t.mock.timers.enable({ apis: ["setTimeout"] })
+  } catch {
+    t.mock.timers.enable(["setTimeout"])
+  }
+  const dir = tmpDir("msmoli-latefail-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const real = globalThis.fetch
+  const token = `ms-latefail-${process.pid}-${Date.now()}`
+  const logs = []
+  let attempts = 0
+  let rejectIt
+  let reached
+  let waiter = null
+  const blocked = new Promise((r) => {
+    reached = r
+  })
+  const nextAttempt = () => new Promise((r) => (waiter = r))
+  try {
+    const p = await MsmoliPlugin({
+      directory: dir,
+      client: {
+        auth: {
+          set: () => {
+            attempts += 1
+            reached()
+            if (waiter) waiter()
+            return new Promise((_, reject) => {
+              rejectIt = reject
+            })
+          },
+        },
+        app: { log: (o) => logs.push(o.body.message) },
+      },
+    })
+    globalThis.fetch = fakeFetch({
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records: [day()], total: 1 } },
+      },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "小明" } } },
+    })
+    const run = p.auth.checkin(async () => ({ type: "api", key: token }))
+    await blocked
+    await new Promise((r) => setImmediate(r))
+    t.mock.timers.tick(3000)
+    assert.equal((await run).outcome, "done")
+    rejectIt(new Error("lock timed out"))
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+    assert.equal(logs.length, 1, `the late failure is logged exactly once: ${JSON.stringify(logs)}`)
+    assert.match(logs[0], /account facts not written back/)
+
+    // and the cooldown was released, so a second ask tries again
+    const again = nextAttempt()
+    const second = p.auth.checkin(async () => ({ type: "api", key: token }))
+    await Promise.race([again, new Promise((r) => setTimeout(r, 0))])
+    await new Promise((r) => setImmediate(r))
+    assert.equal(attempts, 2, "the next ask tried the write again")
+    t.mock.timers.tick(3000)
+    await second
+  } finally {
+    globalThis.fetch = real
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a write that rejects after the cap is not an unhandled rejection", { timeout: 10000 }, async (t) => {
+  // once the hook stops waiting, the write's own rejection has no awaiter;
+  // without the handler attached before the race it surfaces as an unhandled
+  // rejection — which magpie's host turns into a crash report for a plugin
+  // that did nothing wrong.
+  if (!withMockTimers(t)) return
+  try {
+    t.mock.timers.enable({ apis: ["setTimeout"] })
+  } catch {
+    t.mock.timers.enable(["setTimeout"])
+  }
+  const dir = tmpDir("msmoli-writecapreject-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const real = globalThis.fetch
+  const token = `ms-writecaprej-${process.pid}-${Date.now()}`
+  const unhandled = []
+  const onUnhandled = (e) => unhandled.push(e)
+  process.on("unhandledRejection", onUnhandled)
+  let rejectIt
+  let reached
+  const blocked = new Promise((r) => {
+    reached = r
+  })
+  try {
+    const p = await MsmoliPlugin({
+      directory: dir,
+      client: {
+        auth: {
+          set: () => {
+            reached()
+            return new Promise((_, reject) => {
+              rejectIt = reject
+            })
+          },
+        },
+        app: { log: () => {} },
+      },
+    })
+    globalThis.fetch = fakeFetch({
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records: [day()], total: 1 } },
+      },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "小明" } } },
+    })
+    const run = p.auth.checkin(async () => ({ type: "api", key: token }))
+    await blocked
+    await new Promise((r) => setImmediate(r))
+    t.mock.timers.tick(3000)
+    const r = await run
+    assert.equal(r.outcome, "done")
+    // the write fails after the hook has answered
+    rejectIt(new Error("lock timed out"))
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+    await new Promise((r) => setImmediate(r))
+    assert.deepEqual(unhandled, [], "a late write failure is handled, not thrown into the host")
+  } finally {
+    process.off("unhandledRejection", onUnhandled)
     globalThis.fetch = real
     if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
     else process.env.MAGPIE_MSMOLI_CONFIG = saved
@@ -7451,6 +7798,7 @@ test("masking a long echo keeps every character in place, invisible ones include
     ["lines", `x ${token.slice(0, 20)}\n${token.slice(20)} y`],
     ["three", `x ${token.slice(0, 11)}\n${token.slice(11, 22)}\x01${token.slice(22)} y`],
     ["twice", `${token} and ${token}`],
+    ["space inside", `x ${token.slice(0, 11)} ${token.slice(11)} y`],
     ["short-run kept", `ms-dos and ${token.slice(0, 5)} tail`],
   ]
   for (const [name, msg] of cases) {
@@ -7466,6 +7814,13 @@ test("masking a long echo keeps every character in place, invisible ones include
       assert.ok(out.includes(keep), `${name}: 周围文字 ${keep} 丢了：${JSON.stringify(out)}`)
     }
   }
+  // The space an echo was broken at is put back before the mask. Dropped, the
+  // word before the echo joins the mask's front ("xms-a…5555 y").
+  const broken = await withFetch(
+    { "/openapi/v1/magicubes/balance": { status: 500, body: { success: false, message: `x ${token.slice(0, 11)} ${token.slice(11)} y` } } },
+    () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.match(broken.error, /x ms-a…5555 y/, `回显前的空格被吞了: ${broken.error}`)
   const two = await withFetch(
     { "/openapi/v1/magicubes/balance": { status: 500, body: { success: false, message: `${token} and ${token}` } } },
     () => auth.usage(async () => ({ type: "api", key: token })),

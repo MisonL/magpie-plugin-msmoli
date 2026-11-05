@@ -66,7 +66,8 @@ this plugin's sign-in (`plugin-auth.json`). Its tests live in
 Three invariants to keep when touching it:
 
 - **It never writes a magpie file itself.** The reads are direct; every write
-  goes through magpie's own CLI (`magpie plugin login`, `magpie provider key`),
+  goes through magpie's own CLI (`magpie plugin login`, `magpie provider key`,
+  `magpie plugin logout`),
   which owns the locking, the `.bak` generations and the change events. A tool
   that edits `plugin-auth.json` behind a running magpie races it and misses
   those. magpie's CLI has no `--dir`, so a write always lands in the binary's

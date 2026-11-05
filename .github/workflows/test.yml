@@ -96,4 +96,3 @@ jobs:
       - run: node --test
         env:
           MSMOLI_FAKE_NOW: "1893456000000"
-

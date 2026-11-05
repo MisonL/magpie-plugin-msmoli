@@ -261,8 +261,9 @@ other way round), so the plugin works out each account's site from its token:
 3. The answer is remembered for the rest of the process, and an international
    one is also kept on the sign-in (`site`), so a restarted host goes straight
    there instead of paying the 401 again. A 401 from a remembered site drops
-   it and the token is probed again — the sign-in may have been re-keyed with
-   a token of the other site.
+   it and the *other* site is asked — the sign-in may have been re-keyed with
+   a token of the other site, and the site that just refused the token is not
+   worth a second request.
 
 The card's plan line tells you which site an account is on (`魔搭社区` or
 `魔搭社区（国际版）`), and a 401 names the site that refused (or 任一站点 when
@@ -362,11 +363,11 @@ noon magpie's own 30-minute re-ask already covers it.
 A `done` or `claimed` also carries the streak: how many Beijing days in a row
 the ledger shows a daily grant, today included. magpie prints it as
 `3-day streak` beside the outcome. The ledger's `total` tells the plugin
-whether one page is the whole ledger; when it is not and the run is still
-going at the oldest row, the next page is read, up to eight. A run it could
-not follow to its end — a page that fails, or one longer than those eight
-pages — is left unsaid rather than printed short, because magpie shows any
-number it is given.
+whether one page is the whole ledger; when it is not — or is missing, or the
+rows contradict it — and the run is still going at the oldest row, the next
+page is read, up to eight. A run it could not follow to its end — a page that
+fails, or one longer than those eight pages — is left unsaid rather than
+printed short, because magpie shows any number it is given.
 
 <details>
 <summary><b>Endpoints and the ledger</b></summary>

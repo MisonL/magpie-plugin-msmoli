@@ -184,42 +184,54 @@ function saidFailure(e, ctl, budget) {
 // remembered, so later polls go straight to it.
 async function siteRead(token, path, deadline = Infinity) {
   const known = sites.get(token)
+  let order = SITES
   if (known) {
     const got = await json(known.site, token, path, deadline)
     if (got.res.status !== 401) return { profile: known, ...got }
     // A 401 where the token was accepted before: the sign-in may have been
     // re-keyed with a token of the other site, or the remembered site may be
     // stale (a kept `site` value, a proxy's 200 cached as an answer). Forget
-    // it and let the probe decide, rather than expire an account the other
-    // site would serve.
+    // it and ask the other site only — the one that just refused the token is
+    // the one request the probe can skip.
     sites.delete(token)
+    order = SITES.filter((p) => p !== known)
   }
-  // A transport failure is not an answer about the token: the domestic site
-  // can be unreachable on a network where the international one works, and an
-  // international account must still be found there. The first failure is the
-  // one kept, because when both sites fail it is the one the user was closest
-  // to (their token most often comes from the domestic site).
-  let firstError
-  for (const profile of SITES) {
+  // A failure that is not an answer about the token — a transport error, a
+  // proxy's 200 page, a 5xx, a 200 whose body denies the token — moves the
+  // probe on to the other site: the domestic site can be unreachable or
+  // broken on a network where the international one works, and an
+  // international account must still be found there. Only an answer from the
+  // site's own API about this token chooses it: a 2xx that parses and does
+  // not say it failed. The first failure is the one kept and reported when
+  // neither site gives a usable answer, because it is the one the user was
+  // closest to (their token most often comes from the domestic site).
+  let first
+  for (const profile of order) {
     let got
     try {
       got = await json(profile.site, token, path, deadline)
     } catch (e) {
-      firstError ??= e
+      first ??= { error: e }
       continue
     }
-    if (got.res.status !== 401) {
-      // Only an answer that actually came from the site's own API chooses it:
-      // a 2xx with a body that parses. A proxy's 200 page, a transient 500,
-      // or a 403 (risk control answers before the token is read) says nothing
-      // about which site holds it, and remembering one would hide the real
-      // site for the rest of the process — an international token would then
-      // be reported dead on the domestic 401.
-      if (got.parsed && got.res.status < 300) rememberSite(token, profile)
-      return { profile, ...got }
+    if (got.res.status === 401) continue
+    if (got.parsed && got.res.status < 300) {
+      if (okOf(got.body)) {
+        rememberSite(token, profile)
+        return { profile, ...got }
+      }
+      first ??= { answer: { profile, ...got } }
+      continue
     }
+    // an API-level refusal (403 risk control, a 400 on the request): this
+    // site is the token's own and the answer is what the caller must report
+    if (got.parsed && got.res.status < 500) return { profile, ...got }
+    first ??= { answer: { profile, ...got } }
   }
-  if (firstError) throw firstError
+  if (first) {
+    if (first.error) throw first.error
+    return first.answer
+  }
   throw deadToken("任一站点")
 }
 
@@ -700,8 +712,11 @@ const maskEchoes = (s, token) => {
       v++
     }
     if (piece.length >= MIN_ECHO) {
-      // the span of the whole run, invisible characters inside it included,
-      // and the ones between it and the last character written before it
+      // The span of the whole run, the characters skipped between its pieces
+      // included. What sat between the last character written and the run's
+      // first one — whitespace skipped while matching — is written out first,
+      // so masking does not join two words that the echo had apart.
+      out += s.slice(from, at[k])
       out += maskToken(token)
       from = at[v - 1] + vis[v - 1].length
       k = v
@@ -927,13 +942,32 @@ const hostText = (value) => cardText(value, "")
 // plugin-auth.json as the account's name. A substring of 20+ characters is
 // the piece; a nickname of a few characters that happens to sit inside a
 // token ("ms", "ab") is a nickname.
+// tightName is a name with the characters an echo may insert taken out. A
+// server that echoed the token into a nickname can space it out just as a
+// message can, and "ms-01234567 89abcdef…" is no longer a substring of the
+// token — but the tight form is.
+const tightName = (name) => name.replace(/[\s\p{Cc}\p{Cf}]+/gu, "")
+// insideToken: the name is in the token, or its tight form is. Either way
+// every character of it is already in plugin-auth.json, so writing it back
+// leaks nothing new — which is what makes nameIsKey skip it. A token that
+// holds the name is the proof; it does not matter how long the name is.
+const insideToken = (name, token) =>
+  typeof token === "string" && token !== "" && (token.includes(name) || token.includes(tightName(name)))
+// echoesToken: the name is the token being handed back — the token itself, or
+// a piece of 20+ characters, spaced out or not. The length is the tight form's,
+// so padding a 19-character piece with spaces does not tip it over the line.
+const echoesToken = (name, token) => {
+  if (typeof token !== "string" || !token) return false
+  if (name.includes(token)) return true
+  return insideToken(name, token) && tightName(name).length >= 20
+}
 const nameIsKey = (name, token) =>
-  !(typeof token === "string" && token.includes(name)) &&
+  !insideToken(name, token) &&
   name.split(/\s+/).some((w) => isKeyWord(w) && (/\d/.test(w) || /[+/=]/.test(w)))
 const unusableName = (name, token) =>
   !name ||
   name === token ||
-  (typeof token === "string" && ((name.length >= 20 && token.includes(name)) || name.includes(token))) ||
+  echoesToken(name, token) ||
   nameIsKey(name, token) ||
   ["__proto__", "constructor", "prototype"].includes(name)
 
@@ -959,10 +993,11 @@ const waitFor = (p, ms) => {
 // sign-in: the account's own name (so the card reads "Mison" instead of
 // "API key …a1b2"), and — for an account on the international site — the site
 // itself, so a restarted host does not have to hand the token to the domestic
-// site for a 401 first. The sign-in is written as it already is — the same
-// key, no second copy of the token — with those fields beside it; what is
-// already there is left alone. Both go in one write: auth.set takes
-// plugin-auth.json's lock, and two writes would take it twice.
+// site for a 401 first. A site the probe has since found to be wrong is
+// removed. The sign-in is written as it already is — the same key, no second
+// copy of the token — with those fields beside it; what is already there is
+// left alone. Everything goes in one write: auth.set takes plugin-auth.json's
+// lock, and two writes would take it twice.
 async function rememberAccountFields(client, token, learned, auth, dir) {
   // "can write" is a function, not a truthy value: `{ auth: { set: 1 } }` is a
   // client that cannot write, and `!client?.auth?.set` let it through to call
@@ -975,6 +1010,10 @@ async function rememberAccountFields(client, token, learned, auth, dir) {
   // one first, so recording it saves no request and costs a locked write.
   const site = learned?.profile?.site === INTL.site ? INTL.site : ""
   const wantSite = !!site && auth?.site !== site
+  // A sign-in that still names a site for an account the probe found on the
+  // domestic one is stale — the key was replaced under it. Left alone, every
+  // restart would pay a 401 against the site it names, so it is dropped.
+  const wantClear = !site && typeof auth?.site === "string" && auth.site !== ""
   const at = named.get(token)
   const cooling = at !== undefined && Date.now() - at < NAME_AGAIN_MS
   // an account the user has named keeps that name: writing the nickname over
@@ -983,7 +1022,7 @@ async function rememberAccountFields(client, token, learned, auth, dir) {
   // a state we can't see.
   const wantName =
     !!name && auth?.accountId !== name && !cooling && aliasOf(ID, dir, labelOf(auth, token)) === ""
-  if (!wantName && !wantSite) return
+  if (!wantName && !wantSite && !wantClear) return
   if (wantName) {
     named.delete(token)
     named.set(token, Date.now())
@@ -999,32 +1038,54 @@ async function rememberAccountFields(client, token, learned, auth, dir) {
       ...(wantName ? { accountId: name } : {}),
       ...(wantSite ? { site } : {}),
     }
+    if (wantClear) delete body.site
     // auth.set takes plugin-auth.json's lock and, when another process holds
     // it, can block for up to ~20s (host.js's lockAuth). The answer is worth
     // more than this best-effort write, and a check-in round serves every
     // provider under one two-minute budget, so the wait is capped: a write
     // still waiting past the cap finishes behind the hook instead of holding
-    // it. The rejection handler is attached first so a write that fails after
-    // the hook has stopped waiting is not an unhandled rejection.
-    const writing = client.auth.set({ path: { id: ID }, body })
-    writing.catch?.(() => {})
-    await waitFor(Promise.resolve(writing), WRITE_WAIT_MS)
-  } catch (e) {
-    // the card keeps the key's tail; nothing else depends on this. Put the
-    // token back so the next ask tries the write again, and let the log call
-    // be truly best-effort: a host whose log is synchronous returns undefined
-    // where a promise is expected, and that must not throw out of here.
-    if (wantName) named.delete(token)
-    // the message can carry whatever the host put in it; scrub the token out
-    // of it before it reaches magpie's log
-    const why = cardText(whyOf(e), token)
-    try {
-      const r = client?.app?.log?.({ body: { level: "warn", service: ID, message: `account facts not written back: ${why}` } })
-      if (r && typeof r.catch === "function") r.catch(() => {})
-    } catch {
-      // a host whose log throws synchronously must not turn a successful
-      // check-in into a failed one, nor a usage read into a rejection
+    // it. A rejection that comes after the cap is handled where it lands —
+    // reported and retried on the next ask — so a locked store does not cost
+    // an hour of the nickname's cooldown with no sign that anything failed.
+    const writing = Promise.resolve(client.auth.set({ path: { id: ID }, body }))
+    // the handler is attached before the race so a rejection that lands after
+    // the cap still finds one; both sides of the cap run the same report
+    // one report per write: the failure reaches both the attached handler and
+    // the race, and a doubled line would read as two failed writes
+    let reported = false
+    const failed = (e) => {
+      if (reported) return
+      reported = true
+      onWriteFailed(e, client, token, wantName)
     }
+    writing.catch(failed)
+    try {
+      await waitFor(writing, WRITE_WAIT_MS)
+    } catch (e) {
+      failed(e)
+    }
+  } catch (e) {
+    // a synchronous throw from the host's own set(): same report, same retry
+    onWriteFailed(e, client, token, wantName)
+  }
+}
+
+// onWriteFailed is the one report for every failed write, whether it failed at
+// once or after the wait was capped: the name goes back so the next ask tries
+// again, and the reason is logged without the token in it. Best-effort — a
+// host whose log is synchronous returns undefined here, and that must not
+// throw out of the caller.
+function onWriteFailed(e, client, token, wantName) {
+  if (wantName) named.delete(token)
+  // the message can carry whatever the host put in it; scrub the token out of
+  // it before it reaches magpie's log
+  const why = cardText(whyOf(e), token)
+  try {
+    const r = client?.app?.log?.({ body: { level: "warn", service: ID, message: `account facts not written back: ${why}` } })
+    if (r && typeof r.catch === "function") r.catch(() => {})
+  } catch {
+    // a host whose log throws synchronously must not turn a successful
+    // check-in into a failed one, nor a usage read into a rejection
   }
 }
 
@@ -1101,7 +1162,9 @@ async function todayEarn(token, deadline) {
 // leaves its answer unsaid rather than treat the page as the whole ledger.
 const totalOf = (body, rows) => {
   const n = dataObjectOf(body, "账单格式不认识：没有 data").total
-  if (Number.isInteger(n) && n >= rows.length) return n
+  // a total below the rows it is printed beside is the ledger contradicting
+  // itself; neither number can be trusted to say whether the page is whole
+  if (Number.isInteger(n)) return n >= rows.length ? n : null
   return rows.length < PAGE_SIZE ? rows.length : null
 }
 
@@ -1163,19 +1226,19 @@ async function streakOf(records, day, total, readPage, deadline) {
     // Nothing grants on `prev`. That is a real break when a row older than it
     // has been read — the ledger goes on past the gap and still says nothing
     // that day — or when the rows read are the whole ledger. `total` is null
-    // when a full page did not say how many rows the ledger holds; then
-    // whether the run ends here cannot be known.
+    // when a full page did not say how many rows the ledger holds, or said a
+    // number the rows contradict; the next page is the only way to learn
+    // whether that page was the whole ledger, so it is read when there is one.
     const older = records.some((r) => typeof r?.gmt_created === "string" && r.gmt_created.slice(0, 10) < prev)
     if (older) return n
-    if (total === null) return undefined
-    if (held >= total) return n
+    if (total !== null && held >= total) return n
     if (!readPage || deadline <= Date.now()) return undefined
     const more = await readPage()
     if (more === null) return undefined
-    // an empty page with `total` still saying there are rows is the ledger
-    // contradicting itself; nothing after this can be trusted to be the end
-    // of the run, so it is left unsaid rather than cut short here
-    if (!more.length) return undefined
+    // An empty page settles it: with a known `total` still counting rows it is
+    // the ledger contradicting itself, and nothing after this can be trusted
+    // to be the end of the run; with no `total`, it is the end of the ledger.
+    if (!more.length) return total === null ? n : undefined
     daysWithGrant(more, days)
     records = more
     held += more.length

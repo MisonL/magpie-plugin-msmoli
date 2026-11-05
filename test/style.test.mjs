@@ -40,6 +40,12 @@ const walk = (dir, ext, out = []) => {
 
 const JS = walk("", ".mjs")
 const MD = walk("", ".md")
+// .editorconfig's indent block covers *.json and *.yml too, and its global
+// block covers every file: a JSON or a workflow saved with CRLF or a stray tab
+// fails the same rules a .mjs does. Guarding only .mjs left package.json and
+// .github/workflows/test.yml outside the very rules this tree declares.
+const DATA = [...walk("", ".json"), ...walk("", ".yml"), ...walk("", ".yaml")]
+const INDENTED = [...JS, ...DATA]
 
 const read = (rel) => readFileSync(join(root, rel), "utf8")
 
@@ -56,26 +62,30 @@ test("the tree walk finds the files it is meant to guard", () => {
   }
   assert.ok(MD.length >= 2, `the walk found only ${MD.length} .md files`)
   assert.ok(MD.includes("README.md") && MD.includes("CONTRIBUTING.md"), "the walk missed a markdown file")
+  assert.ok(DATA.length >= 2, `the walk found only ${DATA.length} JSON/YAML files`)
+  for (const rel of ["package.json", ".github/workflows/test.yml"]) {
+    assert.ok(DATA.includes(rel), `the walk missed ${rel}`)
+  }
 })
 
-test("every JS file is LF, with no CR anywhere", () => {
-  for (const rel of sortedFiles(JS)) {
+test("every JS, JSON and YAML file is LF, with no CR anywhere", () => {
+  for (const rel of sortedFiles(INDENTED)) {
     const text = read(rel)
     const cr = text.indexOf("\r")
     assert.equal(cr, -1, `${rel} has a CR at byte ${cr} (line ${text.slice(0, cr).split("\n").length}); the repo is LF-only`)
   }
 })
 
-test("every JS file ends with a single newline", () => {
-  for (const rel of sortedFiles(JS)) {
+test("every JS, JSON and YAML file ends with a single newline", () => {
+  for (const rel of sortedFiles(INDENTED)) {
     const text = read(rel)
     assert.ok(text.endsWith("\n"), `${rel} does not end with a newline`)
     assert.ok(!text.endsWith("\n\n"), `${rel} ends with more than one newline`)
   }
 })
 
-test("no JS file has trailing whitespace on a line", () => {
-  for (const rel of sortedFiles(JS)) {
+test("no JS, JSON or YAML file has trailing whitespace on a line", () => {
+  for (const rel of sortedFiles(INDENTED)) {
     const lines = read(rel).split("\n")
     lines.forEach((line, i) => {
       assert.ok(!/[ \t]+$/.test(line), `${rel}:${i + 1} has trailing whitespace`)
@@ -83,20 +93,23 @@ test("no JS file has trailing whitespace on a line", () => {
   }
 })
 
-test("no JS file indents with a tab", () => {
-  for (const rel of sortedFiles(JS)) {
+test("no JS, JSON or YAML file indents with a tab", () => {
+  // The tab is looked for anywhere in the line's leading whitespace, not only
+  // at column zero: "  \tfoo" passed both this check and the even-spaces one,
+  // and it is exactly the mis-indent an editor with mixed settings makes.
+  for (const rel of sortedFiles(INDENTED)) {
     const lines = read(rel).split("\n")
     lines.forEach((line, i) => {
-      assert.ok(!/^\t/.test(line), `${rel}:${i + 1} indents with a tab; the style is spaces`)
+      assert.ok(!/^[ \t]*\t/.test(line), `${rel}:${i + 1} indents with a tab; the style is spaces`)
     })
   }
 })
 
-test("every indented JS line is a multiple of two spaces", () => {
+test("every indented JS, JSON and YAML line is a multiple of two spaces", () => {
   // The floor is the style .editorconfig declares. A line that opens with an
   // odd number of spaces is a mis-indent an editor made, not a deliberate
   // alignment (continuations still land on an even column).
-  for (const rel of sortedFiles(JS)) {
+  for (const rel of sortedFiles(INDENTED)) {
     const lines = read(rel).split("\n")
     lines.forEach((line, i) => {
       const m = /^( +)/.exec(line)
