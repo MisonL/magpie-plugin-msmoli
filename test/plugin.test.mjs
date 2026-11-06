@@ -2571,8 +2571,9 @@ test("the module exports no bare function the host would take for a plugin", asy
   // try/catch and the whole package is reported as failed to load. Helpers
   // live on `testables`, which the loader skips because it is an object.
   //
-  // Two entries are intended: the international site is a second provider over
-  // the same hooks. Anything else appearing here is an accident.
+  // One entry is intended: `MsmoliPlugin`, the same function `default` is, and
+  // the Set keeps it from running twice. Anything else appearing here is an
+  // accident.
   const mod = await import("../index.mjs")
   // exactly as servers() builds its list, de-dup included: the named export
   // `MsmoliPlugin` is the same function `default` is, and the Set keeps it
@@ -4830,6 +4831,11 @@ test("a nickname that is not a string is not written back", async () => {
   // alias one.
   const dir = tmpDir("msmoli-nick-")
   try {
+    // Each case gets its own token: a name (even the empty one) is cached per
+    // token for the life of the process, so one token shared across the loop
+    // lets an early "no usable name" answer keep the later "alice" from being
+    // read at all.
+    let n = 0
     for (const nick of [{ weird: 1 }, [1, 2], 12345, true]) {
       const writes = []
       await withFetch(
@@ -4841,7 +4847,7 @@ test("a nickname that is not a string is not written back", async () => {
         },
         async () => {
           const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (b) => (writes.push(b.body), { data: true }) } } })
-          const r = await p.auth.checkin(async () => ({ type: "api", key: "ms-nickname-only-0001" }))
+          const r = await p.auth.checkin(async () => ({ type: "api", key: `ms-nickname-only-00${n++}` }))
           assert.equal(r.outcome, "done", JSON.stringify(nick))
           assert.deepEqual(writes, [], `nickname ${JSON.stringify(nick)} must not be written back`)
         },
@@ -4858,7 +4864,7 @@ test("a nickname that is not a string is not written back", async () => {
       },
       async () => {
         const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (b) => (writes.push(b.body), { data: true }) } } })
-        await p.auth.checkin(async () => ({ type: "api", key: "ms-nickname-only-0001" }))
+        await p.auth.checkin(async () => ({ type: "api", key: "ms-nickname-only-0099" }))
         assert.equal(writes.length, 1)
         assert.equal(writes[0].accountId, "alice")
       },
@@ -5480,15 +5486,16 @@ test("an accountNames that is not a map does not take the check-in down with it"
   }
 })
 
-test("a nickname a token could hold is refused at 20 characters, and a longer one is not", async () => {
-  // unusableName refuses a name of 20+ characters that sits inside the token:
-  // a piece that long is the token being echoed, not a person's name. Both
-  // halves of that rule are load-bearing and neither was asserted — `>= 20`
-  // widened to `>= 21` writes a 20-character slice of the token into
-  // plugin-auth.json, and `&&` widened to `||` refuses every nickname of 20+
-  // characters, however unrelated. The threshold is the token's own front:
-  // whatever its length, a piece of it must be refused at 20 and a name the
-  // token does not contain must go through.
+test("a nickname a token could hold is refused at 12 characters, and a shorter one is not", async () => {
+  // unusableName refuses a name of MIN_ECHO (12) or more characters that sits
+  // inside the token: a piece that long is the token being echoed, not a
+  // person's name — and the card's `user` line printed a 19-character front of
+  // the token whole, because the mask's floor and the name's floor disagreed.
+  // Both halves of the rule are load-bearing: `>= 12` widened to `>= 13`
+  // writes a 12-character slice of the token into plugin-auth.json, and `&&`
+  // widened to `||` refuses every nickname of 12+ characters, however
+  // unrelated. The threshold is the token's own front: a piece of it must be
+  // refused at 12 and a name the token does not contain must go through.
   const dir = tmpDir("msmoli-longname-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
@@ -5500,12 +5507,12 @@ test("a nickname a token could hold is refused at 20 characters, and a longer on
     // from the token the case actually signs in with.
     const stranger = "MisonLiangWithALongName"
     for (const [i, slice, want, why] of [
-      [0, 20, 0, "a 20-character slice of the token is the token"],
+      [0, 12, 0, "a 12-character slice of the token is the token"],
       [1, null, 1, "a long name the token does not hold is a name"],
-      // 19 is one short of the rule: that slice is not looked for, and a
+      // 11 is one short of the rule: that slice is not looked for, and a
       // nickname of a few characters that happens to sit inside a token is a
-      // nickname. Tightening `>= 20` to `>= 19` refuses it.
-      [2, 19, 1, "a 19-character slice is not met by the rule"],
+      // nickname. Tightening `>= 12` to `>= 11` refuses it.
+      [2, 11, 1, "an 11-character slice is not met by the rule"],
     ]) {
       const tok = `ms-0123456789abcdef0123456789abcdef012345${i}${i}`
       const nick = slice === null ? stranger : tok.slice(0, slice)
@@ -8222,6 +8229,214 @@ test("a non-ms key cut by an invisible character is masked whole on the card", a
   }
 })
 
+// ── Round thirty-six: the third review round (an echo split by any character,
+// the day spilling past a page, a 2xx that is not 200) ──────────────────
+
+test("an echo split by any character a token cannot hold is still masked", async () => {
+  // maskEchoes matched over "everything not invisible", so any other character
+  // between two pieces — a space (handled), a comma, a middle dot, an em-dash,
+  // an arrow, an accented letter, an emoji — was a hard break in the run, and
+  // every piece under MIN_ECHO survived. The server picks the separator, so a
+  // list of them can never cover it: the fix keeps the token's own characters
+  // and skips the rest. Measured before the fix: the whole 37-character token
+  // reached the card through a comma, a "·", a "—", "→", "é" and an emoji.
+  const T = "ms-aaaa1111-bbbb-2222-cccc-3333444455"
+  const flats = (s) => s.replace(/[^A-Za-z0-9]/g, "")
+  for (const sep of [" ", ",", "、", "。", "·", "—", "→", "é", "🙂", "​", "\n"]) {
+    const said = `会话 ${T.slice(0, 11)}${sep}${T.slice(11, 22)}${sep}${T.slice(22, 33)}${sep}${T.slice(33)} 异常`
+    const u = await withFetch({ "/openapi/v1/magicubes/balance": { status: 500, body: { message: said } } }, () =>
+      auth.usage(async () => ({ type: "api", key: T })),
+    )
+    assert.ok(!flats(u.error).includes(flats(T)), `${JSON.stringify(sep)} 分块的回显漏到卡片上了：${u.error}`)
+  }
+})
+
+test("a short front of the token echoed as a nickname is not written back", async () => {
+  // The card's `user` line prints the stored name whole and never goes through
+  // cardText, so a 12–19 character front of the token, accepted as a name,
+  // showed that many characters of the key on the card and in any screenshot.
+  // echoesToken's floor is the mask's own (MIN_ECHO) now.
+  const dir = tmpDir("msmoli-shortfront-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    for (const [n, want, why] of [
+      [19, 0, "a 19-character front is longer than the mask's floor"],
+      [12, 0, "12 is the floor itself"],
+      [11, 1, "11 is one short of the floor"],
+    ]) {
+      const token = `ms-front-0000-0000-0000-000000000${n}`
+      const writes = []
+      const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+      await withFetch(
+        {
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: token.slice(0, n) } } },
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+        },
+        async () => {
+          await p.auth.checkin(async () => ({ type: "api", key: token }))
+          assert.equal(writes.length, want, `${n}: ${why}`)
+        },
+      )
+    }
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a nickname that is the token with separators in it is not written back", async () => {
+  // The same echo trick in the nickname field: "ms-01234567·89abcdefghi·…" is
+  // the token with a middle dot in it. tightName strips only whitespace, so
+  // insideToken missed it and the name went into plugin-auth.json and onto the
+  // card's `user` line. flatName keeps the token's own characters and finds it.
+  const dir = tmpDir("msmoli-sepname-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const token = "ms-aaaa1111-bbbb-2222-cccc-3333444455"
+    for (const sep of ["·", ",", "、", "—", " ", "🙂"]) {
+      const nick = `${token.slice(0, 11)}${sep}${token.slice(11, 22)}${sep}${token.slice(22, 33)}${sep}${token.slice(33)}`
+      const writes = []
+      const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+      await withFetch(
+        {
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+        },
+        async () => {
+          await p.auth.checkin(async () => ({ type: "api", key: token }))
+          assert.equal(writes.length, 0, `${JSON.stringify(sep)} 分块的昵称被写回了：${JSON.stringify(nick)}`)
+        },
+      )
+    }
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a 2xx that is not 200 does not choose a site, and the other site is tried", async () => {
+  // siteRead remembered any parsed 2xx as the token's site, but gate() accepts
+  // only 200: a proxy's 201 with a good body made siteRead pick the domestic
+  // site and stop, and the read then failed with "HTTP 201" while the
+  // international site would have answered. A 202 is accepted-and-not-done and
+  // counts the same. Only the 200 the gate accepts chooses the site now.
+  for (const status of [201, 202, 206]) {
+    testables.sites.clear()
+    const seen = []
+    const u = await withUrlFetch(
+      {
+        [BALANCE_PATH]: bySite(
+          { status, body: { success: true, data: { available_balance: 7 } } },
+          { body: { success: true, data: { available_balance: 1 } } },
+        ),
+        [TX_PATH]: { body: { success: true, data: { records: [] } } },
+      },
+      async (urls) => {
+        const out = await auth.usage(async () => ({ type: "api", key: `ms-2xx-0000-0000-0000-00000000${status}` }))
+        seen.push(...urls.map((x) => new URL(x).origin))
+        return out
+      },
+    )
+    assert.ok(!u.error, `${status}: the international site should have served it, got ${u.error}`)
+    assert.equal(u.plan, "魔搭社区（国际版）", `${status}: the answer is the international card`)
+    assert.ok(seen.includes(INTL_ORIGIN), `${status}: the probe must go on: ${seen}`)
+  }
+})
+
+test("today's rows spilling onto the next page are read, in both the check-in and the card", async () => {
+  // Rows come newest first, so today's rows are at the top; today alone holding
+  // more rows than a page (a busy account, or a ledger that does not coalesce)
+  // used to hide everything past page 1 behind wrong numbers: the check-in read
+  // page 1 only and answered "inactive" for a day whose grant was on page 2,
+  // and the usage card summed today's spend from page 1 only (measured: 149
+  // shown as 49).
+  const many = Array.from({ length: 49 }, () => spend(0, 1, today))
+  const page1 = [spend(49), ...many]
+  const page2 = [day({ gmt_created: today }), spend(100)]
+  const real = globalThis.fetch
+  const ledger = (u) =>
+    reply({
+      body: {
+        success: true,
+        data: { total: page1.length + page2.length, records: Number(u.searchParams.get("page")) === 1 ? page1 : page2 },
+      },
+    })
+  // the card: today's spend is 49 + 100, summed across both pages
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 0 } } })
+    return ledger(u)
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-pageday-0000-0000-0000-000000000001" }))
+    assert.ok(!u.error, u.error)
+    assert.match(u.windows[0].display, /今日用 149 /, `今日消费是两页之和：${u.windows[0].display}`)
+  } finally {
+    globalThis.fetch = real
+  }
+  // the check-in: the grant sits on page 2, so the day is claimed, not inactive
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    return ledger(u)
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-pageday-0000-0000-0000-000000000002" }))
+    // the grant is already in the ledger (on page 2), so the answer is `done`:
+    // what matters is that it was found at all — page-1-only read answered
+    // `inactive` and went on to touch login/info
+    assert.equal(r.outcome, "done", `第 2 页的当日发放要被看到：${JSON.stringify(r)}`)
+    assert.equal(r.credit, 200, "发放金额来自第 2 页")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a page is followed only while it is full and holds nothing older than today", async () => {
+  // The walk must not fetch page 2 for a ledger whose page 1 already shows an
+  // older day: that page is where today's rows end. It must not fetch it for a
+  // short page either. Both pins are request counts, not just the numbers.
+  const older = [spend(10), day({ gmt_created: daysBack(3) })]
+  const urls = []
+  await withUrlFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 5 } } },
+      [TX_PATH]: { body: { success: true, data: { total: 60, records: older } } },
+    },
+    async (seen) => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-nowalk-0000-0000-0000-000000000003" }))
+      assert.ok(!u.error, u.error)
+      urls.push(...seen.filter((x) => x.includes(TX_PATH)))
+    },
+  )
+  assert.equal(urls.length, 1, `一天的行已经到头，不该再翻页：${urls.join(" | ")}`)
+})
+
+test("a second page that fails leaves the numbers from the first, not an error", async () => {
+  // A 403 on the page the walk follows must not turn a good page-1 answer into
+  // a failed card: the extra read only sharpens the numbers, and its failure
+  // leaves them where they were.
+  const full = Array.from({ length: 50 }, (_, i) => spend(i === 0 ? 49 : 0))
+  await withUrlFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 3 } } },
+      [TX_PATH]: (origin, n) =>
+        n === 2 ? { status: 403, body: { message: "forbidden" } } : { body: { success: true, data: { total: 51, records: full } } },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-pagefail-0000-0000-0000-000000000004" }))
+      assert.ok(!u.error, `第二页失败不该让卡片失败：${u.error}`)
+      assert.match(u.windows[0].display, /今日用 49 /, `第一页的数字还在：${u.windows[0].display}`)
+    },
+  )
+})
+
 test("no test creates a temp folder outside the tracked helper", async () => {
   // Every test's temp directory has to be registered through tmpDir, and the
   // after hook deletes them all. A batch of tests used to create temp
@@ -8234,4 +8449,186 @@ test("no test creates a temp folder outside the tracked helper", async () => {
   const self = readFileSync(fileURLToPath(import.meta.url), "utf8")
   const raw = self.match(/mkdtempSync\(join\(tmpdir\(\), "/g) ?? []
   assert.equal(raw.length, 0, `有 ${raw.length} 处直接用字面量前缀建临时目录，未经 tmpDir 登记，会泄漏`)
+})
+
+// ── Round thirty-seven: the third review round's second batch ─────────
+
+test("a risk-control refusal on the only reachable site is not reported as a network failure", async () => {
+  // siteRead's early return for an API-level refusal (a parsed 4xx that is not
+  // 401) is what tells the user "risk control" instead of "check your proxy".
+  // Removing it stays green on a fixture that answers the same 403 on both
+  // sites — the fallback keeps the same answer — so the pin needs one site
+  // unreachable and the other refusing: the refusal must be the report.
+  testables.sites.clear()
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (new URL(url).origin === CN_ORIGIN) throw new TypeError("fetch failed")
+    return reply({ status: 403, body: { success: false, message: "blocked" } })
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-riskonly-0000-0000-0000-00000001" }))
+    assert.match(u.error ?? "", /风控/, `reachable site's refusal must be reported: ${u.error}`)
+    assert.doesNotMatch(u.error ?? "", /网络不通|代理/, `a 403 is not a network failure: ${u.error}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a host whose auth.set throws synchronously is reported, and the name is retried", async () => {
+  // `client.auth.set(...)` is called before Promise.resolve, so a synchronous
+  // throw never reaches the attached rejection handler. The outer catch is the
+  // only reporter — and it also puts the name back, so the next ask tries
+  // again. Dropped, a host that throws synchronously loses both: no line in
+  // magpie's log, and the nickname waits out its hour-long cooldown.
+  const dir = tmpDir("msmoli-syncthrow-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const logs = []
+    let calls = 0
+    const client = {
+      auth: { set: () => { calls += 1; throw new Error("sync refusal") } },
+      app: { log: (o) => logs.push(o.body.message) },
+    }
+    const p = await MsmoliPlugin({ directory: dir, client })
+    const token = "ms-syncthrow-0000-0000-0000-000000000021"
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+      },
+      async () => {
+        const r = await p.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(r.outcome, "done", `a failed write is not a failed check-in: ${JSON.stringify(r)}`)
+      },
+    )
+    assert.equal(calls, 1, "the write was attempted")
+    assert.equal(logs.length, 1, `one report, not zero and not two: ${JSON.stringify(logs)}`)
+    assert.match(logs[0], /account facts not written back/)
+    // the retry state was restored: a second ask writes again
+    await withFetch(
+      {
+        [BALANCE_PATH]: { body: { success: true, data: { available_balance: 5 } } },
+        [TX_PATH]: { body: { success: true, data: { records: [day()] } } },
+      },
+      async () => {
+        await p.auth.usage(async () => ({ type: "api", key: token }))
+      },
+    )
+    assert.equal(calls, 2, "the name goes back and the next ask tries the write again")
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a forgotten site is dropped from memory when the other site refuses too", async () => {
+  // The remembered-site 401 path forgets the site; the pin must distinguish
+  // "asked the other site only" from "forgot the site". With the delete
+  // dropped, a dead token keeps the site that just refused it, and every later
+  // ask pays a wasted 401 before the probe.
+  testables.sites.clear()
+  const token = "ms-forget-0000-0000-0000-000000000022"
+  const ok = {
+    [BALANCE_PATH]: bySite({ status: 401, body: {} }, { body: { success: true, data: { available_balance: 1 } } }),
+    [TX_PATH]: bySite({ status: 401, body: {} }, { body: { success: true, data: { records: [] } } }),
+  }
+  await withUrlFetch(ok, async () => {
+    const u = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.ok(!u.error, u.error)
+  })
+  assert.equal(testables.sites.get(token)?.site, INTL_ORIGIN, "the site was remembered")
+  await withUrlFetch(
+    {
+      [BALANCE_PATH]: { status: 401, body: {} },
+      [TX_PATH]: { status: 401, body: {} },
+    },
+    async () => {
+      const u = await auth.usage(async () => ({ type: "api", key: token }))
+      assert.equal(u.signIn, "expired")
+    },
+  )
+  assert.equal(testables.sites.get(token), undefined, "the refused site must be forgotten")
+})
+
+test("a claimed day whose name read fails is still done, not failed", async () => {
+  // The touch is only for the card's name once the grant is in the ledger. A
+  // 403 or a 500 on login/info must not turn a claimed day into `failed` — the
+  // host retries a failed day every half hour, touching login/info each time,
+  // for a claim that already landed.
+  for (const bad of [{ status: 403, body: { success: false } }, { status: 500, body: { message: "busy" } }]) {
+    const r = await withFetch(
+      {
+        [TX_PATH]: { body: { success: true, data: { records: [day()] } } },
+        "/api/v1/users/login/info": bad,
+      },
+      async () => auth.checkin(async () => ({ type: "api", key: "ms-namefail-0000-0000-0000-000000023" })),
+    )
+    assert.equal(r.outcome, "done", `${bad.status}: the claim stands: ${JSON.stringify(r)}`)
+    assert.equal(r.credit, 200, `${bad.status}: the credit is the ledger's`)
+  }
+})
+
+test("a failed first read does not clear the site kept on the sign-in", async () => {
+  // `learned.profile` is null until a read succeeds; treating that null as
+  // "the probe found the domestic site" deleted a known `site` on every blip,
+  // costing the next cold start its saved 401 — and taking the auth lock at it.
+  const dir = tmpDir("msmoli-noclear-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    const real = globalThis.fetch
+    globalThis.fetch = async () => { throw new TypeError("fetch failed") }
+    try {
+      const r = await p.auth.checkin(async () => ({ type: "api", key: "ms-noclear-0000-0000-0000-000000000024", site: INTL_ORIGIN }))
+      assert.equal(r.outcome, "failed")
+    } finally {
+      globalThis.fetch = real
+    }
+    assert.deepEqual(writes, [], `a failed read must not rewrite the sign-in: ${JSON.stringify(writes)}`)
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("an account with no usable nickname is not touched again on every provisional re-ask", async () => {
+  // "claimed and the name is known" skipped the touch; a nickname the server
+  // does not give (or gives unusably) was never remembered, so the shortcut
+  // never took and each of the morning's re-asks touched login/info — the
+  // dozen extra sign-ins the shortcut exists to prevent. The empty answer is a
+  // fact worth remembering.
+  const dir = tmpDir("msmoli-noname-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    let touches = 0
+    const real = globalThis.fetch
+    globalThis.fetch = async (url) => {
+      const u = new URL(url)
+      if (u.pathname.endsWith("/login/info")) {
+        touches += 1
+        return reply({ body: { Code: 200, Success: true, Data: {} } })
+      }
+      return reply({ body: { success: true, data: { records: [day()] } } })
+    }
+    try {
+      const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async () => {} } } })
+      for (let i = 0; i < 3; i++) await p.auth.checkin(async () => ({ type: "api", key: "ms-noname-0000-0000-0000-000000000025" }))
+    } finally {
+      globalThis.fetch = real
+    }
+    assert.equal(touches, 1, `the empty answer is remembered; touches: ${touches}`)
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

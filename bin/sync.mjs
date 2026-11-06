@@ -372,7 +372,6 @@ export function presetCandidates(providers, from = "") {
 // two, each piece under the floor, and both were printed whole. A line break
 // still ends a run — a token never spans one.
 const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
-const invisible = (c) => /[\p{Cc}\p{Cf}]/u.test(c)
 const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]){11,}`, "gu")
 const show = (s) =>
   String(s ?? "")
@@ -730,20 +729,25 @@ function hidden(argv, secret, log) {
 const MIN_ECHO = 12
 function maskEchoes(s, secret) {
   if (typeof secret !== "string" || secret.length < MIN_ECHO) return s
-  // a control or format character inside the echo is stepped over, for the
-  // reason show()'s shape steps over one — a line break too: this is a piece
-  // of the real secret, and one broken across two lines is still the secret
+  // Only the characters the secret itself is made of are collected: anything
+  // else — a control character, a space, a comma, a piece of punctuation a
+  // child wrapped the echo in — is a character the secret cannot hold, and a
+  // separator between two pieces of it. It is the same rule index.mjs's
+  // cardText carries (a whitelist of separators cannot cover an open set), and
+  // here it is what keeps a secret broken across a line, or printed under a
+  // prefix, whole.
   //
-  // The matching runs over the visible characters alone, in one pass, and the
-  // spans are put back afterwards. Stepping over a character as the scan went
-  // — and restarting one position later when the run came up short — cost a
-  // run of them its own length at every position it held: a child's output of
-  // 20 000 control characters took 79 seconds.
+  // The matching runs over those characters alone, in one pass, and the spans
+  // are put back afterwards. Stepping over a character as the scan went — and
+  // restarting one position later when the run came up short — cost a run of
+  // them its own length at every position it held: a child's output of 20 000
+  // control characters took 79 seconds.
+  const mine = new Set(secret)
   const vis = []
   const at = []
   for (let i = 0; i < s.length; ) {
     const c = String.fromCodePoint(s.codePointAt(i))
-    if (!invisible(c)) {
+    if (mine.has(c)) {
       vis.push(c)
       at.push(i)
     }
@@ -759,6 +763,9 @@ function maskEchoes(s, secret) {
       v++
     }
     if (piece.length >= MIN_ECHO) {
+      // what sat between the last character written and the run's first one is
+      // written out first, so masking does not swallow the words around it
+      out += s.slice(from, at[k])
       out += mask(secret)
       from = at[v - 1] + vis[v - 1].length
       k = v

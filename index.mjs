@@ -197,11 +197,12 @@ async function siteRead(token, path, deadline = Infinity) {
     order = SITES.filter((p) => p !== known)
   }
   // A failure that is not an answer about the token — a transport error, a
-  // proxy's 200 page, a 5xx, a 200 whose body denies the token — moves the
-  // probe on to the other site: the domestic site can be unreachable or
+  // proxy's 200 page, a 5xx, a 200 whose body denies the token, a 2xx that is
+  // not 200 (a 202 means accepted-and-not-done; gate() refuses it too) — moves
+  // the probe on to the other site: the domestic site can be unreachable or
   // broken on a network where the international one works, and an
-  // international account must still be found there. Only an answer from the
-  // site's own API about this token chooses it: a 2xx that parses and does
+  // international account must still be found there. Only the answer the
+  // caller's own gate will accept chooses a site: a 200 that parses and does
   // not say it failed. The first failure is the one kept and reported when
   // neither site gives a usable answer, because it is the one the user was
   // closest to (their token most often comes from the domestic site).
@@ -215,7 +216,7 @@ async function siteRead(token, path, deadline = Infinity) {
       continue
     }
     if (got.res.status === 401) continue
-    if (got.parsed && got.res.status < 300) {
+    if (got.parsed && got.res.status === 200) {
       if (okOf(got.body)) {
         rememberSite(token, profile)
         return { profile, ...got }
@@ -225,7 +226,7 @@ async function siteRead(token, path, deadline = Infinity) {
     }
     // an API-level refusal (403 risk control, a 400 on the request): this
     // site is the token's own and the answer is what the caller must report
-    if (got.parsed && got.res.status < 500) return { profile, ...got }
+    if (got.parsed && got.res.status >= 400 && got.res.status < 500) return { profile, ...got }
     first ??= { answer: { profile, ...got } }
   }
   if (first) {
@@ -582,7 +583,12 @@ const names = new Map()
 const NAMES_MAX = 64
 
 function rememberName(token, name) {
-  if (!name) return
+  // An empty name is remembered too. "The server gave no usable name" is a
+  // fact as much as a name is: before this, `names` never held it, so the
+  // "claimed and the name is known" shortcut never took and every provisional
+  // re-ask in a morning touched login/info again — the dozen extra sign-ins
+  // the shortcut exists to prevent. A read that failed does not come here, so
+  // a later ask still tries once more.
   names.delete(token)
   names.set(token, name)
   while (names.size > NAMES_MAX) names.delete(names.keys().next().value)
@@ -687,16 +693,20 @@ const maskToken = (token) =>
 const MIN_ECHO = 12
 const maskEchoes = (s, token) => {
   if (typeof token !== "string" || token.length < MIN_ECHO) return s
+  // Only the characters the token itself is made of are collected: anything
+  // else — whitespace, a zero-width space, a comma, a middle dot, an emoji a
+  // server wrapped the echo in — is a character the token cannot hold, and a
+  // separator between two pieces of it. Skipping them is what keeps an echo
+  // broken into short chunks ("ms-01234567 89abcdef012 …", or the same split
+  // by "🙂") whole, and a chunk under MIN_ECHO from surviving on its own. A
+  // whitelist of separators cannot do this: the set is open, and the one
+  // character it misses is the one the server uses.
+  const mine = new Set(token)
   const vis = []
   const at = []
   for (let i = 0; i < s.length; ) {
     const c = String.fromCodePoint(s.codePointAt(i))
-    // Whitespace is skipped as well as the invisible characters: an echo
-    // broken into short chunks ("ms-01234567 89abcdef012 …") is still the
-    // token, and a chunk under MIN_ECHO on its own would otherwise survive.
-    // The span put back below covers whatever sat between the pieces, so the
-    // masked output never rejoins into the session.
-    if (!invisible(c) && !WHITESPACE.test(c)) {
+    if (mine.has(c)) {
       vis.push(c)
       at.push(i)
     }
@@ -729,14 +739,10 @@ const maskEchoes = (s, token) => {
   return out + s.slice(from)
 }
 
-// invisible is a control or format character: what a token pasted out of a
-// chat client carries, and what an echo may have added inside one. INV is the
-// same class for the shape test, less the line breaks: a shape is all that is
-// known there, and run on across a line it would mask the next line's words.
-const invisible = (c) => /[\p{Cc}\p{Cf}]/u.test(c)
-// WHITESPACE is what an echo may put between two pieces of the token. A token
-// never holds one, so skipping these cannot hide a real character.
-const WHITESPACE = /\s/u
+// INV is the control or format class for the shape test, less the line breaks:
+// a shape is all that is known there, and run on across a line it would mask
+// the next line's words. maskEchoes no longer needs a separate predicate —
+// it keeps the token's own characters and skips everything else.
 const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
 
 // A key of another shape with an invisible character inside it reaches the card
@@ -947,19 +953,31 @@ const hostText = (value) => cardText(value, "")
 // message can, and "ms-01234567 89abcdef…" is no longer a substring of the
 // token — but the tight form is.
 const tightName = (name) => name.replace(/[\s\p{Cc}\p{Cf}]+/gu, "")
-// insideToken: the name is in the token, or its tight form is. Either way
-// every character of it is already in plugin-auth.json, so writing it back
-// leaks nothing new — which is what makes nameIsKey skip it. A token that
-// holds the name is the proof; it does not matter how long the name is.
-const insideToken = (name, token) =>
-  typeof token === "string" && token !== "" && (token.includes(name) || token.includes(tightName(name)))
+// flatName keeps only the characters a token is made of. Any other character
+// in a name — a space, a comma, a bracket — is something an echo inserted, and
+// the token's own characters survive in order.
+const flatName = (name) => name.replace(/[^A-Za-z0-9]/g, "")
+// insideToken: the name is in the token, or its tight form is, or its flat
+// form is a run of the token's flat form. Either way every character of it is
+// already in plugin-auth.json, so writing it back leaks nothing new — which is
+// what makes nameIsKey skip it. A token that holds the name is the proof; it
+// does not matter how long the name is.
+const insideToken = (name, token) => {
+  if (typeof token !== "string" || token === "") return false
+  if (token.includes(name) || token.includes(tightName(name))) return true
+  const flat = flatName(name)
+  return flat.length >= 20 && flatName(token).includes(flat)
+}
 // echoesToken: the name is the token being handed back — the token itself, or
-// a piece of 20+ characters, spaced out or not. The length is the tight form's,
-// so padding a 19-character piece with spaces does not tip it over the line.
+// a piece long enough to be an echo. The threshold is the mask's own (MIN_ECHO,
+// 12) rather than the 20 it used to be: a nickname of 12–19 characters is not
+// a name a person picks, and the card's `user` line printed it whole while the
+// mask said nothing about pieces that short. A name of a few characters that
+// happens to sit inside a token ("ms", "ab") is still a name.
 const echoesToken = (name, token) => {
   if (typeof token !== "string" || !token) return false
   if (name.includes(token)) return true
-  return insideToken(name, token) && tightName(name).length >= 20
+  return insideToken(name, token) && tightName(name).length >= MIN_ECHO
 }
 const nameIsKey = (name, token) =>
   !insideToken(name, token) &&
@@ -998,7 +1016,7 @@ const waitFor = (p, ms) => {
 // copy of the token — with those fields beside it; what is already there is
 // left alone. Everything goes in one write: auth.set takes plugin-auth.json's
 // lock, and two writes would take it twice.
-async function rememberAccountFields(client, token, learned, auth, dir) {
+async function rememberAccountFields(client, token, learned, auth, dir, budgetEnd = Infinity) {
   // "can write" is a function, not a truthy value: `{ auth: { set: 1 } }` is a
   // client that cannot write, and `!client?.auth?.set` let it through to call
   // a number — the TypeError is caught below, but it logs "account facts not
@@ -1010,10 +1028,17 @@ async function rememberAccountFields(client, token, learned, auth, dir) {
   // one first, so recording it saves no request and costs a locked write.
   const site = learned?.profile?.site === INTL.site ? INTL.site : ""
   const wantSite = !!site && auth?.site !== site
-  // A sign-in that still names a site for an account the probe found on the
+  // A sign-in that names a site but the probe found the account on the
   // domestic one is stale — the key was replaced under it. Left alone, every
-  // restart would pay a 401 against the site it names, so it is dropped.
-  const wantClear = !site && typeof auth?.site === "string" && auth.site !== ""
+  // restart would pay a 401 against the site it names, so it is dropped. The
+  // probe has to have actually found the domestic site for this to mean
+  // anything: after a failed read, `learned.profile` is null, the site was
+  // simply not reached, and clearing it would be an own-goal on a blip.
+  const wantClear =
+    !site &&
+    learned?.probeDone &&
+    typeof auth?.site === "string" &&
+    auth.site !== ""
   const at = named.get(token)
   const cooling = at !== undefined && Date.now() - at < NAME_AGAIN_MS
   // an account the user has named keeps that name: writing the nickname over
@@ -1058,9 +1083,14 @@ async function rememberAccountFields(client, token, learned, auth, dir) {
       reported = true
       onWriteFailed(e, client, token, wantName)
     }
+    // The cap is the hook's own budget end as well as WRITE_WAIT_MS: a hook
+    // that spent its reads right up to the budget must not spend three more
+    // seconds waiting for a lock, or the whole hook outlives the number the
+    // README promises. A write still pending then finishes behind the hook.
+    const cap = Math.max(0, Math.min(WRITE_WAIT_MS, budgetEnd - Date.now()))
     writing.catch(failed)
     try {
-      await waitFor(writing, WRITE_WAIT_MS)
+      await waitFor(writing, cap)
     } catch (e) {
       failed(e)
     }
@@ -1148,8 +1178,45 @@ async function todayEarn(token, deadline) {
   const { profile, res, body, parsed } = await siteRead(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
   gate(profile, res, body, parsed, token, "账单查询失败")
   const day = todayCN()
-  const all = recordsOf(body)
-  return { profile, all, total: totalOf(body, all), rows: all.filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day)) }
+  const first = recordsOf(body)
+  const all = await dayRows(profile, token, day, first, deadline)
+  return { profile, all, total: totalOf(body, first), rows: all.filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day)) }
+}
+
+// DAY_PAGES bounds the extra ledger reads a page full of today's rows costs.
+// Rows come newest first, so today's rows sit at the top and spill onto the
+// next page only when today alone holds more rows than a page. A page whose
+// oldest row is already before `day` is where they end.
+const DAY_PAGES = 4
+
+// dayRows returns the rows the caller already read plus the pages that can
+// still hold `day`'s rows. A page is followed only when it is full and holds
+// nothing older than today: any other page already shows where today ends. An
+// extra page that fails stops the walk with what was read — the numbers are
+// then a floor, as they were before the walk existed, rather than an error
+// that would cost a check-in its touch.
+async function dayRows(profile, token, day, first, deadline) {
+  const all = [...first]
+  let rows = first
+  for (let page = 2; page <= DAY_PAGES + 1; page++) {
+    const older = rows.some((r) => {
+      const s = String(r?.gmt_created ?? "").slice(0, 10)
+      return /^\d{4}-\d{2}-\d{2}$/.test(s) && s < day
+    })
+    if (rows.length < PAGE_SIZE || older || deadline <= Date.now()) break
+    let got
+    try {
+      got = await json(profile.site, token, `${TXNS}?page=${page}&page_size=${PAGE_SIZE}`, deadline)
+    } catch {
+      break
+    }
+    const { res, body, parsed } = got
+    if (!parsed || res.status < 200 || res.status >= 300 || !okOf(body)) break
+    rows = recordsOf(body)
+    if (!rows.length) break
+    all.push(...rows)
+  }
+  return all
 }
 
 // totalOf is how many rows the ledger holds altogether, from the `total` the
@@ -1494,10 +1561,35 @@ export async function MsmoliPlugin(input) {
           // left to do. magpie asks a `done` again every half hour before noon
           // when it has not seen the claim itself (provisional), and each ask
           // touching login/info was one more recorded sign-in — up to a dozen
-          // a morning for an account claimed on the website.
-          const known = names.get(token) ?? ""
+          // a morning for an account claimed on the website. "Known" includes
+          // a remembered "the server gave no usable name" (`names` holds the
+          // empty string then), or the touch would repeat for exactly the
+          // accounts whose nickname is unusable.
+          const known = names.has(token)
           if (claimed && known) {
-            name = known
+            name = names.get(token)
+          } else if (claimed) {
+            // The grant is already in the ledger, so this read is only for the
+            // card's name. A refusal or a broken answer must not turn the day
+            // into `failed`: the host retries a failed day every half hour,
+            // touching login/info each time, for a claim that already landed.
+            name = ""
+            try {
+              const { res, body, parsed } = await json(profile.site, token, LOGIN_INFO, deadline)
+              gate(profile, res, body, parsed, token, "登录接口失败", `${RISK}，稍后会自动重试`)
+              const me = dataOf(body)
+              // A name is a string. Anything else — a number, an object, a list —
+              // would reach text() as "12345" or "[object Object]" and be written
+              // back as the account's name, and magpie's card would show that
+              // instead of the key's tail. NickName wins when it is a name; Name
+              // is the fallback it always was.
+              const str = (v) => (typeof v === "string" && v.trim() ? v : "")
+              const candidate = text(str(me.NickName) || str(me.Name), 40)
+              name = unusableName(candidate, token) ? "" : candidate
+              rememberName(token, name)
+            } catch {
+              // no name this ask; the day still stands as done
+            }
           } else {
             const { res, body, parsed } = await json(profile.site, token, LOGIN_INFO, deadline)
             // A 403 is risk control, not a bad token: the account may be fine and
@@ -1607,7 +1699,7 @@ export async function MsmoliPlugin(input) {
         // catches its own failures, and anything it could still throw (an
         // unreadable providers.json read) must not undo the answer above
         try {
-          await rememberAccountFields(client, token, { name, profile: probe }, auth, configDir)
+          await rememberAccountFields(client, token, { name, profile: probe, probeDone: !!probe }, auth, configDir, deadline)
         } catch {}
         return answer
       },
@@ -1676,7 +1768,7 @@ export async function MsmoliPlugin(input) {
           let earned = 0
           let spent = 0
           let earliest = ""
-          for (const r of recordsOf(tx.body)) {
+          for (const r of await dayRows(profile, token, day, recordsOf(tx.body), deadline)) {
             // Only the two kinds that go into the card's numbers need an
             // amount. A row of a kind we do not sum is not counted either
             // way, and failing the whole card over its amount would turn a
@@ -1777,7 +1869,7 @@ export async function MsmoliPlugin(input) {
           // write (a poll answered before it would race the very retry this
           // exists for), while the reads above have already had the budget to
           // themselves.
-          await rememberAccountFields(client, token, { name: names.get(token) ?? "", profile }, auth, configDir)
+          await rememberAccountFields(client, token, { name: names.get(token) ?? "", profile, probeDone: true }, auth, configDir, deadline)
 
           return {
             plan: profile.plan,

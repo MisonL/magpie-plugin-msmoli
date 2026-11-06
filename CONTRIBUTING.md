@@ -181,7 +181,7 @@ Release:
 ```bash
 node --test                     # the suite, no network
 npm pack --dry-run             # what goes in: module, sync CLI, README, licence, package.json
-npm version patch -m "v%s — <one line>"
+npm version <patch|minor> -m "v%s — <one line>"
 git push origin main --tags
 npm publish                     # prepublishOnly runs the suite again
 gh release create "v$(node -p 'require("./package.json").version')" \

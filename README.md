@@ -277,6 +277,13 @@ printf 'ms-your-intl-token\n' | magpie plugin login msmoli
 magpie accounts            # both accounts, each with its own credit window
 ```
 
+If you are coming from 0.2.0, which kept the international site in a second
+provider called `msmoli-intl`: that provider is gone, and the sign-in filed
+under it is not read by this version. Sign in once more under `msmoli` with
+the same token (the command above), and the card picks the account up. Aliases
+set on the old `msmoli-intl` row belong to a provider this version no longer
+has.
+
 ### More than one account
 
 The plugin works per account, not per token. magpie keeps each signed-in token
@@ -534,10 +541,11 @@ The terms and risks are in
   a day already claimed answers `done` in one ledger read when the nickname
   is known, two otherwise; a ledger that hasn't caught up takes
   four. A run longer than one ledger page adds one read per page walked back,
-  up to seven — only while the streak is still going at the oldest row. Asks
-  before the window send nothing. A usage read is two requests and never
-  touches the sign-in endpoint, so menu-bar polling cannot turn into
-  check-ins.
+  up to seven — only while the streak is still going at the oldest row. A day
+  whose own rows fill a page (a busy account) reads the next page too, up to
+  four more, for both the check-in and the card. Asks before the window send
+  nothing. A usage read is two requests and never touches the sign-in
+  endpoint, so menu-bar polling cannot turn into check-ins.
 - **International accounts cost one extra read, once per process**: the 401
   from the domestic site. A domestic account costs nothing extra. A 401 from
   a remembered site drops the memory and probes again, which is one more read
