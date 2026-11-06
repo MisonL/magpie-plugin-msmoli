@@ -2351,11 +2351,13 @@ test("--to-preset is a no-op when a second account already holds the preset's to
   assert.match(p.lines.join("\n"), /无需操作/)
 })
 
-test("a provider that is ours but has no key is told to fill it in, not to add it again", async () => {
+test("a provider that is ours but has no key is a destination for --to-preset, and told so for --to-plugin", async () => {
   // providers.json keeps providers without keys (magpie writes its own plugin
-  // providers that way). "Add ModelScope" names one the user already has, and
-  // with --from the old message said the chat host was not ModelScope's —
-  // about a provider whose chat points at exactly that host.
+  // providers that way). A bare one is exactly what --to-preset can fill —
+  // refusing it here meant the reverse sync could never populate a preset the
+  // user had already added. --to-plugin still needs a key to read, so it keeps
+  // telling the user to fill it in; "Add ModelScope" would name one they
+  // already have.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-keyless-"))
   try {
     writeFileSync(
@@ -2363,23 +2365,40 @@ test("a provider that is ours but has no key is told to fill it in, not to add i
       JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", chat: "https://api-inference.modelscope.cn/v1", key: "" }] }),
     )
     writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
-    const run = async (argv) => {
+    const run = async (argv, onSpawn = () => {
+      throw new Error("must not run anything here")
+    }) => {
       const out = []
-      const code = await main({ argv: [...argv, "--dir", dir, "--magpie", "/nonexistent"], log: (s) => out.push(s), spawn: () => {
-        throw new Error("must not run anything without a key")
-      } })
+      const code = await main({ argv: [...argv, "--dir", dir, "--magpie", "/nonexistent"], log: (s) => out.push(s), spawn: onSpawn })
       return { code, text: out.join("\n") }
     }
+    // the forward direction has no token to read
+    const forward = await run(["--to-plugin"])
+    assert.equal(forward.code, 1)
+    assert.match(forward.text, /还没有 key/)
+    assert.match(forward.text, /provider key modelscope/)
+    assert.doesNotMatch(forward.text, /供应商」页添加/)
+
+    // the reverse direction fills it, but only with the explicit --force
     const bare = await run(["--to-preset"])
     assert.equal(bare.code, 1)
-    assert.match(bare.text, /还没有 key/)
-    assert.match(bare.text, /provider key modelscope/)
-    assert.doesNotMatch(bare.text, /供应商」页添加/)
+    assert.match(bare.text, /还没有 key/) // the status line says the preset is keyless
+    assert.match(bare.text, /现在没有 key，会被填上/)
+    assert.match(bare.text, /--force/)
 
+    const forced = await run(["--to-preset", "--force"], (_cmd, argv) => {
+      // magpie writes the key into providers.json; the read-back then finds it
+      writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", key: argv.at(-1) }] }))
+      return { status: 0, stdout: "ok", stderr: "" }
+    })
+    assert.equal(forced.code, 0, forced.text)
+    assert.equal(forced.text.includes(A), false, "no line may print a token")
+
+    // back to the keyless state for the --from spelling
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", key: "" }] }))
     const byId = await run(["--from", "modelscope", "--to-preset"])
     assert.equal(byId.code, 1)
-    assert.match(byId.text, /还没有 key/)
-    assert.match(byId.text, /"modelscope" 在，但还没有 key/, `the message must name the provider: ${byId.text}`)
+    assert.match(byId.text, /现在没有 key，会被填上/, `--from must find the bare provider as a destination: ${byId.text}`)
     assert.doesNotMatch(byId.text, /不是 ModelScope/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -4826,6 +4845,68 @@ test("a non-ms key cut by an invisible character is still masked whole", async (
     const o = []
     await main({ argv: ["--dir", dir, "--status", "--from", "alpha​beta"], log: (s) => o.push(s) })
     assert.ok(o.join("\n").includes("alpha"), "普通词不受影响")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+
+// ── Final whole-project review: the CLI's masking shares the card's rule ──
+
+test("a secret split by its own hyphen every 11 characters is still scrubbed", async () => {
+  // maskEchoes used to collect "the characters the secret is made of"; the
+  // hyphen is one of them on every ms- token, and a child that echoed the key
+  // with one inserted every 11 characters printed it whole. Punctuation has to
+  // be a separator whether the key itself holds it or not.
+  const echo = "aaaa1111-bb-bb-2222-ccc-c-333344445-555"
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-dashstdout-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        // the login lands, so the read-back finds the account
+        writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+        return { status: 0, stdout: `magpie said: ${echo}`, stderr: "" }
+      },
+    })
+    assert.equal(code, 0)
+    const text = out.join("\n")
+    assert.ok(!text.includes(echo), `the dash-cut secret reached the terminal: ${text}`)
+    assert.ok(!text.includes("aaaa1111"), `a piece of the secret reached the terminal: ${text}`)
+    assert.match(text, /ms-a…5555/, "the whole echo is one masked key")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the CLI masks a 12-character piece of the secret and leaves 11 alone", async () => {
+  // MIN_ECHO is the boundary both sides of the tool share; a mutation to 11
+  // would mask an ordinary short word that happens to sit in the token.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-min-echo-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    for (const [piece, masked] of [
+      ["aaaa1111-bbb", false], // 11 alphanumeric characters
+      ["aaaa1111-bbbb", true], // 12
+    ]) {
+      const out = []
+      await main({
+        argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+        log: (s) => out.push(s),
+        spawn: () => {
+          writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+          return { status: 0, stdout: `magpie said: ${piece}`, stderr: "" }
+        },
+      })
+      writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+      const text = out.join("\n")
+      assert.equal(!text.includes(piece), masked, `${piece}: ${text}`)
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

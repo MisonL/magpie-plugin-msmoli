@@ -344,17 +344,24 @@ export const mask = (t) => {
 // hostname check, so `--from openai` would log OpenAI's key into the plugin,
 // or overwrite that third-party provider with an ms token — both directions
 // silently writing the wrong credential.
-export function presetCandidates(providers, from = "") {
+// The key is a source-side requirement (--to-plugin needs a token to hand
+// over), not a destination-side one: a provider that is ours but has an empty
+// key is exactly what --to-preset is meant to fill. `keyed` is that switch;
+// main passes false for the reverse direction. With --from the same rule
+// holds — an id the user named that is ours is a destination even without a
+// key, while --to-plugin must still refuse one that has no token.
+export function presetCandidates(providers, from = "", keyed = true) {
   const list = Array.isArray(providers) ? providers : []
   // the key is trimmed where it is read: a token pasted with a trailing
   // newline is the same token, and every comparison and every stdin below
   // must see that one — the check-in plugin trims it too (tokenOf), so the
   // two halves of the tool otherwise disagree about the same credential
-  const out = (ps) => ps.map((p) => ({ ...p, key: p.key.trim() }))
-  if (from) return out(list.filter((p) => keyedOf(p) && p.id === from && oursOf(p)))
-  const byId = list.filter((p) => keyedOf(p) && (p.id === PRESET || p.preset === PRESET))
+  const out = (ps) => ps.map((p) => ({ ...p, key: typeof p.key === "string" ? p.key.trim() : "" }))
+  const usable = (p) => !keyed || keyedOf(p)
+  if (from) return out(list.filter((p) => usable(p) && p.id === from && oursOf(p)))
+  const byId = list.filter((p) => usable(p) && (p.id === PRESET || p.preset === PRESET))
   if (byId.length) return out(byId)
-  return out(list.filter((p) => keyedOf(p) && hostOf(p.chat) === HOST))
+  return out(list.filter((p) => usable(p) && hostOf(p.chat) === HOST))
 }
 
 // show is what goes to the terminal: a provider id or a file's path comes
@@ -675,7 +682,13 @@ export function planToPreset({ preset, accounts, force }) {
     return { action: "noop", lines, cmds: [] }
   }
   lines.push(`  插件主账号：${ID}（${mask(main.token)}）`)
-  lines.push(`  内置预设：${arg(preset.id)}，现有 key（${mask(preset.key)}）会被整条替换。`)
+  // an empty key is a preset with nothing to lose: this is the write that
+  // fills it, and the wording should not claim a key is being replaced
+  lines.push(
+    preset.key
+      ? `  内置预设：${arg(preset.id)}，现有 key（${mask(preset.key)}）会被整条替换。`
+      : `  内置预设：${arg(preset.id)}，现在没有 key，会被填上。`,
+  )
   // The plugin refuses a key with anything but visible ASCII in it (tokenOf,
   // it would go out in an Authorization header). Writing such a key into the
   // preset would break chat requests while this tool reported success.
@@ -692,7 +705,11 @@ export function planToPreset({ preset, accounts, force }) {
     return { action: "refuse", lines, cmds: [] }
   }
   if (!force) {
-    lines.push(`✗ 内置这把 key 是聊天请求正在用的，替换会让那边跟着换。确认的话加 --force 重跑。`)
+    lines.push(
+      preset.key
+        ? `✗ 内置这把 key 是聊天请求正在用的，替换会让那边跟着换。确认的话加 --force 重跑。`
+        : `✗ 还没有确认要写入。确认的话加 --force 重跑。`,
+    )
     return { action: "refuse", lines, cmds: [] }
   }
   lines.push(`→ 将执行 magpie provider key ${arg(preset.id)}（令牌是该命令的参数，进程列表里短暂可见）。`)
@@ -728,26 +745,31 @@ function hidden(argv, secret, log) {
 // the same rule index.mjs's cardText carries, and the same reason.
 const MIN_ECHO = 12
 function maskEchoes(s, secret) {
-  if (typeof secret !== "string" || secret.length < MIN_ECHO) return s
-  // Only the characters the secret itself is made of are collected: anything
-  // else — a control character, a space, a comma, a piece of punctuation a
-  // child wrapped the echo in — is a character the secret cannot hold, and a
-  // separator between two pieces of it. It is the same rule index.mjs's
-  // cardText carries (a whitelist of separators cannot cover an open set), and
-  // here it is what keeps a secret broken across a line, or printed under a
-  // prefix, whole.
+  if (typeof secret !== "string") return s
+  // The secret's own alphanumeric run is what the scan compares against.
+  // Collecting "the characters the secret is made of" instead let a character
+  // the secret genuinely holds be used as a cutter: a hyphen every 11
+  // characters (every ms- key carries hyphens) split the echo into runs each
+  // under MIN_ECHO. Punctuation is a separator whether the secret holds it or
+  // not; only its letters and digits say "this is the secret". Anything else —
+  // a control character, a space, a comma, a piece of punctuation a child
+  // wrapped the echo in — is stepped over and the pieces on either side joined
+  // for the comparison. It is the same rule index.mjs's cardText carries (a
+  // whitelist of separators cannot cover an open set), and here it is what
+  // keeps a secret broken across a line, or printed under a prefix, whole.
   //
   // The matching runs over those characters alone, in one pass, and the spans
   // are put back afterwards. Stepping over a character as the scan went — and
   // restarting one position later when the run came up short — cost a run of
   // them its own length at every position it held: a child's output of 20 000
   // control characters took 79 seconds.
-  const mine = new Set(secret)
+  const flat = secret.replace(/[^A-Za-z0-9]/g, "")
+  if (flat.length < MIN_ECHO) return s
   const vis = []
   const at = []
   for (let i = 0; i < s.length; ) {
     const c = String.fromCodePoint(s.codePointAt(i))
-    if (mine.has(c)) {
+    if (/[A-Za-z0-9]/.test(c)) {
       vis.push(c)
       at.push(i)
     }
@@ -758,7 +780,7 @@ function maskEchoes(s, secret) {
   for (let k = 0; k < vis.length; ) {
     let piece = ""
     let v = k
-    while (v < vis.length && secret.includes(piece + vis[v])) {
+    while (v < vis.length && flat.includes(piece + vis[v])) {
       piece += vis[v]
       v++
     }
@@ -962,9 +984,12 @@ export async function main({
     return 1
   }
   const accounts = pluginAccounts(authRaw)
-  const cands = presetCandidates(providers, args.from)
+  // --to-preset writes into the provider, so one that is there but has no key
+  // is a destination, not "unconfigured"; --to-plugin needs a key to read.
+  const cands = presetCandidates(providers, args.from, args.to !== "preset")
 
-  log(`  内置 ModelScope：${cands.length === 1 ? `${arg(cands[0].id)}（${mask(cands[0].key)}）` : cands.length ? "多个候选" : "未配置"}`)
+  const shownPreset = (p) => `${arg(p.id)}（${keyedOf(p) ? mask(p.key) : "还没有 key"}）`
+  log(`  内置 ModelScope：${cands.length === 1 ? shownPreset(cands[0]) : cands.length ? "多个候选" : "未配置"}`)
   log(`  签到插件 msmoli：${accounts.length ? accounts.map((a) => `${arg(a.name)}（${mask(a.token)}）`).join("、") : "未登录"}`)
 
   if (cands.length > 1) {

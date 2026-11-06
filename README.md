@@ -80,6 +80,13 @@ Daily grants last **24 hours only** and do not accumulate: what you don't
 spend today is gone. A flagship model costs 2 credits per call (mainstream 1,
 lightweight 0.5), so the daily 250 is roughly 125 calls.
 
+The day's numbers come from the ledger, which a busy account can spread over
+several pages. When a page cannot be read (a 5xx, a budget already gone), the
+card does not present a floor as a fact: its line ends with
+`账单未读完，数字偏低`. A check-in in that state does not read "no grant" into
+a ledger it could not finish either — it answers `failed` and the host retries
+in half an hour.
+
 ## Purpose, responsibility, and risk
 
 **What it is for.** A personal utility: it claims the daily credit grant of the
@@ -122,7 +129,7 @@ tells you whether it is on `PATH`; if not, use the app's full path,
 The plugin relies on the host's plugin API — the account scope a check-in and
 a usage read run in, the provider argument `auth.checkin` is handed, the
 `input.directory` the plugin's own folder comes from, and `auth.set` writing
-back into the same account. It is maintained against **magpie 0.1.3005**.
+back into the same account. It is maintained against **magpie 0.1.3096**.
 
 Pick one of three ways. They all end the same: an `msmoli` row under
 **Settings → Usage → Plugins**. The sign-in is kept per provider id, not per
@@ -212,7 +219,7 @@ It syncs the **domestic site only**: the built-in preset it reads is the
 |---|---|
 | `--status` | Report both sides and the plan; write nothing |
 | `--to-plugin` | Log the preset's key into the plugin |
-| `--to-preset` | The other way round; needs `--force`, since that key is what chat uses |
+| `--to-preset` | The other way round; a preset that already holds a different key needs `--force` |
 | `--force` | Replace a single existing plugin account whose key differs |
 | `--from <id>` | Pick the preset when more than one provider could be it |
 | `--dry-run` | Print the commands without running them |
@@ -225,6 +232,8 @@ It syncs the **domestic site only**: the built-in preset it reads is the
 - **It never writes magpie's files itself.** It reads them directly, and every
   write goes through magpie's own CLI (`magpie plugin login`,
   `magpie plugin logout`, `magpie provider key`).
+- **A preset with no key is filled without `--force`.** There is nothing to
+  overwrite; `--force` is for replacing a different key that chat may be using.
 - **It never adds a second account by accident.** Same key on both sides: it
   changes nothing. Different keys: it refuses, because a second `login` would
   add an account. `--force` replaces only when exactly one account exists.
@@ -256,8 +265,9 @@ other way round), so the plugin works out each account's site from its token:
 
 1. The first read goes to the domestic site.
 2. A 401 sends it on to the international one, and so does a failure that is
-   not an answer at all (a transport error, a proxy's page, a 5xx): those say
-   nothing about which site holds the token.
+   not an answer at all (a transport error, a proxy's page, a 5xx, a JSON 429):
+   those say nothing about which site holds the token. When nothing else
+   answers, the first answer is the one reported.
 3. The answer is remembered for the rest of the process, and an international
    one is also kept on the sign-in (`site`), so a restarted host goes straight
    there instead of paying the 401 again. A 401 from a remembered site drops

@@ -8632,3 +8632,537 @@ test("an account with no usable nickname is not touched again on every provision
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ── Round thirty-nine: the final whole-project review (R51) ────────────
+
+test("a nickname framed with words and cut at 40 cannot leak a piece of the token", async () => {
+  // A server that echoes the token under its own label ("Account display
+  // name: ms-…") leaves a 40-character cut that neither contains the whole
+  // token nor sits wholly inside it. Both the raw string and its cut have to
+  // be vetted: the card's user line and plugin-auth.json printed the front of
+  // the key whole.
+  const dir = tmpDir("msmoli-prefixname-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const writes = []
+  const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+  await withFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 5 } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: `Account display name: ${token}` } } },
+      [TX_PATH]: { body: { success: true, data: { records: [] } } },
+    },
+    async () => {
+      const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+      assert.notEqual(c.outcome, "failed", c.message)
+      assert.deepEqual(writes, [], "no usable name may be written back")
+      const u = await p.auth.usage(async () => ({ type: "api", key: token }))
+      assert.equal(u.user, "", `a cut echo reached the card's user line: ${u.user}`)
+    },
+  )
+  if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+  else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test("a token split by its own hyphen every 11 characters is masked whole", async () => {
+  // The mask used to collect "the characters the token is made of": the hyphen
+  // is one of them (every ms- key carries several), and inserting one every
+  // 11 characters produced runs each under MIN_ECHO. Punctuation must be a
+  // separator whether the key holds it or not.
+  const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const echo = "aaaa1111-bb-bb-2222-ccc-c-333344445-555"
+  await withFetch(
+    {
+      [TX_PATH]: { body: { success: true, data: { records: [day({ title: echo })] } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    },
+    async () => {
+      const c = await auth.checkin(async () => ({ type: "api", key: token }))
+      assert.ok(!c.message.includes(echo), `the dash-cut echo reached the card: ${c.message}`)
+      assert.ok(!c.message.includes("aaaa1111"), "not even the first piece may survive")
+      assert.match(c.message, /ms-a…5555/, "the whole echo is one masked key")
+    },
+  )
+})
+
+test("a nickname that spells the whole token in short chunks with a stray letter is refused", async () => {
+  const dir = tmpDir("msmoli-chunknick-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  // A token no other test uses: `names` caches per token, and a shared one
+  // would answer from a previous test's empty name without reading this one.
+  const token = "ms-chunk9999-bbbb-2222-cccc-333344445555"
+  const nick = "chunk9999-bb。bb-2222-ccc。c-333344445。555g"
+  const writes = []
+  const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+  await withFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 5 } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
+      [TX_PATH]: { body: { success: true, data: { records: [day()] } } },
+    },
+    async () => {
+      const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+      assert.equal(c.outcome, "done", c.message)
+      assert.deepEqual(writes, [], `the chopped-up key became the account name: ${JSON.stringify(writes)}`)
+      const u = await p.auth.usage(async () => ({ type: "api", key: token }))
+      assert.equal(u.user, "", `the chopped-up key reached the card: ${u.user}`)
+    },
+  )
+  if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+  else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test("an edit made while the hook runs is not overwritten by the name write-back", async () => {
+  // auth.set replaces the whole sign-in, and the host only checks that the
+  // account still exists. Without a fresh read, a new key pasted while the
+  // ledger was being read was replaced with the old one, and a field added
+  // meanwhile was dropped.
+  const dir = tmpDir("msmoli-race-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const oldToken = "ms-race-1111-2222-3333-444444444444"
+  const newToken = "ms-race-5555-6666-7777-888888888888"
+  let current = { type: "api", key: oldToken }
+  const writes = []
+  const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o); current = o.body } } } })
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (new URL(url).pathname.endsWith("/login/info")) {
+      current = { type: "api", key: newToken, editedWhileRequestPending: true }
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    return reply({ body: { success: true, data: { records: [] } } })
+  }
+  try {
+    const c = await p.auth.checkin(async () => ({ ...current }))
+    assert.notEqual(c.outcome, "failed", c.message)
+    assert.equal(current.key, newToken, "the new key was overwritten")
+    assert.equal(current.editedWhileRequestPending, true, "a field added meanwhile was dropped")
+    assert.deepEqual(writes, [], "a write about the old token must not happen at all")
+  } finally {
+    globalThis.fetch = real
+  }
+  if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+  else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test("a full day's rows on page 2 do not make the streak read that page twice", async () => {
+  // dayRows already read page 2 for today's spill; ledgerReader used to start
+  // at page 1 again, counted page 2's rows a second time and concluded from
+  // `total` that the whole ledger had been seen — one day short.
+  const token = "ms-streakpage-1111-2222-3333-444444444444"
+  const first = [day(), ...Array.from({ length: 49 }, (_, i) => spend(0, 1, today, `t${i}`))]
+  const second = [day({ gmt_created: daysBack(1) }), ...Array.from({ length: 49 }, (_, i) => spend(0, 1, daysBack(1), `u${i}`))]
+  const third = [day({ gmt_created: daysBack(2) })]
+  const pages = []
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    const n = Number(u.searchParams.get("page"))
+    pages.push(n)
+    return reply({ body: { success: true, data: { total: 101, records: n === 1 ? first : n === 2 ? second : n === 3 ? third : [] } } })
+  }
+  try {
+    const c = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(c.streak, 3, `the three-day run was cut short: ${JSON.stringify(c)}`)
+    assert.deepEqual(pages, [1, 2, 3], `the ledger was read as ${pages.join(", ")}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("an invalid date stamp cannot end the streak walk", async () => {
+  // "" sorts before every real date and used to be read as a row older than
+  // the gap, ending a run that continued on the next page.
+  const token = "ms-badstamp-1111-2222-3333-444444444444"
+  const first = [day(), day({ gmt_created: daysBack(1) }), spend(0, 1, "")]
+  const more = [day({ gmt_created: daysBack(2) })]
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    const n = Number(u.searchParams.get("page"))
+    return reply({ body: { success: true, data: { total: 4, records: n === 1 ? first : more } } })
+  }
+  try {
+    const c = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(c.streak, 3, `a blank stamp ended the run: ${JSON.stringify(c)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a short first page whose total still promises rows is followed, not trusted", async () => {
+  const token = "ms-totalgap-1111-2222-3333-444444444444"
+  const rest = [day(), spend(100)]
+  const pages = []
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 3 } } })
+    const n = Number(u.searchParams.get("page"))
+    pages.push(n)
+    return reply({ body: { success: true, data: { total: 52, records: n === 1 ? [spend(49)] : rest } } })
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.equal(u.windows[0].amount, 149, `the day's spend on page 2 was lost: ${u.windows[0].display}`)
+    assert.equal(u.windows[0].limit, 200, `the grant on page 2 was lost: ${u.windows[0].display}`)
+    assert.equal(pages.includes(2), true, "the short page was trusted")
+    // the server keeps repeating itself; the walk must stop rather than sum it twice
+    assert.ok(pages.length <= 4, `a repeating page was followed forever: ${pages.join(", ")}`)
+    assert.equal(u.windows[0].amount, 149, `the repeated page was summed again: ${u.windows[0].display}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("an unreadable extra ledger page is marked partial and does not settle the day", async () => {
+  const full = Array.from({ length: 50 }, (_, i) => spend(i === 0 ? 49 : 0, 1, today, `tier${i}`))
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 3 } } })
+    if (u.pathname.endsWith("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    const n = Number(u.searchParams.get("page"))
+    if (n > 1) return reply({ status: 403, body: { message: "forbidden" } })
+    return reply({ body: { success: true, data: { total: 51, records: full } } })
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-partialcard-1111-2222-3333-444444444444" }))
+    assert.match(u.windows[0].display, /账单未读完，数字偏低/, `the card claimed the floor was the whole day: ${u.windows[0].display}`)
+    const c = await auth.checkin(async () => ({ type: "api", key: "ms-partialday-1111-2222-3333-444444444444" }))
+    assert.equal(c.outcome, "failed", `an unfinished ledger settled the day: ${JSON.stringify(c)}`)
+    assert.equal(c.until, undefined)
+    assert.match(c.message, /账单读取不完整/)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a remembered site that stops giving usable answers is retried on the other site", async () => {
+  testables.sites.clear()
+  const token = "ms-sitefallback-1111-2222-3333-444444444444"
+  const seen = []
+  let balances = 0
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    seen.push(`${u.origin}${u.pathname}`)
+    if (u.pathname.endsWith("/balance")) {
+      balances += 1
+      // the first balance read sets the remembered site; the next one makes
+      // the remembered site answer with a proxy page
+      if (balances > 1 && u.origin === CN_ORIGIN) return reply({ raw: "<html>proxy error</html>" })
+      return reply({ body: { success: true, data: { available_balance: 42 } } })
+    }
+    return reply({ body: { success: true, data: { records: [] } } })
+  }
+  try {
+    const first = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.ok(!first.error, first.error)
+    const u = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.ok(!u.error, `the account was stranded on the remembered site: ${u.error}`)
+    assert.equal(u.balance, "42 魔粒可用")
+    assert.ok(seen.includes(`${INTL_ORIGIN}/openapi/v1/magicubes/balance`), `the other site was never asked: ${seen.join(", ")}`)
+  } finally {
+    globalThis.fetch = real
+    testables.sites.clear()
+  }
+})
+
+test("a JSON 429 on the domestic site does not stop the international probe", async () => {
+  testables.sites.clear()
+  await withUrlFetch(
+    {
+      [BALANCE_PATH]: (origin) =>
+        origin === CN_ORIGIN
+          ? { status: 429, body: { success: false, message: "too many requests" } }
+          : { body: { success: true, data: { available_balance: 7 } } },
+      [TX_PATH]: { body: { success: true, data: { records: [] } } },
+    },
+    async (urls) => {
+      const u = await auth.usage(async () => ({ type: "api", key: "ms-429site-1111-2222-3333-444444444444" }))
+      assert.ok(!u.error, `a site-level rate limit was taken for the token's own answer: ${u.error}`)
+      assert.equal(u.balance, "7 魔粒可用")
+      assert.equal(urls.some((x) => x.startsWith(INTL_ORIGIN)), true, "the international site was never asked")
+    },
+  )
+  testables.sites.clear()
+})
+
+test("a claim that lands on the touch still counts past page 1", async () => {
+  // The `claimed` answer computed after the touch is a second place the
+  // ledger walk is handed out; a null reader there dropped the streak while
+  // every other exit kept it.
+  const token = "ms-claimednow-1111-2222-3333-444444444444"
+  const p1 = [day(), ...Array.from({ length: 49 }, (_, i) => spend(0, 1, today, `a${i}`))]
+  const p2 = [day({ gmt_created: daysBack(1) }), ...Array.from({ length: 49 }, (_, i) => spend(0, 1, daysBack(1), `b${i}`))]
+  const p3 = [day({ gmt_created: daysBack(2) })]
+  let touched = false
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) {
+      touched = true
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    const n = Number(u.searchParams.get("page"))
+    if (!touched) return reply({ body: { success: true, data: { total: 0, records: [] } } })
+    return reply({ body: { success: true, data: { total: 101, records: n === 1 ? p1 : n === 2 ? p2 : n === 3 ? p3 : [] } } })
+  }
+  try {
+    const c = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(c.outcome, "claimed", c.message)
+    assert.equal(c.credit, 200)
+    assert.equal(c.streak, 3, `the streak was dropped on the claimed exit: ${JSON.stringify(c)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a transport failure on the extra page leaves the card answering, not failing", async () => {
+  // The catch around the extra read is what keeps a page-2 timeout from
+  // turning a good page-1 answer into a failed card; the 403 fixture does not
+  // reach that catch (the status check stops first).
+  const full = Array.from({ length: 50 }, (_, i) => spend(i === 0 ? 49 : 0, 1, today, `tier${i}`))
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 3 } } })
+    const n = Number(u.searchParams.get("page"))
+    if (n > 1) throw new TypeError("fetch failed")
+    return reply({ body: { success: true, data: { total: 51, records: full } } })
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-pagedrop-1111-2222-3333-444444444444" }))
+    assert.ok(!u.error, `a page-2 network failure failed the whole card: ${u.error}`)
+    assert.match(u.windows[0].display, /今日用 49 /)
+    assert.match(u.windows[0].display, /账单未读完/)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a nickname that is the flattened token's 22-character prefix is refused", async () => {
+  // insideToken's flat arm is the one the whole-token fixtures never reach:
+  // a name with separators inside it is neither the token nor inside it as a
+  // string, and only the flat comparison sees it.
+  const dir = tmpDir("msmoli-flatpref-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const writes = []
+  const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+  await withFetch(
+    {
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "ms.aaaa1111.bbbb.2222.cccc" } } },
+      [TX_PATH]: { body: { success: true, data: { records: [day()] } } },
+    },
+    async () => {
+      const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+      assert.equal(c.outcome, "done", c.message)
+      assert.deepEqual(writes, [], `a flat prefix of the token became the account name: ${JSON.stringify(writes)}`)
+    },
+  )
+  if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+  else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test("a spaced-out nickname of 17 characters, a piece of the token, is refused", async () => {
+  // The tight arm catches a name whose own characters are the token's with a
+  // space inserted; its flat length (14) is under the flat arm's floor, so
+  // only tightName sees it.
+  const dir = tmpDir("msmoli-tightname-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const writes = []
+  const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+  await withFetch(
+    {
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "ms-aaaa1 111-bbbb" } } },
+      [TX_PATH]: { body: { success: true, data: { records: [day()] } } },
+    },
+    async () => {
+      const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+      assert.equal(c.outcome, "done", c.message)
+      assert.deepEqual(writes, [], `a spaced piece of the token became the account name: ${JSON.stringify(writes)}`)
+    },
+  )
+  if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+  else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test("a name read that fails is not remembered as 'no name'", async () => {
+  // rememberName inside the try only on success: a 403 on the name read must
+  // not cache "" and short-circuit every later ask, or the account shows the
+  // key tail for the rest of the process.
+  const token = "ms-namereadfail-1111-2222-3333-444444444444"
+  let reads = 0
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) {
+      reads += 1
+      return reply({ status: 403, body: { success: false, message: "blocked" } })
+    }
+    return reply({ body: { success: true, data: { records: [day()] } } })
+  }
+  try {
+    const a = await auth.checkin(async () => ({ type: "api", key: token }))
+    const b = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(a.outcome, "done", a.message)
+    assert.equal(b.outcome, "done", b.message)
+    assert.equal(reads, 2, "the second ask must try the name read again")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a budget already spent caps the wait for the write-back", async () => {
+  // The cap is min(WRITE_WAIT_MS, what is left of the hook budget). A test
+  // that lets the whole 3s go by cannot tell the two apart; this one leaves
+  // the hook a few hundred milliseconds and pins that the answer comes back
+  // in about that.
+  const realNow = Date.now
+  let skew = 0
+  Date.now = () => realNow() + skew
+  try {
+    await withNameDir("msmoli-shortbudget-", async (_, writes, dir) => {
+      const real2 = globalThis.fetch
+      globalThis.fetch = async (url) => {
+        const path = new URL(url).pathname
+        if (path.endsWith("login/info")) {
+          skew += 24_500 // the reads themselves ate the budget
+          return reply({ body: { Code: 200, Success: true, Data: { NickName: "Cap" } } })
+        }
+        return reply({ body: { success: true, data: { records: [day()] } } })
+      }
+      const client = await MsmoliPlugin({
+        directory: dir,
+        client: {
+          auth: {
+            set: () => new Promise(() => {}), // a lock held by another process
+          },
+        },
+      })
+      try {
+        // performance.now, not Date.now: the ticking-clock run patches
+        // Date.now to jump a second per read, and an elapsed time measured
+        // with it counted the shim's own offsets as waiting.
+        const started = performance.now()
+        const r = await client.auth.checkin(async () => ({ type: "api", key: "ms-shortbudget-0000-0000-000000000001" }))
+        const ms = performance.now() - started
+        assert.equal(r.outcome, "done", `the claim landed and is answered: ${r.message}`)
+        assert.ok(ms < 2000, `the write held the hook past its budget: ${ms}ms`)
+      } finally {
+        globalThis.fetch = real2
+      }
+    })
+  } finally {
+    Date.now = realNow
+  }
+})
+
+test("a field added while the hook runs survives a write-back under the same key", async () => {
+  // The fresh read is not only for a key that changed: the host's sign-in can
+  // gain a field while the ledger is being read, and auth.set replaces the
+  // whole object. With the stale copy as the base, that field was dropped and
+  // the name write-back still looked like a success.
+  const dir = tmpDir("msmoli-racefield-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const token = "ms-racefield-1111-2222-3333-444444444444"
+  let current = { type: "api", key: token }
+  const writes = []
+  const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (new URL(url).pathname.endsWith("/login/info")) {
+      current = { type: "api", key: token, addedWhileRequestPending: "keep" }
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    return reply({ body: { success: true, data: { records: [] } } })
+  }
+  try {
+    const c = await p.auth.checkin(async () => ({ ...current }))
+    assert.notEqual(c.outcome, "failed", c.message)
+    assert.equal(writes.length, 1, `expected the name written back once: ${JSON.stringify(writes)}`)
+    assert.equal(writes[0].body.accountId, "alice")
+    assert.equal(writes[0].body.addedWhileRequestPending, "keep", "a field added meanwhile was dropped")
+  } finally {
+    globalThis.fetch = real
+  }
+  if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+  else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test("a row with a blank stamp does not make today's ledger look finished", async () => {
+  // `"" < today` is true, so an unparsed stamp read as an old row and ended
+  // dayRows on page 1. The grant on page 2 was then never read, and a day
+  // that did land was reported as no grant.
+  const token = "ms-blankstamp-1111-2222-3333-444444444444"
+  const first = [...Array.from({ length: 49 }, (_, i) => spend(0, 1, today, `b${i}`)), spend(0, 1, "")]
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    const n = Number(u.searchParams.get("page"))
+    return reply({ body: { success: true, data: { total: 60, records: n === 1 ? first : n === 2 ? [day()] : [] } } })
+  }
+  try {
+    const c = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(c.outcome, "done", `a grant on page 2 was missed: ${JSON.stringify(c)}`)
+    assert.equal(c.credit, 200, `the grant was not counted: ${JSON.stringify(c)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a name that frames a 16-character piece of the token is refused", async () => {
+  // The piece is short enough that neither "the name is the token" nor "the
+  // name sits inside the token" answers for it (insideToken needs 20 flat
+  // characters), and framing keeps it out of both. Only the mask's own run
+  // test sees it — and the mask would print that run masked on the card while
+  // plugin-auth.json held it whole on disk.
+  const dir = tmpDir("msmoli-framed16-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const token = "ms-aabb1111ccdd-2222-3333-444444444444"
+  const writes = []
+  const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+  await withFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 5 } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "玩家 aabb1111ccdd" } } },
+      [TX_PATH]: { body: { success: true, data: { records: [day()] } } },
+    },
+    async () => {
+      const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+      assert.equal(c.outcome, "done", c.message)
+      assert.deepEqual(writes, [], `a framed piece of the key became the account name: ${JSON.stringify(writes)}`)
+      const u = await p.auth.usage(async () => ({ type: "api", key: token }))
+      assert.equal(u.user, "", `a framed piece of the key reached the card: ${u.user}`)
+    },
+  )
+  if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+  else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  rmSync(dir, { recursive: true, force: true })
+})
