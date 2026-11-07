@@ -212,6 +212,12 @@ From a GitHub install, run magpie's own copy instead:
 From a clone, run `./bin/sync.mjs` (or `node bin/sync.mjs` on Windows and
 WSL). npm 12 blocks `npx github:…` by default, so don't start from that.
 
+`npx`, `magpie plugin add magpie-plugin-msmoli` and `magpie plugin update` all
+follow the npm package, and the npm package still serves **0.2.0** — the last
+release, which kept the international site in a second provider and has
+neither this CLI nor this round of fixes. Run it from a clone to get what this
+document describes.
+
 It syncs the **domestic site only**: the built-in preset it reads is the
 `modelscope.cn` one. Sign an international account in by hand.
 
@@ -222,7 +228,7 @@ It syncs the **domestic site only**: the built-in preset it reads is the
 | `--to-preset` | The other way round; a preset that already holds a different key needs `--force` |
 | `--force` | Replace a single existing plugin account whose key differs |
 | `--from <id>` | Pick the preset when more than one provider could be it |
-| `--dry-run` | Print the commands without running them |
+| `--dry-run` | Print the commands, masked, without running them or writing anything; no magpie binary needed |
 | `--dir <folder>` | Where magpie's config is (a portable install's `data` folder) |
 | `--magpie <path>` | Path to the magpie binary; a bare `magpie` is refused |
 
@@ -232,8 +238,9 @@ It syncs the **domestic site only**: the built-in preset it reads is the
 - **It never writes magpie's files itself.** It reads them directly, and every
   write goes through magpie's own CLI (`magpie plugin login`,
   `magpie plugin logout`, `magpie provider key`).
-- **A preset with no key is filled without `--force`.** There is nothing to
-  overwrite; `--force` is for replacing a different key that chat may be using.
+- **A preset with no key is filled without `--force`, in either direction.**
+  There is nothing to overwrite; `--force` is for replacing a different key
+  that chat may be using.
 - **It never adds a second account by accident.** Same key on both sides: it
   changes nothing. Different keys: it refuses, because a second `login` would
   add an account. `--force` replaces only when exactly one account exists.
@@ -249,9 +256,13 @@ It syncs the **domestic site only**: the built-in preset it reads is the
 - **The token is masked in everything it prints, failures included.** That
   covers magpie's own output, and keys of other shapes too: GitHub and Slack
   tokens, AWS secrets, UUIDs, hex digests, base64 bodies. A key with a space,
-  newline or invisible character pasted into it is still masked whole. A value
-  that starts like a path keeps its shape, and only the key-like part inside it
-  is masked, so `--dir /tmp/ghp_16C7…` still names the folder.
+  newline or invisible character pasted into it is still masked whole, and so
+  is one printed another way: upper-cased, in full-width characters, or broken
+  into short groups (`ms-01234 56789abc …`). A value that starts like a path
+  keeps its shape, and only the key-like part inside it is masked, so
+  `--dir /tmp/ghp_16C7…` still names the folder. What the masking cannot know:
+  a key of *another* vendor's shape split into groups small enough that no
+  piece reads as a key, and typed into an argument the CLI does not know.
 
 </details>
 
@@ -266,9 +277,13 @@ other way round), so the plugin works out each account's site from its token:
 1. The first read goes to the domestic site.
 2. A 401 sends it on to the international one, and so does a failure that is
    not an answer at all (a transport error, a proxy's page, a 5xx, a JSON 429):
-   those say nothing about which site holds the token. When nothing else
-   answers, the first answer is the one reported.
-3. The answer is remembered for the rest of the process, and an international
+   those say nothing about which site holds the token. The same is true of a
+   *remembered* site that times out or answers with nothing usable (a 4xx as
+   well as a 5xx): it is not the only site tried, the other one is asked
+   within the same request budget. When nothing else answers, the first
+   answer is the one reported.
+3. The answer is remembered for the rest of the process (the last 64 tokens
+   seen, oldest evicted first), and an international
    one is also kept on the sign-in (`site`), so a restarted host goes straight
    there instead of paying the 401 again. A 401 from a remembered site drops
    it and the *other* site is asked — the sign-in may have been re-keyed with
@@ -530,12 +545,21 @@ parsed. The token lives only in magpie's own `plugin-auth.json`: the plugin
 never writes it anywhere, never logs it, and never sends it anywhere but the
 site it came from.
 
+The one place a token could still be copied is the account name: a reply whose
+`NickName` is the token, or a piece of it, is not written back as `accountId`
+and is masked on the card instead. Two situations the mask cannot cover: the
+first 4 and last 4 characters of the token do appear, that is the mask, and a
+key of a shape this plugin does not recognise, echoed back in a spelling it
+does not fold (the `ms-` shapes are covered in any case and full width).
+
 The plugin writes two things, both onto the sign-in it already has and through
 the host's own `client.auth.set`: the nickname, as `accountId` (so the card
 reads "Mison" instead of "API key …a1b2"), and, for an international account,
-the site as `site`. It hands back what the host gave it with those fields
-added, so the token is still stored once. An account on the domestic site
-carries no `site`: a probe tries that one first anyway.
+the site as `site`. It re-reads the sign-in through the host first and writes
+onto that copy, so a key you paste or a field you add while a check-in runs is
+not replaced by an older read. It hands back what the host gave it with those
+fields added, so the token is still stored once. An account on the domestic
+site carries no `site`: a probe tries that one first anyway.
 
 It reads `providers.json` for one thing only: whether you already named the
 account yourself. A name you chose is never overwritten. The `site` of an
@@ -557,9 +581,10 @@ The terms and risks are in
   nothing. A usage read is two requests and never touches the sign-in
   endpoint, so menu-bar polling cannot turn into check-ins.
 - **International accounts cost one extra read, once per process**: the 401
-  from the domestic site. A domestic account costs nothing extra. A 401 from
-  a remembered site drops the memory and probes again, which is one more read
-  but not a wrong answer.
+  from the domestic site. A domestic account costs nothing extra. A remembered
+  site that 401s drops the memory and probes again; one that times out or
+  answers nothing usable is asked no more than the other site, so a dead link
+  costs the 8-second request timeout, not the whole budget.
 - **Time limits.** Every request gives up after 8 seconds, body included, and a
   body is read to at most 256 KiB. A whole check-in gives up after 25 seconds
   and a usage read after 18, because magpie runs every provider's check-ins

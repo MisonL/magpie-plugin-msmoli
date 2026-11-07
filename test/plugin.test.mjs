@@ -1534,7 +1534,7 @@ test("a whole check-in gives up at its own budget, not per request", { timeout: 
   }
 })
 
-test("a request that hangs gives up instead of holding the host", { timeout: 8000 }, async (t) => {
+test("a request that hangs gives up instead of holding the host", { timeout: 20000 }, async (t) => {
   if (!withMockTimers(t)) return
   const real = globalThis.fetch
   // Node 20.4 took the object form ({ apis: […] }); 18.19 and 20.0–20.3 only
@@ -1551,9 +1551,12 @@ test("a request that hangs gives up instead of holding the host", { timeout: 800
     })
   try {
     const pending = auth.usage(async () => ({ type: "api", key: "ms-test" }))
-    // let the request reach its setTimeout before the clock is moved
-    await new Promise((resolve) => setImmediate(resolve))
-    t.mock.timers.tick(20001)
+    // let the request reach its setTimeout before the clock is moved; a hung
+    // site is followed by the other one, so both timers are run out
+    for (let i = 0; i < 2; i++) {
+      await new Promise((resolve) => setImmediate(resolve))
+      t.mock.timers.tick(20001)
+    }
     const u = await pending
     // usage reports rather than throws
     assert.ok(u.error, "usage should report the failure")
@@ -4486,7 +4489,7 @@ test("a body that dies half-read is told in the user's words, not the runtime's"
   }
 })
 
-test("a body that hangs half-read gives up at its own timeout, and says so", { timeout: 8000 }, async (t) => {
+test("a body that hangs half-read gives up at its own timeout, and says so", { timeout: 20000 }, async (t) => {
   // the request's timer is armed for the whole call, but the translation that
   // reads it sat around fetch alone: a reply that stops after the headers is
   // cut by that same timer, from the read, and would reach the card as the
@@ -4514,9 +4517,12 @@ test("a body that hangs half-read gives up at its own timeout, and says so", { t
   })
   try {
     const pending = auth.usage(async () => ({ type: "api", key: "ms-test" }))
-    // let the request arm its timer before the clock is moved
-    await new Promise((resolve) => setImmediate(resolve))
-    t.mock.timers.tick(8001)
+    // let the request arm its timer before the clock is moved; the other site
+    // is asked after this one fails, so both timers are run out
+    for (let i = 0; i < 2; i++) {
+      await new Promise((resolve) => setImmediate(resolve))
+      t.mock.timers.tick(8001)
+    }
     const u = await pending
     assert.match(u.error, /请求超时/, `a hung body should name the timeout, got: ${u.error}`)
     assert.match(u.error, /8 秒/, `and its length, got: ${u.error}`)
@@ -5509,10 +5515,11 @@ test("a nickname a token could hold is refused at 12 characters, and a shorter o
     for (const [i, slice, want, why] of [
       [0, 12, 0, "a 12-character slice of the token is the token"],
       [1, null, 1, "a long name the token does not hold is a name"],
-      // 11 is one short of the rule: that slice is not looked for, and a
-      // nickname of a few characters that happens to sit inside a token is a
-      // nickname. Tightening `>= 12` to `>= 11` refuses it.
-      [2, 11, 1, "an 11-character slice is not met by the rule"],
+      // 9 is one short of the rule (MIN_ECHO, 10 — the mask's floor with the
+      // scan starting one past a shorter run): that slice is not looked for,
+      // and a nickname of a few characters that happens to sit inside a token
+      // is a nickname. Tightening `>= 10` to `>= 9` refuses it.
+      [2, 9, 1, "a 9-character slice is not met by the rule"],
     ]) {
       const tok = `ms-0123456789abcdef0123456789abcdef012345${i}${i}`
       const nick = slice === null ? stranger : tok.slice(0, slice)
@@ -5726,7 +5733,7 @@ test("a getAuth that rejects as expired marks the sign-in expired, on both hooks
   }
 })
 
-test("a runtime that words its own abort still reads as a timeout", { timeout: 8000 }, async (t) => {
+test("a runtime that words its own abort still reads as a timeout", { timeout: 20000 }, async (t) => {
   // saidFailure recognises our own abort by identity first (e === signal.reason).
   // Two other shapes reach it only through the word the reason carries: a
   // runtime that raises an error of its own when the abort lands, and one that
@@ -5756,8 +5763,10 @@ test("a runtime that words its own abort still reads as a timeout", { timeout: 8
     })
   try {
     const pending = auth.usage(async () => ({ type: "api", key: "ms-test" }))
-    await new Promise((resolve) => setImmediate(resolve))
-    t.mock.timers.tick(8001)
+    for (let i = 0; i < 2; i++) {
+      await new Promise((resolve) => setImmediate(resolve))
+      t.mock.timers.tick(8001)
+    }
     const copied = await pending
     assert.match(copied.error ?? "", /请求超时（8 秒）/, `a copied reason must still read as a timeout: ${copied.error}`)
   } finally {
@@ -7523,7 +7532,7 @@ test("a proxy that will not connect is named as the proxy, not as a timeout", as
   }
 })
 
-test("a fetch that never listens to its signal still gives up at the cap", { timeout: 8000 }, async (t) => {
+test("a fetch that never listens to its signal still gives up at the cap", { timeout: 20000 }, async (t) => {
   // The host's proxy fetch dials CONNECT on its own timer and ignores the
   // signal the plugin passes in. On signal alone the hook waits on it forever:
   // the 8-second per-request cap does not hold on this path.
@@ -7537,8 +7546,10 @@ test("a fetch that never listens to its signal still gives up at the cap", { tim
   globalThis.fetch = () => new Promise(() => {})
   try {
     const pending = auth.usage(async () => ({ type: "api", key: "ms-test" }))
-    await new Promise((resolve) => setImmediate(resolve))
-    t.mock.timers.tick(8001)
+    for (let i = 0; i < 2; i++) {
+      await new Promise((resolve) => setImmediate(resolve))
+      t.mock.timers.tick(8001)
+    }
     const u = await pending
     assert.match(u.error ?? "", /请求超时（8 秒）/, JSON.stringify(u))
   } finally {
@@ -7728,7 +7739,7 @@ test("spending yesterday's leftover is not drawn as overspent while the balance 
   assert.equal(w.used, 60, `300 of the 500 at hand today: ${w.used}`)
 })
 
-test("a body that never arrives and ignores the signal still gives up at the cap", { timeout: 8000 }, async (t) => {
+test("a body that never arrives and ignores the signal still gives up at the cap", { timeout: 20000 }, async (t) => {
   // the read is raced against the abort as the request is: a response whose
   // stream neither delivers nor listens held the hook past 8 seconds
   if (!withMockTimers(t)) return
@@ -7745,8 +7756,10 @@ test("a body that never arrives and ignores the signal still gives up at the cap
   })
   try {
     const pending = auth.usage(async () => ({ type: "api", key: "ms-test" }))
-    for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve))
-    t.mock.timers.tick(8001)
+    for (let i = 0; i < 2; i++) {
+      for (let j = 0; j < 3; j++) await new Promise((resolve) => setImmediate(resolve))
+      t.mock.timers.tick(8001)
+    }
     const u = await pending
     assert.match(u.error ?? "", /请求超时（8 秒）/, JSON.stringify(u))
   } finally {
@@ -8263,8 +8276,9 @@ test("a short front of the token echoed as a nickname is not written back", asyn
   try {
     for (const [n, want, why] of [
       [19, 0, "a 19-character front is longer than the mask's floor"],
-      [12, 0, "12 is the floor itself"],
-      [11, 1, "11 is one short of the floor"],
+      [12, 0, "12 is over the floor"],
+      [10, 0, "10 is the floor itself"],
+      [9, 1, "9 is one short of the floor"],
     ]) {
       const token = `ms-front-0000-0000-0000-000000000${n}`
       const writes = []
@@ -8688,7 +8702,7 @@ test("a token split by its own hyphen every 11 characters is masked whole", asyn
   )
 })
 
-test("a nickname that spells the whole token in short chunks with a stray letter is refused", async () => {
+test("a nickname that spaces the token out with throwaway words is refused", async () => {
   const dir = tmpDir("msmoli-chunknick-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
@@ -8696,7 +8710,12 @@ test("a nickname that spells the whole token in short chunks with a stray letter
   // A token no other test uses: `names` caches per token, and a shared one
   // would answer from a previous test's empty name without reading this one.
   const token = "ms-chunk9999-bbbb-2222-cccc-333344445555"
-  const nick = "chunk9999-bb。bb-2222-ccc。c-333344445。555g"
+  // The key's characters in order, spaced out with throwaway words. Each word
+  // is under 12 characters, so the name is not key-shaped (nameIsKey passes),
+  // and the filler letters keep the folded form from being a substring of the
+  // token (echoesToken passes). Only runsThrough — the in-order count — sees
+  // the key underneath, which is what this test is for.
+  const nick = "chunk9999 and then bbbb 2222 cccc"
   const writes = []
   const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
   await withFetch(
@@ -8705,9 +8724,10 @@ test("a nickname that spells the whole token in short chunks with a stray letter
       "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
       [TX_PATH]: { body: { success: true, data: { records: [day()] } } },
     },
-    async () => {
+    async (fetch) => {
       const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
       assert.equal(c.outcome, "done", c.message)
+      assert.ok(fetch.calls.includes("/api/v1/users/login/info"), "the fixture's nickname was never read")
       assert.deepEqual(writes, [], `the chopped-up key became the account name: ${JSON.stringify(writes)}`)
       const u = await p.auth.usage(async () => ({ type: "api", key: token }))
       assert.equal(u.user, "", `the chopped-up key reached the card: ${u.user}`)
@@ -8961,17 +8981,22 @@ test("a nickname that is the flattened token's 22-character prefix is refused", 
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
-  const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  // its own token: `names` is process-wide, and a shared one would answer from
+  // an earlier test's cached empty name without reading this fixture at all
+  const token = "ms-flatpref-1111-2222-3333-444455556666"
   const writes = []
   const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
   await withFetch(
     {
-      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "ms.aaaa1111.bbbb.2222.cccc" } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "ms.flatpref.1111.2222.3333" } } },
       [TX_PATH]: { body: { success: true, data: { records: [day()] } } },
     },
-    async () => {
+    async (fetch) => {
       const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
       assert.equal(c.outcome, "done", c.message)
+      // the fixture must have been read: `names` answers a second sight of a
+      // token from its cache, and then this test would prove nothing
+      assert.ok(fetch.calls.includes("/api/v1/users/login/info"), "the fixture's nickname was never read")
       assert.deepEqual(writes, [], `a flat prefix of the token became the account name: ${JSON.stringify(writes)}`)
     },
   )
@@ -8988,17 +9013,18 @@ test("a spaced-out nickname of 17 characters, a piece of the token, is refused",
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
   const saved = process.env.MAGPIE_MSMOLI_CONFIG
   delete process.env.MAGPIE_MSMOLI_CONFIG
-  const token = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const token = "ms-tightok-1111-2222-3333-444455556666"
   const writes = []
   const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
   await withFetch(
     {
-      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "ms-aaaa1 111-bbbb" } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "ms-tightok -1111-bbbb" } } },
       [TX_PATH]: { body: { success: true, data: { records: [day()] } } },
     },
-    async () => {
+    async (fetch) => {
       const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
       assert.equal(c.outcome, "done", c.message)
+      assert.ok(fetch.calls.includes("/api/v1/users/login/info"), "the fixture's nickname was never read")
       assert.deepEqual(writes, [], `a spaced piece of the token became the account name: ${JSON.stringify(writes)}`)
     },
   )
@@ -9165,4 +9191,435 @@ test("a name that frames a 16-character piece of the token is refused", async ()
   if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
   else process.env.MAGPIE_MSMOLI_CONFIG = saved
   rmSync(dir, { recursive: true, force: true })
+})
+
+// ---- Round forty: the final review's findings, each pinned -----------------
+
+test("an upper-cased or full-width echo of the key is masked on the card", async () => {
+  // The mask compared bytes: a server that upper-cases its log or answers in
+  // full-width characters was echoing the same key in another spelling, and
+  // the whole key reached the card.
+  const token = "ms-casetest-1111-2222-3333-444455556666"
+  const upper = token.toUpperCase()
+  const wide = token.replace(/[0-9a-z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).replace(/-/g, "－")
+  for (const [name, echo] of [["upper", upper], ["wide", wide]]) {
+    assert.equal(echo.normalize("NFKC").toLowerCase(), token, `${name}: the fixture is the same key`)
+    const u = await withFetch(
+      { "/openapi/v1/magicubes/balance": { status: 500, body: { success: false, message: `bad session ${echo} end` } } },
+      () => auth.usage(async () => ({ type: "api", key: token })),
+    )
+    assert.ok(!u.error.includes(echo), `${name}: the whole echo reached the card: ${u.error}`)
+    assert.match(u.error, /ms-\w…\w{4}/, `${name}: it is masked as the key: ${u.error}`)
+    assert.ok(!u.error.includes(echo.slice(0, 20)), `${name}: a long front survived: ${u.error}`)
+  }
+})
+
+
+test("an upper-cased piece of the key is masked on the card", async () => {
+  // The whole key upper-cased is caught by its shape even without folding, so
+  // this fixture is a piece of it, no "ms-" prefix, cut into short upper-case
+  // words. No word is long enough to read as a key on its own, and the shape
+  // test has nothing to match: only folding the message character by character
+  // lines it up with the key.
+  const token = "ms-casetest-1111-2222-3333-444455556666"
+  const echo = "CASE-TEST-1111-2222-3333-4444"
+  const u = await withFetch(
+    { "/openapi/v1/magicubes/balance": { status: 500, body: { success: false, message: `bad session ${echo} end` } } },
+    () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.ok(!u.error.includes("CASE-TEST"), `the upper-cased piece reached the card: ${u.error}`)
+  assert.ok(!u.error.includes("3333-4444"), `the tail of the piece reached the card: ${u.error}`)
+  assert.match(u.error, /ms-c…6666/, `it is masked as the key: ${u.error}`)
+})
+
+test("an upper-cased, full-width or chunked nickname is refused and masked", async () => {
+  // Same spellings through the nickname door: it is written to
+  // plugin-auth.json as accountId, where the card's mask does not reach — and
+  // the chunked form ("ms-0123abcd4567x 89ef…") leaves pieces each under the
+  // mask's floor while spelling the key once the filler is dropped.
+  const token = "ms-nickform-1111-2222-3333-444455556666"
+  const upper = token.toUpperCase()
+  const wide = token.replace(/[0-9a-z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).replace(/-/g, "－")
+  const chunked = token.slice(3).match(/.{1,11}/g).join("x ")
+  for (const [name, nick] of [["upper", upper], ["wide", wide], ["chunked", chunked]]) {
+    const dir = tmpDir("msmoli-nickform-")
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    const saved = process.env.MAGPIE_MSMOLI_CONFIG
+    delete process.env.MAGPIE_MSMOLI_CONFIG
+    const writes = []
+    const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    try {
+      await withFetch(
+        {
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+        },
+        async () => {
+          const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+          assert.equal(c.outcome, "done", c.message)
+          const u = await p.auth.usage(async () => ({ type: "api", key: token }))
+          assert.equal(u.user ?? "", "", `${name}: the echo reached the card: ${JSON.stringify(u.user)}`)
+        },
+      )
+      assert.deepEqual(writes, [], `${name}: the echo became the accountId: ${JSON.stringify(writes)}`)
+    } finally {
+      if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+      else process.env.MAGPIE_MSMOLI_CONFIG = saved
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test("a remembered site that times out or answers 4xx still tries the other one", async () => {
+  testables.sites.clear()
+  const token = "ms-stalesite-0000-0000-0000-000000000077"
+  try {
+    // learn the domestic site
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+      },
+      () => auth.usage(async () => ({ type: "api", key: token })),
+    )
+    assert.equal(testables.sites.get(token).site, CN_ORIGIN)
+    const real = globalThis.fetch
+    try {
+      for (const [name, fail] of [
+        ["timeout", () => { throw new TypeError("fetch failed") }],
+        ["4xx", () => reply({ status: 404, body: { success: false, message: "not found" } })],
+      ]) {
+        testables.sites.set(token, testables.CN) // the phase under test starts on the domestic site
+        const origins = []
+        globalThis.fetch = async (url) => {
+          const u = new URL(url)
+          origins.push(u.origin)
+          if (u.origin === CN_ORIGIN) return fail()
+          if (u.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 7 } } })
+          return reply({ body: { success: true, data: { records: [] } } })
+        }
+        const u = await auth.usage(async () => ({ type: "api", key: token }))
+        assert.equal(u.balance, "7 魔粒可用", `${name}: the other site's answer was lost: ${JSON.stringify(u)}`)
+        assert.ok(origins.includes(INTL_ORIGIN), `${name}: the other site was never asked`)
+      }
+    } finally {
+      globalThis.fetch = real
+    }
+  } finally {
+    testables.sites.clear()
+  }
+})
+
+// node:test's own timeout runs on setTimeout, so a mock timer freezes it too and
+// a hanging fixture cannot be caught by a { timeout }. Real timers cannot drive
+// the hook past its 3s cap in a test. This fake patches only globalThis.setTimeout
+// — the lookup the plugin's bare `setTimeout` resolves — so everything else in
+// the process (including node:test) keeps its real timers, and it can be
+// advanced by hand: tick(ms) runs the callbacks now due. Timer objects carry an
+// unref() because waitFor calls it.
+function fakeClock() {
+  const real = globalThis.setTimeout
+  let now = 0
+  const due = []
+  return {
+    real,
+    install() {
+      globalThis.setTimeout = (fn, ms, ...args) => {
+        const timer = { when: now + Math.max(0, Number(ms) || 0), fn, args, done: false, unref() {} }
+        due.push(timer)
+        return timer
+      }
+    },
+    restore() {
+      globalThis.setTimeout = real
+    },
+    tick(ms) {
+      now += ms
+      for (;;) {
+        const ready = due.filter((t) => !t.done && t.when <= now)
+        if (!ready.length) return
+        for (const t of ready) {
+          t.done = true
+          t.fn(...t.args)
+        }
+      }
+    },
+  }
+}
+
+test("a write-back whose fresh read fails or hangs writes nothing", { timeout: 15000 }, async () => {
+  // auth.set replaces the whole sign-in: writing on the copy from the start of
+  // the hook undoes an edit made meanwhile. An unreadable store means the
+  // freshest state is unknown, and an unknown state is not written over.
+  for (const [name, second] of [
+    ["rejects", async () => { throw new Error("store temporarily unreadable") }],
+    ["hangs", () => new Promise(() => {})],
+  ]) {
+    const dir = tmpDir("msmoli-reread-")
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    const saved = process.env.MAGPIE_MSMOLI_CONFIG
+    delete process.env.MAGPIE_MSMOLI_CONFIG
+    const writes = []
+    const token = `ms-reread-${name}-0000-0000-0000-000000000001`
+    let calls = 0
+    const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    const clock = name === "hangs" ? fakeClock() : null
+    try {
+      if (clock) clock.install()
+      await withFetch(
+        {
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+        },
+        async () => {
+          const pending = p.auth.checkin(async () => {
+            calls += 1
+            return calls === 1 ? { type: "api", key: token } : second()
+          })
+          if (clock) {
+            // let the hook reach the waiting read on its own microtasks, then move
+            // the fake clock past WRITE_WAIT_MS so the cap fires while the read
+            // is still pending. The race against a real timer turns a hook that
+            // ignores the cap into a failed assertion here, not a silent hang.
+            await new Promise((resolve) => setImmediate(resolve))
+            clock.tick(3001)
+          }
+          const c = await Promise.race([
+            pending,
+            new Promise((_, reject) => (clock ?? { real: setTimeout }).real(() => reject(new Error("the check-in did not return once the read hung")), 8000)),
+          ])
+          assert.equal(c.outcome, "done", `${name}: ${c.message}`)
+        },
+      )
+      assert.deepEqual(writes, [], `${name}: a write was made on a state the hook could not read`)
+    } finally {
+      if (clock) clock.restore()
+      if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+      else process.env.MAGPIE_MSMOLI_CONFIG = saved
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test("a before-ledger that could not be finished is a failed day, not an absent grant", async () => {
+  const token = "ms-partialbefore-0000-0000-0000-000000000123"
+  let secondReads = 0
+  const real = globalThis.fetch
+  const first = [...Array.from({ length: 50 }, (_, i) => spend(0, 1, today, `p${i}`))]
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    const page = Number(u.searchParams.get("page"))
+    if (page === 1) return reply({ body: { success: true, data: { total: 51, records: first } } })
+    // only the baseline read fails; the reads after the touch are whole and
+    // still show nothing new
+    secondReads += 1
+    if (secondReads === 1) return reply({ status: 503, body: { success: false, message: "busy" } })
+    return reply({ body: { success: true, data: { total: 51, records: [...first, spend(0, 1, daysBack(1))] } } })
+  }
+  try {
+    const c = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(c.outcome, "failed", `a partial baseline must not settle the day: ${JSON.stringify(c)}`)
+    assert.match(c.message, /账单读取不完整/)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a cycle of pages is not summed twice, and the card says the walk fell short", async () => {
+  const token = "ms-cyclepage-0000-0000-0000-000000000555"
+  const a = Array.from({ length: 50 }, (_, i) => ({ ...spend(1, 1, today), model_tier: `a${i}` }))
+  const b = Array.from({ length: 50 }, (_, i) => ({ ...spend(1, 1, today), model_tier: `b${i}` }))
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 5 } } })
+    const page = Number(u.searchParams.get("page"))
+    const records = page % 2 === 1 ? a : b
+    return reply({ body: { success: true, data: { total: 200, records } } })
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: token }))
+    const line = u.windows?.[0]?.display ?? ""
+    assert.match(line, /账单未读完，数字偏低/, `a cycling ledger must not read as complete: ${JSON.stringify(u)}`)
+    assert.match(line, /今日用 100 /, `pages a and b, each counted once: ${line}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a page repeated in the streak walk leaves the streak unsaid", async () => {
+  const token = "ms-streakcycle-0000-0000-0000-000000000666"
+  const first = [day(), ...Array.from({ length: 49 }, (_, i) => spend(1, 1, today, `c${i}`))]
+  const second = [...Array.from({ length: 50 }, (_, i) => spend(1, 1, today, `d${i}`))]
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    const page = Number(u.searchParams.get("page"))
+    const records = page === 1 ? first : second
+    return reply({ body: { success: true, data: { total: 150, records } } })
+  }
+  try {
+    const c = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(c.streak, undefined, `a repeated page was counted as the ledger's end: ${JSON.stringify(c)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a total below the rows it sits beside does not confirm a short page", async () => {
+  const token = "ms-badtotal-0000-0000-0000-000000000777"
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 0 } } })
+    const page = Number(u.searchParams.get("page"))
+    const records = page === 1 ? [spend(100, 1, today)] : [day()]
+    return reply({ body: { success: true, data: { total: page === 1 ? 0 : 2, records } } })
+  }
+  try {
+    const c = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(c.outcome, "done", `the contradicted page ended the walk before the grant: ${JSON.stringify(c)}`)
+    assert.equal(c.credit, 200, JSON.stringify(c))
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("an extra page answered 202 is not the end of the ledger", async () => {
+  const token = "ms-extra202-0000-0000-0000-000000000888"
+  const first = [...Array.from({ length: 50 }, (_, i) => spend(0, 1, today, `e${i}`))]
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    const page = Number(u.searchParams.get("page"))
+    if (page === 1) return reply({ body: { success: true, data: { total: 51, records: first } } })
+    return reply({ status: 202, body: { success: true, data: { total: 51, records: [day()] } } })
+  }
+  try {
+    const c = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(c.outcome, "failed", `a 202 is not an answer, let alone the end: ${JSON.stringify(c)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("an extra page answered 401 reports the confirmed expiry", async () => {
+  // The first page's gate turns a 401 into the dead-token signal, and the card
+  // and the check-in both report "expired" from it. An extra page's read went
+  // around that gate: the 401 was swallowed, the walk was marked incomplete,
+  // and a token the site had just refused was reported as fine.
+  const token = "ms-extra401-0000-0000-0000-000000000777"
+  const first = [...Array.from({ length: 50 }, (_, i) => spend(0, 1, today, `x${i}`))]
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    const page = Number(u.searchParams.get("page"))
+    if (page === 1) return reply({ body: { success: true, data: { total: 51, records: first } } })
+    return reply({ status: 401, body: { success: false, message: "expired" } })
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.equal(u.signIn, "expired", `the refused page is an expiry: ${JSON.stringify(u)}`)
+    const c = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(c.signIn, "expired", `the check-in must report it too: ${JSON.stringify(c)}`)
+    assert.equal(c.outcome, "failed", "a day that could not be read is not a day without a grant")
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a claim that lands after midnight is the new day's grant", async () => {
+  // The touch can cross Beijing midnight. Diffing the new day's rows against
+  // the old day's baseline netted yesterday's Aliyun grant to zero and
+  // reported 200 instead of the 250 that landed.
+  const token = "ms-midnight-0000-0000-0000-000000000999"
+  const realNow = Date.now
+  const base = Date.parse("2026-11-06T15:59:59.800Z") // 23:59:59.800 +08
+  let crossed = false
+  Date.now = () => base + (crossed ? 2500 : 0)
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) {
+      crossed = true
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    const rows = crossed
+      ? [
+          { gmt_created: "2026-11-07", type: "EARN", rule_key: "daily_active", title: "注册并登录", total_amount: 200 },
+          { gmt_created: "2026-11-07", type: "EARN", rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50 },
+          { gmt_created: "2026-11-06", type: "EARN", rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50 },
+        ]
+      : [{ gmt_created: "2026-11-06", type: "EARN", rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50 }]
+    return reply({ body: { success: true, data: { total: rows.length, records: rows } } })
+  }
+  try {
+    const c = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(c.outcome, "claimed", JSON.stringify(c))
+    assert.equal(c.credit, 250, `yesterday's grant was netted against today's: ${JSON.stringify(c)}`)
+    assert.equal(c.streak, 2, `the streak was anchored on yesterday: ${JSON.stringify(c)}`)
+  } finally {
+    Date.now = realNow
+    globalThis.fetch = realFetch
+  }
+})
+
+test("a day whose only grant is the Aliyun one is not described as no grant", async () => {
+  const token = "ms-aliyunonly-0000-0000-0000-000000001010"
+  const row = { gmt_created: today, type: "EARN", rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50 }
+  await withFetch(
+    {
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { total: 1, records: [row] } } },
+    },
+    async () => {
+      // twice: after noon the first ask buys a half-hour re-check (`until`),
+      // and the wording this test is about is the one after that
+      await auth.checkin(async () => ({ type: "api", key: token }))
+      const c = await auth.checkin(async () => ({ type: "api", key: token }))
+      assert.equal(c.outcome, "inactive", JSON.stringify(c))
+      assert.doesNotMatch(c.message, /没有到账记录/, `the ledger had a grant: ${c.message}`)
+      assert.match(c.message, /有到账/)
+    },
+  )
+})
+
+test("an impossible calendar date does not end the ledger or streak walk", async () => {
+  // "2026-00-00" has the right shape and sorts before every real day, so a
+  // shape-only check read it as an old row and stopped the walk on page 1.
+  const token = "ms-badcal-0000-0000-0000-000000000202"
+  const first = [...Array.from({ length: 49 }, (_, i) => spend(1, 1, today, `x${i}`)), spend(1, 1, "2026-00-00")]
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    if (u.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 0 } } })
+    const page = Number(u.searchParams.get("page"))
+    return reply({ body: { success: true, data: { total: 51, records: page === 1 ? first : [day()] } } })
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.match(u.windows?.[0]?.display ?? "", /领 200/, `the grant on page 2 was skipped: ${JSON.stringify(u)}`)
+    const c = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(c.outcome, "done", JSON.stringify(c))
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a streak walk over an impossible stamp keeps going", () => {
+  const rows = [
+    { gmt_created: today, type: "EARN", rule_key: "daily_active" },
+    { gmt_created: daysBack(1), type: "EARN", rule_key: "daily_active" },
+    { gmt_created: "2026-02-30", type: "SPEND_CONFIRM" },
+  ]
+  // no readPage needed: the impossible stamp must not read as older than the
+  // gap, so the walk stops with the two days it can see rather than one
+  // total equals the rows in hand, so the walk is allowed to end here; the
+  // impossible stamp must not be the thing that ends it
+  return streakOf(rows, today, 3, null, Infinity).then((n) => assert.equal(n, 2, `streak ${n}`))
 })

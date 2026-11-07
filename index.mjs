@@ -196,25 +196,32 @@ function saidFailure(e, ctl, budget) {
 async function siteRead(token, path, deadline = Infinity) {
   const known = sites.get(token)
   const order = known ? [known, ...SITES.filter((p) => p !== known)] : SITES
+  // A parsed 4xx/429/5xx that is not an answer is still the site *saying
+  // something*, and it beats a transport error from the other site ("risk
+  // control" is more useful than "check your proxy"). It is kept as `answer`
+  // while the loop goes on: the site that gave it may not be the one holding
+  // this token (a stale `site`, a re-keyed sign-in, a middlebox's 404).
+  let answer
   let first
   for (const profile of order) {
     let got
     try {
       got = await json(profile.site, token, path, deadline)
     } catch (e) {
-      // A timeout is the link, not the site: paying it again on the other
-      // site would double the wait on a dead network, inside a hook whose
-      // budget is 18–25 seconds. Any other transport failure is cheap to
-      // retry (a refused connection answers at once) and the other site may
-      // well be the one working.
-      if (profile === known && e?.timeout) throw e
+      // A timeout is the link, not the site, and the remembered site may be
+      // the stale half of a re-keyed sign-in — the same state the 401 branch
+      // exists for. The second read is bounded by the hook's own deadline, so
+      // a dead network costs at most the budget it would have spent anyway;
+      // giving up here left an account on a wrong or unreachable site all day.
       first ??= e instanceof Error ? { error: e } : { error: new Error("") }
       continue
     }
-    if (got.res.status === 401) {
+    if (got.res.status === 401 && got.parsed) {
       // A 401 where the token was accepted before: the sign-in may have been
       // re-keyed with a token of the other site, or the remembered site may be
-      // stale (a kept `site` value, a proxy's 200 cached as an answer).
+      // stale (a kept `site` value, a proxy's 200 cached as an answer). A 401
+      // that is not ModelScope's own JSON is a middlebox's challenge, not the
+      // token being refused — it falls through like any other non-answer.
       if (profile === known) sites.delete(token)
       continue
     }
@@ -226,9 +233,18 @@ async function siteRead(token, path, deadline = Infinity) {
       first ??= { answer: { profile, ...got } }
       continue
     }
-    if (got.parsed && got.res.status >= 400 && got.res.status < 500 && got.res.status !== 429) return { profile, ...got }
+    // A 4xx is the site answering — but a 404/405/451 from a middlebox, or a
+    // 400/403 from the site that does not hold this token, is no better
+    // evidence than a 5xx. Keep it as the best answer and let the other site
+    // answer too; a genuine risk-control 403 on the right site still ends up
+    // as the report when the other site has nothing better to say.
+    if (got.parsed && got.res.status >= 400 && got.res.status < 500 && got.res.status !== 429) {
+      answer ??= { profile, ...got }
+      continue
+    }
     first ??= { answer: { profile, ...got } }
   }
+  if (answer) return answer
   if (first) {
     if ("error" in first) throw first.error
     return first.answer
@@ -703,18 +719,38 @@ const maskToken = (token) =>
 // or a server echoing one) took minutes, inside a hook whose whole budget is
 // 25 seconds, and the plugin host's event loop with it. Collected first, the
 // same text is scanned once and the spans are put back where they were.
-const MIN_ECHO = 12
+// MIN_ECHO is how much of the key must sit together before the text is taken
+// for an echo. Ten rather than twelve, so that "a piece of at least 11
+// characters of the key" is masked: with the scan starting one character past
+// a short run (see maskEchoes below), a floor of 12 missed a run of 11 that
+// opened a chunked echo. Ten still leaves an ordinary short word ("ms-dos",
+// an 8-character slice) alone.
+const MIN_ECHO = 10
+// fold is the form an echo is compared in: NFKC (a full-width "ｍｓ" is the
+// same key typed on another keyboard), lower case (a server that upper-cases
+// its log is still echoing the key), and letters and digits only (everything
+// else is a separator the echo inserted). Case and compatibility are not a
+// change of secret, and comparing byte for byte left the whole key on the
+// card when either changed.
+const fold = (s) => (typeof s === "string" ? s.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "") : "")
 const maskEchoes = (s, token) => {
   if (typeof token !== "string") return s
-  const flat = token.replace(/[^A-Za-z0-9]/g, "")
+  const flat = fold(token)
   if (flat.length < MIN_ECHO) return s
+  // at/end are the source text's bounds for each folded character. One source
+  // code point can fold into more than one ("ﬁ" is "fi"), so the end is kept
+  // per entry rather than derived from the folded length.
   const vis = []
   const at = []
+  const end = []
   for (let i = 0; i < s.length; ) {
     const c = String.fromCodePoint(s.codePointAt(i))
-    if (/[A-Za-z0-9]/.test(c)) {
-      vis.push(c)
-      at.push(i)
+    for (const f of c.normalize("NFKC").toLowerCase()) {
+      if (f >= "a" && f <= "z" || f >= "0" && f <= "9") {
+        vis.push(f)
+        at.push(i)
+        end.push(i + c.length)
+      }
     }
     i += c.length
   }
@@ -734,11 +770,11 @@ const maskEchoes = (s, token) => {
       // so masking does not join two words that the echo had apart.
       out += s.slice(from, at[k])
       out += maskToken(token)
-      from = at[v - 1] + vis[v - 1].length
+      from = end[v - 1]
       k = v
     } else {
-      out += s.slice(from, at[k] + vis[k].length)
-      from = at[k] + vis[k].length
+      out += s.slice(from, end[k])
+      from = end[k]
       k++
     }
   }
@@ -972,7 +1008,12 @@ const insideToken = (name, token) => {
   if (typeof token !== "string" || token === "") return false
   if (token.includes(name) || token.includes(tightName(name))) return true
   const flat = flatName(name)
-  return flat.length >= 20 && flatName(token).includes(flat)
+  const t = fold(token)
+  if (flat.length >= 20 && t.includes(flat)) return true
+  // the same answer for the case and compatibility folds: an upper-cased or
+  // full-width name is the same characters the sign-in already holds
+  const n = fold(name)
+  return n.length >= 20 && t.includes(n)
 }
 // echoesToken: the name is the token being handed back — the token itself, or
 // a piece long enough to be an echo. The threshold is the mask's own (MIN_ECHO,
@@ -983,17 +1024,35 @@ const insideToken = (name, token) => {
 const echoesToken = (name, token) => {
   if (typeof token !== "string" || !token) return false
   if (name.includes(token)) return true
+  const n = fold(name)
+  const t = fold(token)
+  if (!n || !t) return false
+  if (n.includes(t)) return true
   return insideToken(name, token) && tightName(name).length >= MIN_ECHO
 }
-// carriesEcho: the name holds a run of MIN_ECHO characters of the token
-// anywhere in it — not necessarily the whole name. A server that frames the
-// echo with its own words ("Account display name: ms-…") or cuts the token
-// into a longer nickname is not answered by the two checks above: the name is
-// not the token and is not inside it. The mask already knows the shape of such
-// a run, and this is the mask's own answer, asked before the 40-character cut
-// can leave a piece too short for the checks on the cut string to see.
-const carriesEcho = (name, token) =>
-  typeof name === "string" && typeof token === "string" && token.length >= MIN_ECHO && maskEchoes(name, token) !== name
+// runsThrough: the name's folded characters carry MIN_ECHO of the token's, in
+// order, even when the echo spaced them out with characters the token does not
+// hold. maskEchoes stops at a filler ("ms-0123abcd4567x 89ef…" is pieces each
+// under MIN_ECHO), but the pieces still spell the key once the filler is
+// dropped, and a nickname is written to plugin-auth.json as a second copy of
+// it. A name that shares a dozen characters of a 32-character key in order is
+// not a name a person picks; a short name ("ms", "Mison") cannot reach the
+// floor.
+const runsThrough = (name, token) => {
+  const n = fold(name)
+  const t = fold(token)
+  if (n.length < MIN_ECHO || t.length < MIN_ECHO) return false
+  let j = 0
+  let hits = 0
+  for (const ch of n) {
+    const k = t.indexOf(ch, j)
+    if (k === -1) continue
+    hits++
+    j = k + 1
+    if (hits >= MIN_ECHO) return true
+  }
+  return false
+}
 const nameIsKey = (name, token) =>
   !insideToken(name, token) &&
   name.split(/\s+/).some((w) => isKeyWord(w) && (/\d/.test(w) || /[+/=]/.test(w)))
@@ -1001,7 +1060,7 @@ const unusableName = (name, token) =>
   !name ||
   name === token ||
   echoesToken(name, token) ||
-  carriesEcho(name, token) ||
+  runsThrough(name, token) ||
   nameIsKey(name, token) ||
   ["__proto__", "constructor", "prototype"].includes(name)
 
@@ -1051,15 +1110,19 @@ async function rememberAccountFields(client, token, learned, auth, dir, budgetEn
   let base = auth
   if (typeof getAuth === "function") {
     try {
-      const now = await getAuth()
+      // The read is host I/O like the write: it takes the same store lock and
+      // can block for ~20s. Capped by the same budget, and an unreadable store
+      // means no write at all — falling back to the copy from the start of the
+      // hook is exactly the stale base that overwrote a key pasted meanwhile.
+      const cap = Math.max(0, Math.min(WRITE_WAIT_MS, budgetEnd - Date.now()))
+      const now = await waitFor(Promise.resolve().then(getAuth), cap)
       // what the host hands over is not always a plain object (a callable
       // carrying the fields is a sign-in too); the key is what says it is
       // still this account's entry, and the spread below skips a non-object
-      if (tokenOf(now) !== token) return
+      if (now === undefined || tokenOf(now) !== token) return
       base = now
     } catch {
-      // the store did not answer this time; the copy the hook started with is
-      // what the host gave it, and writing that is what this did before
+      return
     }
   }
   const name = learned?.name ?? ""
@@ -1218,8 +1281,8 @@ async function todayEarn(token, deadline) {
   gate(profile, res, body, parsed, token, "账单查询失败")
   const day = todayCN()
   const first = recordsOf(body)
-  const { all, pages, complete } = await dayRows(profile, token, day, first, deadline, body)
-  return { profile, all, pages, complete, total: totalOf(body, first), rows: all.filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day)) }
+  const { all, pages, complete, last } = await dayRows(profile, token, day, first, deadline, body)
+  return { profile, day, all, pages, complete, last, total: totalOf(body, first).total, rows: all.filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day)) }
 }
 
 // DAY_PAGES bounds the extra ledger reads a page full of today's rows costs.
@@ -1250,14 +1313,15 @@ async function dayRows(profile, token, day, first, deadline, body) {
   let rows = first
   let pages = 1
   // a server that ignores the page number answers every page with the same
-  // rows; following `total` on top of that would count them once per page
-  let seen = JSON.stringify(first)
-  const total = totalOf(body, first)
+  // rows — or cycles through a few; every page seen is kept, and a page
+  // already seen is the page number being ignored, not more rows
+  const seen = new Set([JSON.stringify(first)])
+  const { total, contradicted } = totalOf(body, first)
   let complete = false
   for (;;) {
     const older = rows.some((r) => {
       const s = String(r?.gmt_created ?? "").slice(0, 10)
-      return /^\d{4}-\d{2}-\d{2}$/.test(s) && s < day
+      return isDay(s) && s < day
     })
     if (older) {
       complete = true
@@ -1266,7 +1330,10 @@ async function dayRows(profile, token, day, first, deadline, body) {
     // a page with room to spare is the end — unless `total` still promises
     // rows, in which case the server is contradicting itself and the rest may
     // be on the next page anyway (bounded by DAY_PAGES below)
-    if (rows.length < PAGE_SIZE && (total === null || all.length >= total)) {
+    // a `total` below the rows beside it is the ledger contradicting itself:
+    // it proves neither "this is the end" nor "there is more", so the page is
+    // walked on like a short page with no total at all
+    if (rows.length < PAGE_SIZE && !contradicted && (total === null || all.length >= total)) {
       complete = true
       break
     }
@@ -1278,21 +1345,36 @@ async function dayRows(profile, token, day, first, deadline, body) {
       break
     }
     const { res } = got
-    if (!got.parsed || res.status < 200 || res.status >= 300 || !okOf(got.body)) break
+    // the same rule gate applies to the first page: only a 200 carrying the
+    // success envelope is an answer. A 202 used to be read as the end of the
+    // ledger, which confirmed a day that was never finished. A 401 is the same
+    // token being refused, and swallowing it here kept a confirmed expiry off
+    // the card and out of the check-in's answer: it goes through the same
+    // dead-token throw the first page's gate uses.
+    if (got.parsed && res.status === 401) throw deadToken(profile.where)
+    if (!got.parsed || res.status !== 200 || !okOf(got.body)) break
     rows = recordsOf(got.body)
     pages += 1
     // an empty page is the end of the ledger, or — with a `total` still
     // counting rows — the server saying two things at once; no page after it
     // is worth reading. A page repeating the one before it is the page number
     // being ignored, and summing it again would inflate the day's numbers.
-    if (!rows.length || JSON.stringify(rows) === seen) {
-      complete = total === null ? rows.length === 0 : all.length >= total
+    const stamp = JSON.stringify(rows)
+    if (!rows.length || seen.has(stamp)) {
+      complete = !rows.length && total === null ? true : total !== null && all.length >= total
       break
     }
-    seen = JSON.stringify(rows)
+    seen.add(stamp)
     all.push(...rows)
   }
-  return { all, pages, complete }
+  // `last` is the page the walk stopped on, for a following page-reader to
+  // recognise as already read. It is handed over only when the walk stopped
+  // *without* proving the end (a failed page, a spent budget): there the next
+  // page is the same one again, and reading it twice is what inflated the day.
+  // A walk that proved the end has nothing after it, and an empty page is the
+  // end whatever `total` said — seeding either would make the ledger's next
+  // ask look like a repeat and silence a streak that was read to the last day.
+  return { all, pages, complete, last: complete || !rows.length ? null : rows }
 }
 
 // totalOf is how many rows the ledger holds altogether, from the `total` the
@@ -1306,14 +1388,25 @@ async function dayRows(profile, token, day, first, deadline, body) {
 const totalOf = (body, rows) => {
   const n = dataObjectOf(body, "账单格式不认识：没有 data").total
   // a total below the rows it is printed beside is the ledger contradicting
-  // itself; neither number can be trusted to say whether the page is whole
-  if (Number.isInteger(n)) return n >= rows.length ? n : null
-  return rows.length < PAGE_SIZE ? rows.length : null
+  // itself; neither number can be trusted to say whether the page is whole.
+  // That is not the same as a missing total, which the caller reads as "the
+  // rows in hand are the ledger": a short page of a contradicted ledger must
+  // not be called complete on the strength of the number it just refuted.
+  if (Number.isInteger(n)) return n >= rows.length ? { total: n, contradicted: false } : { total: null, contradicted: true }
+  return { total: rows.length < PAGE_SIZE ? rows.length : null, contradicted: false }
 }
 
 // prevDay is the Beijing day before `day`. The rows carry date labels with no
 // zone attached, so subtracting on the UTC date is right: the label is a
 // calendar day, not an instant.
+// isDay is a stamp's first ten characters when they name a day that exists.
+// The shape alone let "2026-00-00" through: it sorts before every real day, so
+// it read as an old row and ended a walk on the spot.
+const isDay = (s) => {
+  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false
+  const d = new Date(`${s}T00:00:00Z`)
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s
+}
 const prevDay = (day) => {
   const d = new Date(`${day}T00:00:00Z`)
   d.setUTCDate(d.getUTCDate() - 1)
@@ -1338,7 +1431,7 @@ const STREAK_PAGES = 8
 const daysWithGrant = (rows, into = new Set()) => {
   for (const r of rows) {
     const stamp = typeof r?.gmt_created === "string" ? r.gmt_created.slice(0, 10) : ""
-    if (/^\d{4}-\d{2}-\d{2}$/.test(stamp) && r?.type === "EARN" && DAILY_RULES.includes(r?.rule_key)) into.add(stamp)
+    if (isDay(stamp) && r?.type === "EARN" && DAILY_RULES.includes(r?.rule_key)) into.add(stamp)
   }
   return into
 }
@@ -1374,7 +1467,7 @@ async function streakOf(records, day, total, readPage, deadline) {
     // stamp sorted before every real day and ended the run on the spot.
     const older = records.some((r) => {
       const s = typeof r?.gmt_created === "string" ? r.gmt_created.slice(0, 10) : ""
-      return /^\d{4}-\d{2}-\d{2}$/.test(s) && s < prev
+      return isDay(s) && s < prev
     })
     if (older) return n
     if (total !== null && held >= total) return n
@@ -1400,9 +1493,10 @@ async function streakOf(records, day, total, readPage, deadline) {
 // that is not a list. A page error must not fail the check-in: the claim has
 // already happened, and the answer it deserves is the one already computed,
 // not a failure the host retries half an hour later.
-const ledgerReader = (profile, token, deadline, from = 1) => {
+const ledgerReader = (profile, token, deadline, from = 1, first = null) => {
   let page = from
   let left = Math.max(0, STREAK_PAGES - from)
+  const seen = new Set(first === null ? [] : [JSON.stringify(first)])
   return async () => {
     if (left <= 0) return null
     left -= 1
@@ -1410,7 +1504,14 @@ const ledgerReader = (profile, token, deadline, from = 1) => {
     try {
       const { res, body, parsed } = await json(profile.site, token, `${TXNS}?page=${page}&page_size=${PAGE_SIZE}`, deadline)
       gate(profile, res, body, parsed, token, "账单查询失败")
-      return recordsOf(body)
+      const rows = recordsOf(body)
+      // a page already read (the server ignoring the page number, or cycling)
+      // is not the walk's next step: counted again it fills the ledger's
+      // `total` and ends a streak the walk could not see the end of
+      const stamp = JSON.stringify(rows)
+      if (seen.has(stamp)) return null
+      seen.add(stamp)
+      return rows
     } catch {
       return null
     }
@@ -1597,6 +1698,11 @@ export async function MsmoliPlugin(input) {
           probe = profile
           const beforeDaily = before.rows.filter((r) => DAILY_RULES.includes(r?.rule_key))
           const claimed = before.rows.some((r) => r?.rule_key === "daily_active")
+          // A baseline that was not read to the end cannot prove the day's
+          // grant absent: the row may sit on the page that failed, and the
+          // touch-then-diff would report a row nobody read as this run's gain.
+          // `failed` is the one outcome the host retries.
+          if (!before.complete && !claimed) return { outcome: "failed", message: "账单读取不完整，稍后自动重试" }
           // What this run granted is the ledger's growth, not a new key: the
           // rows are aggregated per (day, type, rule_key, model_tier), so a
           // second grant of a rule already in today's page grows that row's
@@ -1628,11 +1734,15 @@ export async function MsmoliPlugin(input) {
           // "+50" with nothing in front of it.
           const titleOf = (rows, key) =>
             rows.find((r) => r?.rule_key === key && typeof r.title === "string" && r.title.trim())?.title
-          const grew = (rows) => {
+          const grew = (rows, pageDay) => {
             const after = byRule(rows)
+            // The rows of a new Beijing day cannot be diffed against the day
+            // before it: a grant that landed at 00:00:xx on the 50 already in
+            // yesterday's page would net to zero.
+            const base = pageDay === before.day ? beforeByRule : new Map()
             const out = []
             for (const [key, sum] of after) {
-              const gain = yin(sum - (beforeByRule.get(key) ?? 0))
+              const gain = yin(sum - (base.get(key) ?? 0))
               if (gain > 0) out.push({ key, gain, title: titleOf(rows, key) })
             }
             return out
@@ -1669,7 +1779,7 @@ export async function MsmoliPlugin(input) {
               const candidate = text(raw, 40)
               // judged whole, then cut: the cut can leave a piece of the token
               // in the name that neither the cut string nor the whole one
-              // answers for alone (see carriesEcho)
+              // answers for alone (see runsThrough)
               name = unusableName(raw, token) || unusableName(candidate, token) ? "" : candidate
               rememberName(token, name)
             } catch {
@@ -1692,7 +1802,7 @@ export async function MsmoliPlugin(input) {
             const candidate = text(raw, 40)
             // judged whole, then cut: the cut can leave a piece of the token
             // in the name that neither the cut string nor the whole one
-            // answers for alone (see carriesEcho)
+            // answers for alone (see runsThrough)
             name = unusableName(raw, token) || unusableName(candidate, token) ? "" : candidate
             rememberName(token, name)
           }
@@ -1704,7 +1814,15 @@ export async function MsmoliPlugin(input) {
           // recomputed) would make the card say today's claim is 0 credits.
           if (claimed) {
             const credit = sumOf(beforeDaily)
-            const which = beforeDaily.map((r) => cardText(r.title, token, 40)).filter(Boolean).join(" + ")
+            // each title is cut and stringified as before, and the join is
+            // masked once at the end: two titles that each carry a piece of the
+            // key under MIN_ECHO spell it together, and a per-title mask never
+            // sees the pair.
+            const joined = beforeDaily
+              .map((r) => cardText(r.title, token, 40))
+              .filter(Boolean)
+              .join(" + ")
+            const which = cardText(joined, token, 200)
             // An EARN row can carry a reversal, and a day whose grants were
             // reversed nets below zero. magpie clamps the numeric credit
             // itself (host.js's num: Math.max(0, v)) but renders `message`
@@ -1720,13 +1838,13 @@ export async function MsmoliPlugin(input) {
             return {
               outcome: "done",
               credit: shown,
-              streak: await streakOf(before.all, today, before.total, ledgerReader(profile, token, deadline, before.pages), deadline),
-              message: `今日已领取 ${shown} 魔粒` + (which ? `（${which}）` : ""),
+              streak: await streakOf(before.all, before.day, before.total, ledgerReader(profile, token, deadline, before.pages, before.last), deadline),
+              message: `今日已领取 ${shown} 魔粒` + (which ? `（${which}）` : "") + (before.complete ? "" : "；账单未读完，数字偏低"),
             }
           }
 
-          const gained = (rows) => {
-            const grew1 = grew(rows)
+          const gained = (rows, pageDay) => {
+            const grew1 = grew(rows, pageDay)
             if (!grew1.length) return null
             const credit = yin(grew1.reduce((n, g) => n + g.gain, 0))
             // A key with no name on any of its rows is shown by its amount
@@ -1746,13 +1864,13 @@ export async function MsmoliPlugin(input) {
           const claimedNow = async (page, gain) => ({
             outcome: "claimed",
             credit: gain.credit,
-            streak: await streakOf(page.all, today, page.total, ledgerReader(profile, token, deadline, page.pages), deadline),
-            message: `领取 ${gain.credit} 魔粒：${gain.which}`,
+            streak: await streakOf(page.all, page.day, page.total, ledgerReader(profile, token, deadline, page.pages, page.last), deadline),
+            message: `领取 ${gain.credit} 魔粒：${gain.which}` + (page.complete ? "" : "；账单未读完，数字偏低"),
           })
 
           const fresh = await todayEarn(token, deadline)
           probe = fresh.profile
-          const daily = gained(fresh.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)))
+          const daily = gained(fresh.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)), fresh.day)
           if (daily) return await claimedNow(fresh, daily)
           // Touched, yet no credit record: the ledger may not be written yet
           // (grants are asynchronous), or this account may simply not be in the
@@ -1767,7 +1885,7 @@ export async function MsmoliPlugin(input) {
           // via until.
           const again = await todayEarn(token, deadline)
           probe = again.profile
-          const later = gained(again.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)))
+          const later = gained(again.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)), again.day)
           if (later) return await claimedNow(again, later)
           // A ledger this walk could not finish is not evidence that nothing
           // arrived: the grant may sit on the page that failed, and `inactive`
@@ -1788,6 +1906,9 @@ export async function MsmoliPlugin(input) {
               message: "登录已触达，账本里还没有今天的到账；半小时后再核对一次",
               until: new Date(Date.now() + AGAIN_MS).toISOString(),
             }
+          }
+          if (beforeDaily.length) {
+            return { outcome: "inactive", message: "登录已触达，今天有到账但没有签到奖励；半小时后再核对一次" }
           }
           return { outcome: "inactive", message: "登录已触达，但今天没有到账记录（账号可能不在活动范围）" }
         } catch (e) {
@@ -1977,7 +2098,7 @@ export async function MsmoliPlugin(input) {
 
           return {
             plan: profile.plan,
-            user: names.get(token) ?? "",
+            user: cardText(names.get(token) ?? "", token),
             balance: `${available} 魔粒可用`,
             windows: [
               {

@@ -29,9 +29,13 @@ nickname, as `accountId`, so magpie's card can name the account instead of
 showing the end of the key; and, for an account on the international site,
 `site`, so a restarted host does not pay a domestic 401 for a token it already
 knows the home of. `client.auth.set` replaces the whole entry, so the write
-starts from the auth the host handed over and adds only those fields — the
-token stays in `key` alone. `test/plugin.test.mjs` pins the shape: one write,
-the token appears once, and fields the host already had survive.
+starts from a **fresh read** — `getAuth` again at write time, capped by what is
+left of the hook's budget — and adds only those fields; the token stays in
+`key` alone. A read that fails or does not come back is a store whose freshest
+state is unknown, and an unknown state is not written over: no write at all,
+rather than the copy from the start of the hook. `test/plugin.test.mjs` pins
+the shape: one write, the token appears once, fields the host already had
+survive, and an edit made while the hook ran is not undone.
 
 It reads one file to know when not to write: magpie keeps a user's own account
 names in `providers.json`, keyed by the label the account had when it was
@@ -77,14 +81,18 @@ Three invariants to keep when touching it:
   (`Resolve`, `Beside`, `shared`, `installed`), not a guess: the executable's
   symlinks are followed first, a Mac app's folder is the one holding the
   `.app`, an AppImage's is the one holding the `.AppImage`, and a `data`
-  folder in `/Applications`, the home folder, `Downloads`, `Desktop` or
-  `Documents` is magpie's only when it holds magpie's files and the installed
+  folder in `/Applications`, `~/Applications`, the home folder, `Downloads`,
+  `Desktop` or `Documents` is magpie's only when it holds magpie's files and the installed
   folder holds none (appdir's #989). A divergence here is not cosmetic: the
   tool reads a folder magpie does not write, and the write lands in the one
   it does.
 - **The token never appears in output — success or failure.** Long tokens show
   magpie's own mask (first four, `…`, last four); anything under 12 characters
   shows its length instead, since there would be no middle left to hide. The
+  same key in another spelling is still the key: case and full-width (`NFKC`)
+  forms are folded before the comparison, and a key broken into short groups
+  by spaces or invisible characters is joined across them — in the plugin's
+  card text and in the CLI's echoes alike. The
   failure path scrubs a child command's output too: that is the path most
   likely to echo the key back. Every key a command touches is a secret, not
   just the one in its arguments — `--to-preset` replaces the preset's key, and
@@ -236,11 +244,14 @@ versions. It is not submitted to the community marketplace.
 - **One provider, two sites, one body.** The card is `msmoli` and it serves
   both modelscope.cn and modelscope.ai; a token's site is a fact about the
   token, not a choice the user should have to make twice in two cards. Each
-  account's site is found from the token itself by `siteRead`: the read goes
-  to the domestic site first, and only a 401 sends it to the international
-  one; a transport failure is not an answer about the token either, so it
-  moves on and is what the card reports when both sites fail. The result is
-  cached per token (`sites`, bounded), so polls do not re-probe.
+  account's site is found from the token itself by `siteRead`: the read goes to
+  the domestic site first, and sends the token on whenever the site gives it
+  nothing usable — a 401, a transport failure or timeout, a 5xx, a JSON 429, a
+  body that is not JSON, or a parsed 4xx. A timeout is the link, not the site,
+  so a remembered site that hangs no longer traps the account on it. The first
+  usable answer wins, and the first answer is what the card reports when
+  neither site answers. The result is cached per token (`sites`, the last 64,
+  oldest evicted first), so polls do not re-probe.
   Everything that differs between the sites lives in a profile object —
   origin, the plan line, and the CN/INT-site word in the 401. Only
   `MsmoliPlugin` is exported: magpie's loader takes every exported function

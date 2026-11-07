@@ -546,6 +546,30 @@ test("--help exits 0 and every other exit is a number", () => {
   assert.match(bad.stderr, /不认识的参数/)
 })
 
+test("a key typed as wipe-unknown-argument is masked in every spelling", () => {
+  // The final review typed the key into a position the parser does not know.
+  // The error prints the value through arg(), and the value has no job here:
+  // there is no secret known before the store is read, and each spelling beat
+  // a different arm. Split every 8 characters: each piece under every floor.
+  // Upper-cased: the shape is ASCII-case sensitive. Full-width: NFKC is what
+  // turns it back into the key, and it is folded one code point at a time.
+  const T = "ms-" + "0123456789abcdef".repeat(2)
+  const groups = T.match(/.{1,8}/g).join(" ")
+  const wide = T.replace(/[!-~]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0))
+  for (const [name, v] of [["groups", groups], ["wide", wide], ["upper", T.toUpperCase()]]) {
+    const r = run([v])
+    assert.equal(r.status, 1, `${name}: an unknown argument is an error`)
+    const text = `${r.stdout}${r.stderr}`
+    assert.ok(!text.includes("0123456789abcdef0123456789abcdef"), `${name}: the key body reached the terminal:\n${text}`)
+    assert.ok(!text.includes(T) && !text.includes(v), `${name}: the key reached the terminal:\n${text}`)
+  }
+  // the shapes an ordinary word has must survive: this tool must not turn
+  // every argument into a mask
+  const benign = run(["ms-dos"])
+  assert.equal(benign.status, 1)
+  assert.match(`${benign.stdout}${benign.stderr}`, /ms-dos/, "a product name is not a key")
+})
+
 test("says so, rather than guessing, when there is no magpie config", () => {
   const dir = mkdtempSync(join(tmpdir(), "msmoli-empty-"))
   try {
@@ -2379,13 +2403,19 @@ test("a provider that is ours but has no key is a destination for --to-preset, a
     assert.match(forward.text, /provider key modelscope/)
     assert.doesNotMatch(forward.text, /供应商」页添加/)
 
-    // the reverse direction fills it, but only with the explicit --force
-    const bare = await run(["--to-preset"])
-    assert.equal(bare.code, 1)
+    // the reverse direction fills it: an empty preset has no key to replace,
+    // so --force (the permission to replace one chat may be using) is not
+    // asked for here
+    const bare = await run(["--to-preset"], (_cmd, argv) => {
+      writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", key: argv.at(-1) }] }))
+      return { status: 0, stdout: "ok", stderr: "" }
+    })
+    assert.equal(bare.code, 0, bare.text)
     assert.match(bare.text, /还没有 key/) // the status line says the preset is keyless
     assert.match(bare.text, /现在没有 key，会被填上/)
-    assert.match(bare.text, /--force/)
+    assert.equal(bare.text.includes(A), false, "no line may print a token")
 
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", key: "" }] }))
     const forced = await run(["--to-preset", "--force"], (_cmd, argv) => {
       // magpie writes the key into providers.json; the read-back then finds it
       writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", key: argv.at(-1) }] }))
@@ -2396,8 +2426,11 @@ test("a provider that is ours but has no key is a destination for --to-preset, a
 
     // back to the keyless state for the --from spelling
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", key: "" }] }))
-    const byId = await run(["--from", "modelscope", "--to-preset"])
-    assert.equal(byId.code, 1)
+    const byId = await run(["--from", "modelscope", "--to-preset"], (_cmd, argv) => {
+      writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", key: argv.at(-1) }] }))
+      return { status: 0, stdout: "ok", stderr: "" }
+    })
+    assert.equal(byId.code, 0, byId.text)
     assert.match(byId.text, /现在没有 key，会被填上/, `--from must find the bare provider as a destination: ${byId.text}`)
     assert.doesNotMatch(byId.text, /不是 ModelScope/)
   } finally {
@@ -3333,8 +3366,6 @@ test("planToPreset refuses a plugin token the CLI could not send", () => {
   const p = planToPreset({ preset: presetOf(B), accounts: [{ name: "msmoli", token: BAD }], force: true })
   assert.equal(p.action, "refuse")
   assert.deepEqual(p.lines, [
-    `  插件主账号：msmoli（${mask(BAD)}）`,
-    `  内置预设：modelscope，现有 key（${mask(B)}）会被整条替换。`,
     `✗ 插件里那把令牌含空格、换行或非 ASCII 字符，发不出去，不写进内置预设。`,
     `  先修好插件那边的登录（magpie plugin login msmoli）。`,
   ])
@@ -4891,8 +4922,8 @@ test("the CLI masks a 12-character piece of the secret and leaves 11 alone", asy
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
     writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
     for (const [piece, masked] of [
-      ["aaaa1111-bbb", false], // 11 alphanumeric characters
-      ["aaaa1111-bbbb", true], // 12
+      ["aaaa1111-b", false], // 9 alphanumeric characters
+      ["aaaa1111-bb", true], // 10, the shared floor
     ]) {
       const out = []
       await main({
@@ -4907,6 +4938,58 @@ test("the CLI masks a 12-character piece of the secret and leaves 11 alone", asy
       const text = out.join("\n")
       assert.equal(!text.includes(piece), masked, `${piece}: ${text}`)
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("--to-preset refuses the same unusable key on both sides", () => {
+  // Two sides holding the same key with a space in it is not a healthy state:
+  // reporting "already the same, nothing to do" was the one status line that
+  // never checked whether the key could be sent at all.
+  const BAD = "ms-bad key 0000-0000-0000-000000000000"
+  const p = planToPreset({ preset: presetOf(BAD), accounts: [{ name: "msmoli", token: BAD }], force: false })
+  assert.equal(p.action, "refuse")
+  assert.match(p.lines.join("\n"), /发不出去/)
+})
+
+test("an upper-cased ms- shape from a child is masked without knowing the key", async () => {
+  // tokenShaped is the only rule that recognises a ModelScope key by its
+  // prefix; a child that upper-cases its output printed "MS-…" past a
+  // case-sensitive pattern, and no other arm of arg()/show() covers a run of
+  // capitals with no digits in it.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-uppshape-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s) => out.push(s),
+      spawn: () => {
+        writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+        return { status: 0, stdout: "saw MS-ABCDEFGHIJKLMNOP here", stderr: "" }
+      },
+    })
+    const text = out.join("\n")
+    assert.ok(!text.includes("MS-ABCDEFGHIJKLMNOP"), `the upper-cased shape survived: ${text}`)
+    // and a full-width echo of the key itself: NFKC folds the look-alikes
+    const wide = A.replace(/[0-9a-z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).replace(/-/g, "－")
+    // The first run left the key in plugin-auth.json; with both sides equal the
+    // second run would be a no-op and never spawn, so the echo would never be
+    // printed and the assertion below would hold vacuously. Empty the file so
+    // this run really sends the key.
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out2 = []
+    await main({
+      argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+      log: (s2) => out2.push(s2),
+      spawn: () => {
+        writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+        return { status: 0, stdout: `saw ${wide} here`, stderr: "" }
+      },
+    })
+    assert.ok(!out2.join("\n").includes(wide), `the full-width echo survived: ${out2.join("\n")}`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

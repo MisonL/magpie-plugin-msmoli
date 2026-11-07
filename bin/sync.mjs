@@ -379,7 +379,20 @@ export function presetCandidates(providers, from = "", keyed = true) {
 // two, each piece under the floor, and both were printed whole. A line break
 // still ends a run — a token never spans one.
 const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
-const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]){11,}`, "gu")
+const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]){11,}`, "giu")
+// A key cut into pieces by whitespace is still one key. The value reaches the
+// unknown-argument error as one string, and the per-word judgement below sees
+// only the pieces: "ms-01234 56789abc …" came back whole. The plugin's own
+// secret is not in reach of an argument that was refused, so the shape is what
+// is left — the ms- front, the pieces' letters and digits, and the pieces
+// together. A digit is required: ms-dos is a product name, a key carries hex.
+const SPACED = /^ms-([a-z0-9]+)((?:\s+[a-z0-9]+)+)$/i
+const spacedKey = (folded) => {
+  const m = SPACED.exec(folded.trim())
+  if (!m) return false
+  const body = m[1] + m[2].replace(/\s/g, "")
+  return body.length >= 11 && /\d/.test(body)
+}
 const show = (s) =>
   String(s ?? "")
     .replace(tokenShaped, (m) => mask(m.replace(/[\p{Cc}\p{Cf}]/gu, "")))
@@ -543,10 +556,20 @@ const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g
 // each lookaround, so it is a linear pass, not the kind of scan that backtracked
 // to minutes on a body of control characters.
 const GLUE = new RegExp(String.raw`(?<=[A-Za-z0-9+\/=_.-])${INV}(?=[A-Za-z0-9+\/=_.-])`, "gu")
-const arg = (v) =>
-  show(String(v ?? "").replace(GLUE, "")).replace(/[^\s]+/g, (w) =>
-    isKey(w) ? mask(w) : w.replace(RUN, (r) => (keyRun(r) ? mask(r) : r)).replace(UUID_ANY, (m) => mask(m)),
-  )
+const arg = (v) => {
+  const s = show(String(v ?? "").replace(GLUE, ""))
+  // isKey compares ASCII, so a key written full-width or upper-cased reached the
+  // terminal through the per-word judgement. The folded copy is what the shape
+  // tests judge; the original word is what gets masked, so no second copy in
+  // the other spelling is printed.
+  const folded = s.normalize("NFKC").toLowerCase()
+  if (spacedKey(folded)) return mask(s.trim())
+  return s.replace(/[^\s]+/g, (w) => {
+    const f = w.normalize("NFKC").toLowerCase()
+    if (isKey(w) || isKey(f)) return mask(w)
+    return w.replace(RUN, (r) => (keyRun(r) ? mask(r) : r)).replace(UUID_ANY, (m) => mask(m))
+  })
+}
 
 // SENDABLE is the plugin's own test (index.mjs's tokenOf): a key with
 // anything but visible ASCII in it goes out in a Cookie/Authorization header
@@ -677,6 +700,15 @@ export function planToPreset({ preset, accounts, force }) {
     lines.push(`  要加的话：magpie provider add ${PRESET} <key>（工具不代建 provider）。`)
     return { action: "refuse", lines, cmds: [] }
   }
+  // The plugin refuses a key with anything but visible ASCII in it (tokenOf,
+  // it would go out in an Authorization header). Writing such a key into the
+  // preset would break chat requests while this tool reported success — and
+  // "both sides already hold this key" is not a healthy state to call done.
+  if (!SENDABLE.test(main.token)) {
+    lines.push(`✗ 插件里那把令牌含空格、换行或非 ASCII 字符，发不出去，不写进内置预设。`)
+    lines.push(`  先修好插件那边的登录（magpie plugin login ${ID}）。`)
+    return { action: "refuse", lines, cmds: [] }
+  }
   if (preset.key === main.token) {
     lines.push(`✓ 内置预设已用同一把令牌（${mask(main.token)}），无需操作。`)
     return { action: "noop", lines, cmds: [] }
@@ -689,14 +721,6 @@ export function planToPreset({ preset, accounts, force }) {
       ? `  内置预设：${arg(preset.id)}，现有 key（${mask(preset.key)}）会被整条替换。`
       : `  内置预设：${arg(preset.id)}，现在没有 key，会被填上。`,
   )
-  // The plugin refuses a key with anything but visible ASCII in it (tokenOf,
-  // it would go out in an Authorization header). Writing such a key into the
-  // preset would break chat requests while this tool reported success.
-  if (!SENDABLE.test(main.token)) {
-    lines.push(`✗ 插件里那把令牌含空格、换行或非 ASCII 字符，发不出去，不写进内置预设。`)
-    lines.push(`  先修好插件那边的登录（magpie plugin login ${ID}）。`)
-    return { action: "refuse", lines, cmds: [] }
-  }
   // The first argument of provider key is the id: an id starting with "-"
   // would be taken as a flag by magpie's CLI (`provider key --help <token>`
   // only prints help and writes no key).
@@ -704,12 +728,11 @@ export function planToPreset({ preset, accounts, force }) {
     lines.push(`✗ 这个 provider id 不是 magpie 接受的形状（${arg(preset.id)}），不能用 provider key 写入。`)
     return { action: "refuse", lines, cmds: [] }
   }
-  if (!force) {
-    lines.push(
-      preset.key
-        ? `✗ 内置这把 key 是聊天请求正在用的，替换会让那边跟着换。确认的话加 --force 重跑。`
-        : `✗ 还没有确认要写入。确认的话加 --force 重跑。`,
-    )
+  // --force is the permission to *replace* a key chat may be using. A preset
+  // with no key has nothing to replace: filling it is the whole point, and
+  // asking for --force there was a refusal the README never promised.
+  if (!force && preset.key) {
+    lines.push(`✗ 内置这把 key 是聊天请求正在用的，替换会让那边跟着换。确认的话加 --force 重跑。`)
     return { action: "refuse", lines, cmds: [] }
   }
   lines.push(`→ 将执行 magpie provider key ${arg(preset.id)}（令牌是该命令的参数，进程列表里短暂可见）。`)
@@ -743,7 +766,14 @@ function hidden(argv, secret, log) {
 // the text that is a contiguous substring of the secret, at least MIN_ECHO
 // characters long — below that a coincidence is likelier than an echo. It is
 // the same rule index.mjs's cardText carries, and the same reason.
-const MIN_ECHO = 12
+// the same floor as index.mjs's card mask: a piece of the secret this long is
+// an echo, and the scan starts one character past a shorter run
+const MIN_ECHO = 10
+// An echo is compared folded: NFKC (full-width look-alikes are the same
+// credential) and lower case (upper-casing a log does not make it another
+// key), letters and digits only. Comparing byte for byte let either change
+// print the whole secret.
+const fold = (s) => (typeof s === "string" ? s.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "") : "")
 function maskEchoes(s, secret) {
   if (typeof secret !== "string") return s
   // The secret's own alphanumeric run is what the scan compares against.
@@ -763,15 +793,19 @@ function maskEchoes(s, secret) {
   // restarting one position later when the run came up short — cost a run of
   // them its own length at every position it held: a child's output of 20 000
   // control characters took 79 seconds.
-  const flat = secret.replace(/[^A-Za-z0-9]/g, "")
+  const flat = fold(secret)
   if (flat.length < MIN_ECHO) return s
   const vis = []
   const at = []
+  const end = []
   for (let i = 0; i < s.length; ) {
     const c = String.fromCodePoint(s.codePointAt(i))
-    if (/[A-Za-z0-9]/.test(c)) {
-      vis.push(c)
-      at.push(i)
+    for (const f of c.normalize("NFKC").toLowerCase()) {
+      if (f >= "a" && f <= "z" || f >= "0" && f <= "9") {
+        vis.push(f)
+        at.push(i)
+        end.push(i + c.length)
+      }
     }
     i += c.length
   }
@@ -789,11 +823,11 @@ function maskEchoes(s, secret) {
       // written out first, so masking does not swallow the words around it
       out += s.slice(from, at[k])
       out += mask(secret)
-      from = at[v - 1] + vis[v - 1].length
+      from = end[v - 1]
       k = v
     } else {
-      out += s.slice(from, at[k] + vis[k].length)
-      from = at[k] + vis[k].length
+      out += s.slice(from, end[k])
+      from = end[k]
       k++
     }
   }
