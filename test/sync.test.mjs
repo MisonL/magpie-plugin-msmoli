@@ -570,6 +570,71 @@ test("a key typed as wipe-unknown-argument is masked in every spelling", () => {
   assert.match(`${benign.stdout}${benign.stderr}`, /ms-dos/, "a product name is not a key")
 })
 
+test("a key cut into pieces by spaces is masked whole, however it was cut", () => {
+  // The final review's remaining CLI leak: eight-character groups, one
+  // character per word, and a key whose body already had hyphens all printed
+  // their pieces back, because every piece sat under the per-word floor and
+  // the whole-value test demanded alphanumeric pieces only. The words are now
+  // joined before the test — that join is what tells a key apart from a
+  // sentence (a sentence does not begin with ms-).
+  const T = "ms-" + "0123456789abcdef".repeat(2)
+  const wide = (v) => v.replace(/[!-~]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0))
+  const cases = {
+    groups: "--" + T.match(/.{1,8}/g).join(" "),
+    every_char: [...T].join(" "),
+    hyphen_pieces: "--" + T.match(/.{1,8}/g).map((p, i) => (i % 2 ? p.replace(/(.{4})(.{4})/, "$1-$2") : p)).join(" "),
+    real_spaced: "ms-aaaa1111 bbbb-2222-cccc-333344445555",
+    wide_in_path: "/tmp/" + wide(T),
+    wide_groups: wide(T).match(/.{1,8}/g).join(" "),
+  }
+  for (const [name, v] of Object.entries(cases)) {
+    const r = run([v])
+    assert.equal(r.status, 1, `${name}: an unknown argument is an error`)
+    const text = `${r.stdout}${r.stderr}`.normalize("NFKC")
+    const flat = text.replace(/\s/g, "")
+    assert.ok(!flat.includes(T.replace(/\s/g, "")), `${name}: the key reached the terminal whole:\n${text}`)
+    const body = T.slice(3)
+    assert.ok(!flat.includes(body), `${name}: the key body reached the terminal:\n${text}`)
+    for (const piece of body.match(/.{8}/g)) {
+      assert.ok(!flat.includes(piece), `${name}: an 8-character piece reached the terminal:\n${text}`)
+    }
+  }
+  // and the words this must not eat: a sentence, a list of paths, ordinary
+  // text about the product
+  for (const v of ["please check --from msmoli --to preset", "--dir /tmp/foo /tmp/bar", "ms-dos is old"]) {
+    const r = run([v])
+    const text = `${r.stdout}${r.stderr}`
+    assert.ok(text.includes(v), `a benign argument was masked: ${JSON.stringify(v)}\n${text}`)
+  }
+})
+
+test("two token-shaped runs in one value are each masked, not joined into one", () => {
+  // The join above must not run across two separate keys: a poisoned provider
+  // id carrying both would be masked as one string, hiding both ends. One ms-
+  // front means one key; two means the per-word pass, which masks each run.
+  const t1 = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const t2 = "ms-zzzz9999-yyyy-8888-xxxx-777766665555"
+  const plan = planToPlugin({ preset: { key: A, id: `${t1} ${t2}` }, accounts: [], force: false })
+  const text = plan.lines.join("\n")
+  assert.ok(!text.includes(t1) && !text.includes(t2), `a token printed whole:\n${text}`)
+  assert.match(text, /ms-z…5555/, `the second should be masked by its own ends:\n${text}`)
+})
+
+test("a same-but-unsendable key is refused on the reverse noop too", () => {
+  // F8: with no main account and a secondary one carrying the preset's key,
+  // planToPreset answered noop before SENDABLE ran — the one reverse exit that
+  // called a key with a space in it "nothing to do". Both directions must
+  // refuse it, whichever side is named.
+  const bad = "ms-" + "01234567 89abcdef".repeat(2)
+  const plan = planToPreset({
+    preset: { id: "modelscope", preset: "modelscope", key: bad },
+    accounts: [{ name: "msmoli#abc123", token: bad }],
+    force: false,
+  })
+  assert.equal(plan.action, "refuse", `a same-but-unsendable key was called done: ${JSON.stringify(plan.lines)}`)
+  assert.ok(!plan.lines.join("\n").includes(bad), "the key itself is printed in the refusal")
+})
+
 test("says so, rather than guessing, when there is no magpie config", () => {
   const dir = mkdtempSync(join(tmpdir(), "msmoli-empty-"))
   try {
@@ -4151,6 +4216,35 @@ test("on Windows, a --magpie path without .exe is still checked against --dir", 
   }
 })
 
+test("a reader that closes the pipe early is not a crash", async () => {
+  // `sync --status | head -1` closes stdout after one line. Without a handler
+  // the next write raised an unhandled EPIPE and the terminal showed Node's
+  // stack instead of the plan. The tool must leave quietly; the pipeline's own
+  // reader carries the verdict.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-epipe-"))
+  try {
+    const providers = Array.from({ length: 400 }, (_, i) => ({ id: `p${i}`, chat: `https://example${i}.com`, key: `k${i}` }))
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const cli = fileURLToPath(new URL("../bin/sync.mjs", import.meta.url))
+    const r = await new Promise((resolve) => {
+      const p = spawnSync(process.execPath, [cli, "--dir", dir, "--status"], { encoding: "utf8", timeout: 30_000 })
+      resolve(p)
+    })
+    // spawnSync captures all output, so EPIPE needs a reader that goes away:
+    // run it through a shell pipeline instead
+    const out = spawnSync("/bin/sh", ["-c", `"${process.execPath}" "${cli}" --dir "${dir}" --status | head -1`], {
+      encoding: "utf8",
+      timeout: 30_000,
+    })
+    assert.equal(out.status, 0, `the pipeline failed: ${JSON.stringify(out.stderr)}`)
+    assert.ok(!/EPIPE|Unhandled 'error'/.test(out.stderr ?? ""), `the crash trace reached stderr: ${out.stderr}`)
+    assert.ok(r.status === 0 || r.status === 1, "the direct run is sane")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("a read-back that is the wrong shape is 'cannot read', not 'not found'", async () => {
   // The pre-write check recognises shapes ([], "x" and null all count as
   // unreadable); the read-back only recognises null: a plugin-auth.json that
@@ -4914,9 +5008,11 @@ test("a secret split by its own hyphen every 11 characters is still scrubbed", a
   }
 })
 
-test("the CLI masks a 12-character piece of the secret and leaves 11 alone", async () => {
-  // MIN_ECHO is the boundary both sides of the tool share; a mutation to 11
-  // would mask an ordinary short word that happens to sit in the token.
+test("the CLI masks a 10-character piece of the secret and leaves 9 alone", async () => {
+  // MIN_ECHO is the boundary both sides of the tool share; the floor is 10
+  // (lowered from 12 so an 11-character run opening a chunked echo is caught),
+  // and a mutation that drops it further would mask an ordinary short word
+  // that happens to sit in the token.
   const dir = mkdtempSync(join(tmpdir(), "msmoli-min-echo-"))
   try {
     writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))

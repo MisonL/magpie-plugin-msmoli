@@ -382,17 +382,36 @@ const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
 const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]){11,}`, "giu")
 // A key cut into pieces by whitespace is still one key. The value reaches the
 // unknown-argument error as one string, and the per-word judgement below sees
-// only the pieces: "ms-01234 56789abc …" came back whole. The plugin's own
+// only the pieces: "ms-01234 56789abc …" came back whole, and so did a key cut
+// into eight-character chunks or one character per word. The plugin's own
 // secret is not in reach of an argument that was refused, so the shape is what
-// is left — the ms- front, the pieces' letters and digits, and the pieces
-// together. A digit is required: ms-dos is a product name, a key carries hex.
-const SPACED = /^ms-([a-z0-9]+)((?:\s+[a-z0-9]+)+)$/i
+// is left — the ms- front and the pieces' letters and digits. The words are
+// joined in order before the test, because that is what the key is: the same
+// characters with the spaces taken out. The joined string must still begin
+// with ms- (after the flag's "--" or an opening quote the argument came with)
+// and the body after it must clear the plugin's token floor with a digit in it.
+// A sentence does not qualify — it does not begin with ms- — and joining is
+// what tells this case apart from a list of words that each stay short.
+const KEYCH = /[A-Za-z0-9+/=_.-]/
 const spacedKey = (folded) => {
-  const m = SPACED.exec(folded.trim())
-  if (!m) return false
-  const body = m[1] + m[2].replace(/\s/g, "")
-  return body.length >= 11 && /\d/.test(body)
+  const words = folded.trim().split(/\s+/)
+  if (words.length < 2) return false
+  const joined = words.join("")
+  // the ms- front may sit behind the flag's dashes or an opening quote-quote
+  // pair: "--ms-01234 56789abc …". Only punctuation may precede it — a letter
+  // before it means the "ms-" is part of a word, not the start of a key.
+  // exactly one ms- front: a value carrying two is two keys already, and the
+  // per-word pass masks each (masking the whole would hide both ends of a long
+  // poisoned id and say less than it knows)
+  const at = joined.search(/ms-/i)
+  if (at < 0 || joined.slice(at + 3).search(/ms-/i) >= 0) return false
+  if (/[A-Za-z0-9]/.test(joined.slice(0, at))) return false
+  const body = joined.slice(at)
+  if (!/^ms-/i.test(body)) return false
+  const rest = body.slice(3)
+  return rest.length >= 11 && /\d/.test(rest) && words.every((w) => w.length > 0)
 }
+
 const show = (s) =>
   String(s ?? "")
     .replace(tokenShaped, (m) => mask(m.replace(/[\p{Cc}\p{Cf}]/gu, "")))
@@ -567,7 +586,16 @@ const arg = (v) => {
   return s.replace(/[^\s]+/g, (w) => {
     const f = w.normalize("NFKC").toLowerCase()
     if (isKey(w) || isKey(f)) return mask(w)
-    return w.replace(RUN, (r) => (keyRun(r) ? mask(r) : r)).replace(UUID_ANY, (m) => mask(m))
+    const marks = (x) => x.replace(RUN, (r) => (keyRun(r) ? mask(r) : r)).replace(UUID_ANY, (m) => mask(m))
+    const out = marks(w)
+    // the folded copy can be key-shaped where the original is not — a token
+    // written in full width has no ASCII runs and no ASCII path prefix, so the
+    // passes above saw a word of ordinary text. When the folded copy would be
+    // masked, the word is masked whole: mapping the mask back onto the
+    // original spelling is not something NFKC can promise, and the whole word
+    // is what the user typed anyway.
+    if (out === w && (marks(f) !== f || f.match(tokenShaped))) return mask(w)
+    return out
   })
 }
 
@@ -687,6 +715,16 @@ export function planToPreset({ preset, accounts, force }) {
     // read as "your plugin is signed out" while --to-plugin answers "nothing
     // to do" for the very same pair of files.
     const same = preset && accounts.find((a) => a.token && a.token === preset.key)
+    // SENDABLE runs before the noop, here as in planToPlugin: two sides that
+    // hold the same unusable key are "the same", and noop would call that
+    // healthy. A key with a space in it cannot be sent at all, whichever side
+    // it came from — this is the reverse direction's only early exit, and the
+    // main-account and forward paths refuse it.
+    if (same && preset && !SENDABLE.test(preset.key)) {
+      lines.push(`✗ 两边是同一把令牌，但它含空格、换行或非 ASCII 字符，发不出去。`)
+      lines.push(`  先修好内置那边的 key（magpie provider key ${arg(preset.id)} <key>），或重新登录插件。`)
+      return { action: "refuse", lines, cmds: [] }
+    }
     if (same) {
       lines.push(`✓ 插件的 ${arg(same.name)} 已与内置预设用同一把令牌（${mask(same.token)}），无需操作。`)
       return { action: "noop", lines, cmds: [] }
@@ -1214,6 +1252,14 @@ export function isMain(entry = process.argv[1], self = import.meta.url, stat = s
 }
 
 if (isMain()) {
+  // `sync --status | head -1` closes the pipe after the first line: without a
+  // handler the EPIPE arrives as an unhandled error event and the crash trace
+  // — not the plan — is what the user sees. Exiting quietly is what a shell
+  // pipeline means; head's own exit code carries the verdict.
+  process.stdout.on("error", (e) => {
+    if (e && e.code === "EPIPE") process.exit(0)
+    throw e
+  })
   // process.exit() while stdout is a pipe drops whatever is still buffered:
   // a long plan or a big `--status` list would lose its tail — including the
   // ✓ line — and still exit 0. Setting the exit code lets the loop drain the

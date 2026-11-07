@@ -37,6 +37,14 @@ rather than the copy from the start of the hook. `test/plugin.test.mjs` pins
 the shape: one write, the token appears once, fields the host already had
 survive, and an edit made while the hook ran is not undone.
 
+One window is left open by the host's contract: `auth.set` has no
+compare-and-set, so an edit that lands *after* the fresh read returns and
+*before* the write takes the store is overwritten by the write, which carries
+the read's copy. Closing it needs a conditional write or a merged update from
+magpie's side — another external re-read only makes the window narrower. The
+practical exposure is a nickname or `site` field landing beside a key change
+made in that same sub-second; it does not touch the token itself.
+
 It reads one file to know when not to write: magpie keeps a user's own account
 names in `providers.json`, keyed by the label the account had when it was
 named, and the write-back changes that label. An account the user has named is
@@ -249,8 +257,10 @@ versions. It is not submitted to the community marketplace.
   nothing usable — a 401, a transport failure or timeout, a 5xx, a JSON 429, a
   body that is not JSON, or a parsed 4xx. A timeout is the link, not the site,
   so a remembered site that hangs no longer traps the account on it. The first
-  usable answer wins, and the first answer is what the card reports when
-  neither site answers. The result is cached per token (`sites`, the last 64,
+  usable answer wins. When neither site gives one, a parsed 4xx/5xx (a
+  risk-control 403, say) is preferred as the report over the other site's
+  transport error; only when neither site answered at all does the first
+  failure come back. The result is cached per token (`sites`, the last 64,
   oldest evicted first), so polls do not re-probe.
   Everything that differs between the sites lives in a profile object —
   origin, the plan line, and the CN/INT-site word in the 401. Only

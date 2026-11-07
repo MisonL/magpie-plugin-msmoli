@@ -4899,6 +4899,34 @@ test("a ledger whose data is a list of rows is refused, not read as empty", asyn
   )
 })
 
+test("a day of other credits and no check-in reward is settled, not promised a re-check", async () => {
+  // before noon, today's page carries a daily-rule row that is not
+  // daily_active: the touch granted nothing and there is no daily_active to
+  // wait for. The old wording said "half an hour later" while the branch
+  // returns no `until` — the host settles the day on it — so the line promised
+  // a re-check that never comes and the user waited for a claim that was never
+  // going to appear.
+  const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10)
+  const ledger = {
+    "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+      body: {
+        success: true,
+        data: {
+          records: [{ gmt_created: today, type: "EARN", rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50 }],
+        },
+      },
+    },
+    "/api/v1/users/login/info": { body: { success: true, data: { NickName: "Mison" } } },
+  }
+  await withWindow(false, `${today} 09:00:00`, async () => {
+    const r = await withFetch(ledger, () => auth.checkin(async () => ({ type: "api", key: "ms-noreward-0001" })))
+    assert.equal(r.outcome, "inactive", JSON.stringify(r))
+    assert.equal(r.until, undefined, "this answer settles the day and must not promise a re-check")
+    assert.ok(!/半小时后再核对/.test(r.message), `the line promises a re-check that will not happen: ${r.message}`)
+    assert.match(r.message, /账号可能不在活动范围/)
+  })
+})
+
 test("a grant that was already there is not reported as this run's claim", async () => {
   // today's aliyun_bindlogin granted by the website, daily_active not yet:
   // the touch grants nothing new, and the old reading counted the pre-existing
@@ -6944,8 +6972,12 @@ test("the request timer is armed with the request's whole budget", async (t) => 
     assert.equal(r.outcome, "failed", "the request never answered")
     assert.match(r.message, /请求超时（8 秒）/, `the timeout says the budget it used: ${r.message}`)
     assert.ok(delays.length > 0, "a timer was armed at all")
+    // The hook's own budget is armed too (25s): the first getAuth waits on the
+    // host's lock, and that wait is this hook's time. Every other timer is a
+    // request's 8s.
+    assert.equal(delays.filter((ms) => ms === 25_000).length, 1, `the hook's budget is one timer: ${JSON.stringify(delays)}`)
     assert.ok(
-      delays.every((ms) => ms === 8000),
+      delays.filter((ms) => ms !== 25_000).every((ms) => ms === 8000),
       `every request is armed with the budget, not with no delay at all: ${JSON.stringify(delays)}`,
     )
   } finally {
@@ -9064,9 +9096,16 @@ test("a budget already spent caps the wait for the write-back", async () => {
   // that lets the whole 3s go by cannot tell the two apart; this one leaves
   // the hook a few hundred milliseconds and pins that the answer comes back
   // in about that.
+  // anchored on the clock the suite runs under (the shifted mode moves it to
+  // 2030) and advanced by performance.now() — real, monotonic elapsed time.
+  // The ticking-clock run moves every Date.now() read from a test by a second
+  // and wraps every 60 reads; a wrap between arming the budget and spending
+  // it flipped the expected 500ms into a full 3s.
   const realNow = Date.now
+  const t0 = performance.now()
+  const at0 = Date.now()
   let skew = 0
-  Date.now = () => realNow() + skew
+  Date.now = () => at0 + (performance.now() - t0) + skew
   try {
     await withNameDir("msmoli-shortbudget-", async (_, writes, dir) => {
       const real2 = globalThis.fetch
@@ -9095,6 +9134,55 @@ test("a budget already spent caps the wait for the write-back", async () => {
         const ms = performance.now() - started
         assert.equal(r.outcome, "done", `the claim landed and is answered: ${r.message}`)
         assert.ok(ms < 2000, `the write held the hook past its budget: ${ms}ms`)
+      } finally {
+        globalThis.fetch = real2
+      }
+    })
+  } finally {
+    Date.now = realNow
+  }
+})
+
+test("a hanging fresh read is capped by the budget, not by the fixed wait", async () => {
+  // The write-back re-reads the sign-in before writing; that read takes the
+  // host's store lock and can hang. Its cap is min(WRITE_WAIT_MS, what is left
+  // of the hook budget) — the same rule as the write's. A cap that ignored the
+  // budget (a fixed 3s) would hold a hook with 500ms left for 3 more seconds,
+  // past the number the README promises. Measured on the wall clock, because
+  // the injected skew is what makes the budget small and would also distort a
+  // Date.now-based measurement.
+  // same anchor-and-advance as the write-cap test above: the ticking-clock
+  // shim drifts every Date.now() read from a test, and the shifted mode moves
+  // the clock to another year — neither may sit between arming the budget and
+  // spending it
+  const realNow = Date.now
+  const t0 = performance.now()
+  const at0 = Date.now()
+  let skew = 0
+  Date.now = () => at0 + (performance.now() - t0) + skew
+  try {
+    await withNameDir("msmoli-readcap-", async (client, writes) => {
+      const real2 = globalThis.fetch
+      globalThis.fetch = async (url) => {
+        const path = new URL(url).pathname
+        if (path.endsWith("login/info")) {
+          skew += 24_500 // the reads ate the budget; ~500ms is left
+          return reply({ body: { Code: 200, Success: true, Data: { NickName: "Cap" } } })
+        }
+        return reply({ body: { success: true, data: { records: [day()] } } })
+      }
+      let calls = 0
+      try {
+        const started = performance.now()
+        const r = await client.auth.checkin(async () => {
+          calls += 1
+          if (calls === 1) return { type: "api", key: "ms-readcap-0000-0000-000000000001" }
+          return new Promise(() => {}) // the store lock, held elsewhere
+        })
+        const ms = performance.now() - started
+        assert.equal(r.outcome, "done", `the claim landed and is answered: ${r.message}`)
+        assert.ok(ms < 1500, `a hanging fresh read held the hook ${ms}ms with 500ms of budget left`)
+        assert.deepEqual(writes, [], `a read that never answered was written over: ${JSON.stringify(writes)}`)
       } finally {
         globalThis.fetch = real2
       }
@@ -9237,28 +9325,50 @@ test("an upper-cased, full-width or chunked nickname is refused and masked", asy
   // plugin-auth.json as accountId, where the card's mask does not reach — and
   // the chunked form ("ms-0123abcd4567x 89ef…") leaves pieces each under the
   // mask's floor while spelling the key once the filler is dropped.
-  const token = "ms-nickform-1111-2222-3333-444455556666"
-  const upper = token.toUpperCase()
-  const wide = token.replace(/[0-9a-z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).replace(/-/g, "－")
-  const chunked = token.slice(3).match(/.{1,11}/g).join("x ")
-  for (const [name, nick] of [["upper", upper], ["wide", wide], ["chunked", chunked]]) {
+  //
+  // One token per spelling, and the login/info read is counted: `names` is
+  // keyed by token, so reusing one token made every case after the first ride
+  // the cache and never read its own nickname — the loop passed on whichever
+  // fixture came first. The usage read needs its balance answer too, or a 404
+  // leaves `u.user` undefined and "the card stayed empty" passes for the wrong
+  // reason.
+  for (const [name, make] of [
+    ["upper", (t) => t.toUpperCase()],
+    ["wide", (t) => t.replace(/[0-9a-z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).replace(/-/g, "－")],
+    ["chunked", (t) => t.slice(3).match(/.{1,11}/g).join("x ")],
+  ]) {
+    const token = `ms-nickform-${name}-2222-3333-444455556666`.slice(0, 44)
+    const nick = make(token)
     const dir = tmpDir("msmoli-nickform-")
     writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
     const saved = process.env.MAGPIE_MSMOLI_CONFIG
     delete process.env.MAGPIE_MSMOLI_CONFIG
     const writes = []
+    let reads = 0
     const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
     try {
       await withFetch(
         {
           "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
           "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+          [BALANCE_PATH]: { body: { success: true, data: { available_balance: 0 } } },
         },
         async () => {
-          const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
-          assert.equal(c.outcome, "done", c.message)
-          const u = await p.auth.usage(async () => ({ type: "api", key: token }))
-          assert.equal(u.user ?? "", "", `${name}: the echo reached the card: ${JSON.stringify(u.user)}`)
+          const real = globalThis.fetch
+          globalThis.fetch = async (url, init) => {
+            if (new URL(url).pathname.endsWith("login/info")) reads += 1
+            return real(url, init)
+          }
+          try {
+            const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+            assert.equal(c.outcome, "done", c.message)
+            assert.ok(reads >= 1, `${name}: the nickname fixture was never read`)
+            const u = await p.auth.usage(async () => ({ type: "api", key: token }))
+            assert.ok(!u.error, `${name}: the card read failed before it could be judged: ${JSON.stringify(u)}`)
+            assert.equal(u.user, "", `${name}: the echo reached the card: ${JSON.stringify(u.user)}`)
+          } finally {
+            globalThis.fetch = real
+          }
         },
       )
       assert.deepEqual(writes, [], `${name}: the echo became the accountId: ${JSON.stringify(writes)}`)
@@ -9286,7 +9396,12 @@ test("a remembered site that times out or answers 4xx still tries the other one"
     const real = globalThis.fetch
     try {
       for (const [name, fail] of [
-        ["timeout", () => { throw new TypeError("fetch failed") }],
+        // a real timeout, not a transport error: saidFailure words anything
+        // matching /timeout/i as one, and it is the error siteRead's catch was
+        // widened for. A TypeError answered "network", which is a different
+        // path and let a "stop on timeout" regression pass this fixture.
+        ["timeout", () => { throw new Error("timeout") }],
+        ["transport", () => { throw new TypeError("fetch failed") }],
         ["4xx", () => reply({ status: 404, body: { success: false, message: "not found" } })],
       ]) {
         testables.sites.set(token, testables.CN) // the phase under test starts on the domestic site
@@ -9448,6 +9563,32 @@ test("a cycle of pages is not summed twice, and the card says the walk fell shor
   }
 })
 
+test("a streak walk cannot be filled out by a page the day walk already read", async () => {
+  // F2: page 2 repeats page 2's own rows when the walk goes on. The day walk
+  // has counted today's and yesterday's grants (100 distinct rows against a
+  // total of 150); the streak walk then asks for page 3, gets that same page
+  // again, and — without sharing what the day walk saw — counts it as the
+  // missing 50 rows, calling the ledger whole and the run two days long off a
+  // page that carries nothing new.
+  const token = "ms-streakshared-0000-0000-0000-000000000667"
+  const P = [day(), ...Array.from({ length: 49 }, (_, i) => spend(1, 1, today, `p${i}`))]
+  const Y = (rows) => rows.map((r) => ({ ...r, gmt_created: yesterday }))
+  const Q = Y([day({ rule_key: "daily_active" }), ...Array.from({ length: 49 }, (_, i) => spend(1, 1, today, `q${i}`))])
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    const page = Number(u.searchParams.get("page"))
+    return reply({ body: { success: true, data: { total: 150, records: page === 1 ? P : Q } } })
+  }
+  try {
+    const c = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(c.streak, undefined, `a repeated page completed the run: ${JSON.stringify(c)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("a page repeated in the streak walk leaves the streak unsaid", async () => {
   const token = "ms-streakcycle-0000-0000-0000-000000000666"
   const first = [day(), ...Array.from({ length: 49 }, (_, i) => spend(1, 1, today, `c${i}`))]
@@ -9482,6 +9623,33 @@ test("a total below the rows it sits beside does not confirm a short page", asyn
     const c = await auth.checkin(async () => ({ type: "api", key: token }))
     assert.equal(c.outcome, "done", `the contradicted page ended the walk before the grant: ${JSON.stringify(c)}`)
     assert.equal(c.credit, 200, JSON.stringify(c))
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("an extra page whose total is below its rows is not the end of the ledger", async () => {
+  // The first page prints total 51 above its 50 rows; page 2 carries today's
+  // grant and prints total 0 beside it — the server contradicting itself on
+  // the page it is asked to trust. The walk used to add those rows and call
+  // the ledger whole, answering done 200 for a day whose page was refuted by
+  // its own number. A contradicted page proves nothing, so the walk cannot
+  // finish and the answer is failed, not a claim.
+  const token = "ms-contraextra-0000-0000-0000-000000000303"
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    if (u.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 0 } } })
+    const page = Number(u.searchParams.get("page") ?? 1)
+    if (page === 1)
+      return reply({ body: { success: true, data: { total: 51, records: Array.from({ length: 50 }, (_, i) => spend(1, i + 1, today)) } } })
+    return reply({ body: { success: true, data: { total: 0, records: [day()] } } })
+  }
+  try {
+    const c = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(c.outcome, "failed", `a contradicted extra page was read as the end: ${JSON.stringify(c)}`)
+    assert.equal(c.credit, undefined, `the refuted page's grant was reported as claimed: ${JSON.stringify(c)}`)
   } finally {
     globalThis.fetch = real
   }
@@ -9568,6 +9736,55 @@ test("a claim that lands after midnight is the new day's grant", async () => {
   }
 })
 
+test("a day already claimed before midnight answers the new day's grant", async () => {
+  // The other half of the midnight case: the day's grant was already on the
+  // ledger when the hook started (claimed), and the touch into login/info
+  // crosses midnight. The old code used the pre-midnight baseline and the
+  // pre-midnight day, so the new day's 250 read as "today 250" with the old
+  // day's streak — the new day was settled without being claimed.
+  const token = "ms-midnightclaimed-0000-0000-000000000777"
+  const realNow = Date.now
+  const base = Date.parse("2026-11-06T15:59:59.800Z") // 23:59:59.800 +08
+  let crossed = false
+  Date.now = () => base + (crossed ? 2500 : 0)
+  const row = (on, amount) => ({ gmt_created: on, type: "EARN", rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: amount })
+  const realFetch = globalThis.fetch
+  let reads = 0
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) {
+      crossed = true
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    reads += 1
+    // the first read is the pre-midnight baseline: today (the 6th) already has
+    // its grant plus a bind bonus. Every later read is the new day: its own
+    // daily 200, its bind bonus, and the old day's grant is still on page 1.
+    const rows = reads === 1
+      ? [day({ gmt_created: "2026-11-06" }), row("2026-11-06", 50)]
+      : [
+          { gmt_created: "2026-11-07", type: "EARN", rule_key: "daily_active", title: "注册并登录", total_amount: 200 },
+          row("2026-11-07", 50),
+          day({ gmt_created: "2026-11-06" }),
+          row("2026-11-06", 50),
+        ]
+    return reply({ body: { success: true, data: { total: rows.length, records: rows } } })
+  }
+  try {
+    const c = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.ok(reads >= 2, `the day walk was not redone for the new day: ${reads} read(s)`)
+    assert.equal(c.outcome, "claimed", JSON.stringify(c))
+    // both of the new day's daily grants (the check-in 200 and a bind bonus
+    // 50) are this run's: the baseline was the old day's, so nothing in the
+    // new day can be an older grant
+    assert.equal(c.credit, 250, `the new day's grant was not reported as this run's: ${JSON.stringify(c)}`)
+    assert.equal(c.streak, 2, `the streak was anchored on the old day: ${JSON.stringify(c)}`)
+  } finally {
+    Date.now = realNow
+    globalThis.fetch = realFetch
+  }
+})
+
 test("a day whose only grant is the Aliyun one is not described as no grant", async () => {
   const token = "ms-aliyunonly-0000-0000-0000-000000001010"
   const row = { gmt_created: today, type: "EARN", rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50 }
@@ -9612,14 +9829,318 @@ test("an impossible calendar date does not end the ledger or streak walk", async
 })
 
 test("a streak walk over an impossible stamp keeps going", () => {
+  // "2026-02-30" has the day shape but names a date that does not exist; a
+  // shape-only check read it as older than the gap and ended the run on the
+  // spot. The rows in hand are fewer than `total`, so a real break can only
+  // come from a row the walk can see — and this row is not one. The correct
+  // walk reads the next page and finds yesterday-2, for a run of 3; the
+  // shape-only check answers 2 without reading anything.
   const rows = [
     { gmt_created: today, type: "EARN", rule_key: "daily_active" },
     { gmt_created: daysBack(1), type: "EARN", rule_key: "daily_active" },
     { gmt_created: "2026-02-30", type: "SPEND_CONFIRM" },
   ]
-  // no readPage needed: the impossible stamp must not read as older than the
-  // gap, so the walk stops with the two days it can see rather than one
-  // total equals the rows in hand, so the walk is allowed to end here; the
-  // impossible stamp must not be the thing that ends it
-  return streakOf(rows, today, 3, null, Infinity).then((n) => assert.equal(n, 2, `streak ${n}`))
+  let reads = 0
+  const readPage = async () => {
+    reads += 1
+    return [{ gmt_created: daysBack(2), type: "EARN", rule_key: "daily_active" }]
+  }
+  return streakOf(rows, today, 4, readPage, Infinity).then((n) => {
+    assert.equal(reads, 1, `the impossible stamp ended the walk early (reads ${reads})`)
+    assert.equal(n, 3, `streak ${n}`)
+  })
+})
+
+// ── Round forty-one: the sixth review's findings, each pinned ───────────────
+// The final review's leak was a key cut into pieces the mask's floor did not
+// reach; its correctness findings were a ledger summed around a moving window,
+// a 401 absorbed by the walks that run after a claim, and a budget that did
+// not cover the first getAuth. Each has a fixture here that fails without the
+// guard.
+
+test("a key broken into eight-character pieces and joined by a letter is masked", async () => {
+  const token = "ms-eighthchunk-0000-0000-0000-000000abcd"
+  const body = token.slice(3)
+  const echo = body.match(/.{1,8}/g).join("x ")
+  for (const where of ["title", "error"]) {
+    const responses =
+      where === "title"
+        ? {
+            "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+            [TX_PATH]: { body: { success: true, data: { records: [day({ title: echo })], total: 1 } } },
+          }
+        : { [BALANCE_PATH]: { status: 500, body: { success: false, message: `bad ${echo} end` } } }
+    const out = await withFetch(responses, async () => {
+      if (where === "title") return (await auth.checkin(async () => ({ type: "api", key: token }))).message
+      return (await auth.usage(async () => ({ type: "api", key: token }))).error
+    })
+    assert.ok(!out.includes(echo), `${where}: the joined pieces reached the text: ${out}`)
+    assert.ok(!out.includes("01234567x"), `${where}: a piece survived: ${out}`)
+    assert.match(out, /ms-e…abcd/, `${where}: it is masked as the key: ${out}`)
+  }
+})
+
+test("a nickname that hides the key behind a leading stray letter is refused", async () => {
+  // The forward greedy walk takes the leading f at the token's last position
+  // and the rest of the body has nowhere to go after it; the backward walk
+  // reads the same letters and finds the body.
+  const H = "0123456789abcde0".repeat(2).slice(0, 31) + "f"
+  const token = "ms-" + H
+  const nick = "f " + H.match(/.{1,8}/g).join("x ")
+  const dir = tmpDir("msmoli-trapped-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const writes = []
+  const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+  try {
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
+        [TX_PATH]: { body: { success: true, data: { records: [day()], total: 1 } } },
+      },
+      async () => {
+        const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(c.outcome, "done", c.message)
+        assert.deepEqual(writes, [], `the trapped echo became the account name: ${JSON.stringify(writes)}`)
+        const u = await p.auth.usage(async () => ({ type: "api", key: token }))
+        assert.equal(u.user ?? "", "", `the trapped echo reached the card: ${u.user}`)
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a nickname that is another key in full width is refused", async () => {
+  const token = "ms-wideforeign-0000-0000-0000-000000abcd"
+  const other = "ms-" + "fedcba9876543210".repeat(2)
+  const wide = other.replace(/[!-~]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0))
+  const dir = tmpDir("msmoli-wideforeign-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const writes = []
+  const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+  try {
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: wide } } },
+        [TX_PATH]: { body: { success: true, data: { records: [day()], total: 1 } } },
+      },
+      async () => {
+        const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(c.outcome, "done", c.message)
+        assert.deepEqual(writes, [], `another key in full width became the account name: ${JSON.stringify(writes)}`)
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ordinary names still reach the card and are written back", async () => {
+  // The guards above must not eat the names users actually pick; the review
+  // measured "MisonLiangWithALongName" being masked on the card and
+  // "WangXiaoming2026" being refused as an account name.
+  const cases = [
+    ["ms-namecamel-0000-0000-0000-000000abcd", "MisonLiangWithALongName"],
+    ["ms-namepinyin-0000-0000-0000-000000ab", "WangXiaoming2026"],
+    ["ms-namewords-0000-0000-0000-000000abc", "Rebecca Deborah Bradford"],
+  ]
+  for (const [token, nick] of cases) {
+    const dir = tmpDir("msmoli-nameok-")
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    const saved = process.env.MAGPIE_MSMOLI_CONFIG
+    delete process.env.MAGPIE_MSMOLI_CONFIG
+    const writes = []
+    const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    try {
+      await withFetch(
+        {
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
+          [TX_PATH]: { body: { success: true, data: { records: [day()], total: 1 } } },
+          [BALANCE_PATH]: { body: { success: true, data: { available_balance: 0 } } },
+        },
+        async () => {
+          const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+          assert.equal(c.outcome, "done", c.message)
+          assert.equal(writes[0]?.body?.accountId, nick, `${nick} was not written back`)
+          const u = await p.auth.usage(async () => ({ type: "api", key: token }))
+          assert.equal(u.user, nick, `${nick} was masked on the card: ${JSON.stringify(u)}`)
+        },
+      )
+    } finally {
+      if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+      else process.env.MAGPIE_MSMOLI_CONFIG = saved
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test("a page repeated with its fields in another order is the same page", async () => {
+  // JSON.stringify keeps insertion order, so a server that serialises the same
+  // rows with the keys in a different order made them read as new pages and
+  // new rows: 49 spends were summed to 98. Identity has to sort the keys, not
+  // trust the wire format. The server here prints total 100 while every page
+  // after the first repeats the first — the honest answer is the 49 spends it
+  // could see, with the ledger marked as not fully read.
+  const token = "ms-fieldorder-0000-0000-0000-000000abcd"
+  const rows = [day(), ...Array.from({ length: 49 }, (_, i) => spend(1, i + 1, today))]
+  const reversed = rows.map((r) => Object.fromEntries(Object.entries(r).reverse()))
+  const u = await withFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 0 } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      [TX_PATH]: { body: { success: true, data: { records: rows, total: 100 } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: reversed, total: 100 } } },
+    },
+    () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  const shown = u.windows?.[0]?.display ?? ""
+  assert.match(shown, /今日用 49 /, `the same rows in another field order were summed again: ${shown}`)
+})
+
+test("a page shifted between reads is not summed twice", async () => {
+  // The server moving its window: the same grant sits at the bottom of one
+  // page and the top of the next. The pages are not identical (a whole-page
+  // stamp would not fire), so only per-row identity can see the repeat — and
+  // without it the day's grant is counted twice and the card reads 领 400.
+  const token = "ms-shiftedpg-0000-0000-0000-000000abcd"
+  const p1 = [day(), ...Array.from({ length: 48 }, (_, i) => spend(0, 1, today, `s${i}`)), spend(0, 1, today, "tail")]
+  const p2 = [day(), spend(0, 1, today, "n50")]
+  const u = await withFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 0 } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      [TX_PATH]: { body: { success: true, data: { records: p1, total: 51 } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: p2, total: 51 } } },
+    },
+    () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.match(u.windows?.[0]?.display ?? "", /领 200/, `the same grant was counted twice: ${JSON.stringify(u)}`)
+})
+
+test("a full page whose total is reached needs no next page", async () => {
+  const token = "ms-fulltotal-0000-0000-0000-000000abcd"
+  const rows = [day(), ...Array.from({ length: 49 }, (_, i) => spend(0, 1, today))]
+  const c = await withFetch(
+    {
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      [TX_PATH]: { body: { success: true, data: { records: rows, total: 50 } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { status: 500, body: { success: false } },
+    },
+    () => auth.checkin(async () => ({ type: "api", key: token })),
+  )
+  assert.equal(c.outcome, "done", JSON.stringify(c))
+  assert.ok(!String(c.message).includes("未读完"), `a complete ledger was called incomplete: ${c.message}`)
+})
+
+test("an unparseable 401 is the path, not the sign-in", async () => {
+  // A proxy's HTML 401 is not ModelScope refusing the token; signing the
+  // account out over it would tell the user to re-authenticate for a network
+  // problem.
+  const token = "ms-html401-0000-0000-0000-0000000abcd"
+  const p = await withFetch({ [BALANCE_PATH]: { status: 401, raw: "<html>proxy auth required</html>" } }, () =>
+    auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.ok(p.error, "the refusal still reaches the card")
+  assert.notEqual(p.signIn, "expired", `a proxy challenge signed the account out: ${JSON.stringify(p)}`)
+})
+
+test("a 401 on the name lookup after the claim is reported too", async () => {
+  // The name lookup runs after the day's answer was computed; its 401 was
+  // swallowed by the catch, so a re-keyed sign-in was announced only on the
+  // next ask. The claim stands — but the host must hear the token was refused.
+  const token = "ms-name401-0000-0000-0000-0000000abcd"
+  const c = await withFetch(
+    {
+      "/api/v1/users/login/info": { status: 401, body: { success: false, message: "expired" } },
+      [TX_PATH]: { body: { success: true, data: { records: [day()], total: 1 } } },
+    },
+    () => auth.checkin(async () => ({ type: "api", key: token })),
+  )
+  assert.equal(c.outcome, "done", JSON.stringify(c))
+  assert.equal(c.signIn, "expired", `the confirmed expiry was swallowed: ${JSON.stringify(c)}`)
+})
+
+test("a 401 met after the claim is reported without undoing it", async () => {
+  // The streak walk and the name lookup run after the credit landed; a 401
+  // there is still the token refused, and the host must hear it — but the
+  // day's answer stands.
+  const token = "ms-late401-0000-0000-0000-0000000abcd"
+  const first = [day(), ...Array.from({ length: 49 }, (_, i) => spend(0, 1, today))]
+  const second = [day({ gmt_created: yesterday }), ...Array.from({ length: 49 }, (_, i) => spend(0, 1, yesterday))]
+  const c = await withFetch(
+    {
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      [TX_PATH]: { body: { success: true, data: { records: first, total: 150 } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: second, total: 150 } } },
+      "/openapi/v1/magicubes/transactions?page=3&page_size=50": { status: 401, body: { success: false, message: "expired" } },
+    },
+    () => auth.checkin(async () => ({ type: "api", key: token })),
+  )
+  assert.equal(c.outcome, "done", JSON.stringify(c))
+  assert.equal(c.signIn, "expired", `the confirmed expiry was swallowed: ${JSON.stringify(c)}`)
+})
+
+test("a sign-in that never answers is cut at the hook's own budget", { timeout: 15000 }, async () => {
+  // The budget starts when the hook does, so the first getAuth is inside it:
+  // a store lock held by another process could otherwise hold the sign-in
+  // for longer than the whole hook is allowed to run, and the host's answer
+  // would arrive after the number the README promises. A clock shift is not
+  // enough to show this — the bound is armed with what is left at the moment
+  // getAuth is called — so a hand-advanced timer stands in for the 25s.
+  const clock = fakeClock()
+  let fetches = 0
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async () => {
+    fetches += 1
+    return reply({ body: { success: true } })
+  }
+  clock.install()
+  try {
+    const pending = auth.checkin(() => new Promise(() => {}))
+    await new Promise((resolve) => setImmediate(resolve))
+    clock.tick(25_001)
+    const c = await Promise.race([
+      pending,
+      new Promise((resolve) => clock.real(() => resolve("still waiting"), 200)),
+    ])
+    assert.notEqual(c, "still waiting", "the sign-in was never cut short")
+    assert.equal(c.outcome, "failed", JSON.stringify(c))
+    assert.match(c.message, /读取登录信息超时/, `the sign-in was not the thing cut short: ${c.message}`)
+    assert.equal(fetches, 0, "the hook touched the network before it had a sign-in")
+  } finally {
+    clock.restore()
+    globalThis.fetch = realFetch
+  }
+})
+
+test("a budget already gone writes nothing back", async () => {
+  const token = "ms-nowrite0-0000-0000-0000-0000000abcd"
+  const realNow = Date.now
+  const base = realNow()
+  const writes = []
+  Date.now = () => base
+  try {
+    const p = await MsmoliPlugin({ directory: tmpDir("msmoli-nowrite-"), client: { auth: { set: async (o) => writes.push(o) } } })
+    globalThis.fetch = async (url) => {
+      const u = new URL(url)
+      if (u.pathname.endsWith("/login/info")) {
+        Date.now = () => base + 30_000
+        return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+      }
+      return reply({ body: { success: true, data: { records: [day()], total: 1 } } })
+    }
+    await p.auth.checkin(async () => ({ type: "api", key: token }))
+  } finally {
+    Date.now = realNow
+    globalThis.fetch = undefined
+  }
+  assert.deepEqual(writes, [], `a spent budget still took the store lock: ${JSON.stringify(writes)}`)
 })

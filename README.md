@@ -214,9 +214,10 @@ WSL). npm 12 blocks `npx github:…` by default, so don't start from that.
 
 `npx`, `magpie plugin add magpie-plugin-msmoli` and `magpie plugin update` all
 follow the npm package, and the npm package still serves **0.2.0** — the last
-release, which kept the international site in a second provider and has
-neither this CLI nor this round of fixes. Run it from a clone to get what this
-document describes.
+release. That version does ship an older `bin/sync.mjs` with both directions,
+but it keeps the international site in a second provider, and it predates this
+round of fixes (chunked echoes, the row-level ledger dedupe, the budgets). Run
+it from a clone to get what this document describes.
 
 It syncs the **domestic site only**: the built-in preset it reads is the
 `modelscope.cn` one. Sign an international account in by hand.
@@ -417,10 +418,12 @@ Every request goes to the account's own site (`modelscope.cn` or
 The ledger's `type` has been seen as `EARN` and `SPEND_CONFIRM`; there is also
 an `EXPIRE`, which the plugin ignores. Rows are aggregated per day, type,
 `rule_key` and `model_tier`, with a `count` on each, and sorted newest first.
-The ordering is what makes one page of 50 enough: today's rows always come
-first. A live account shows 3–7 rows a day, so a page reaches back about a
-fortnight; what it would not survive is a single day with more than 50 rows.
-Asking for more doesn't help: the server answers `page_size=200` with 50.
+The ordering is what makes the first page enough in the common case: today's
+rows always come first. A live account shows 3–7 rows a day, so a page reaches
+back about a fortnight. A single day with more than 50 rows is followed onto
+the next page (up to `DAY_PAGES` extra pages), and a walk that cannot finish is
+answered with the numbers it saw and marked `未读完`. Asking for a bigger page
+doesn't help: the server answers `page_size=200` with 50.
 
 </details>
 
