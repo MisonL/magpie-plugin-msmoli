@@ -1,6 +1,6 @@
 {
   "name": "magpie-plugin-msmoli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "ModelScope daily credits check-in and balance for magpie, for modelscope.cn and modelscope.ai — one check-in a day instead of opening the site",
   "author": "MisonL",
   "type": "module",
