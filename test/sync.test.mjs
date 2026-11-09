@@ -5280,3 +5280,40 @@ test("a key written with a full-width hyphen-months is masked", () => {
   assert.ok(!shown.replace(/[^A-Za-z0-9]/g, "").includes("msforeign0123456789abcdef0123456789abcdef"), `the key reached the terminal: ${shown}`)
   assert.ok(shown.includes("－"), `the mask should keep the value's own spelling: ${shown}`)
 })
+
+// ── Round twelve: framed middot pieces, long shaped heads, and the CLI's cost ──
+test("a middot-cut key behind a frame's punctuation is masked in arg() too", () => {
+  // The review's card matrix found the CLI's run reading started at the frame
+  // word ("(AK·IA·…", "key=123e·…") and read a long head piece as prose
+  // ("AKIAIOS·FODNN7E·XAMPLE"). Both now start at the material behind the frame.
+  const cases = [
+    "(AK·IA·IO·SF·OD·NN·7E·XA·MP·LE)",
+    "key=AKIAIOS·FODNN7E·XAMPLE.",
+    "(9f8e7d6·c5b4a39·281706f·5e4d3c2·b1a0)",
+    "key=123e4567-e·89b-12d3-a·456-426614·174000",
+    "(sk-a·nt-a·pi03·-Eya·i1pk·JrF_·Kbwt )",
+  ]
+  for (const v of cases) {
+    const out = arg(v)
+    assert.ok(out.includes("…"), `a framed middot cut was not masked: ${v} → ${out}`)
+    const lead = v.match(/^[^A-Za-z0-9]*[A-Za-z]+=[^A-Za-z0-9]*|^[^A-Za-z0-9]+/)[0]
+    assert.ok(out.startsWith(lead), `the frame is kept: ${JSON.stringify(lead)} → ${out}`)
+  }
+  // and the frames' words stay
+  assert.equal(arg("key=AKIAIOS·FODNN7E·XAMPLE."), "key=AKIA…PLE.")
+})
+
+test("the CLI's 32 KiB worst case stays fast", () => {
+  // Before this round the CLI took 9 s on "1A1 " × 8192 and 1.8 s on 32 KiB of
+  // one-character words. A run that finds nothing now hands the scan on to its
+  // last word. The bound is loose on purpose: it guards a regression to
+  // quadratic reading, not a machine's speed.
+  for (const v of ["1A1 ".repeat(8192), "A ".repeat(16384)]) {
+    const t = performance.now()
+    arg(v)
+    const ms = performance.now() - t
+    assert.ok(ms < 1000, `${JSON.stringify(v.slice(0, 6))}… took ${ms.toFixed(0)} ms`)
+  }
+  // and a real cut of the same sizes is still read
+  assert.ok(arg("9f8e7d6c5b4a39281706f5e4d3c2b1a0".split("").join(" ")).includes("9f8e…b1a0"))
+})

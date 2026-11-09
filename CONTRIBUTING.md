@@ -109,10 +109,15 @@ Three invariants to keep when touching it:
   pieces of one or two characters (asking after every short word made a body
   of them quadratic). The gaps a run is read across are one space, a no-break
   space, an ideographic space, a single line break, and a middot or a bullet
-  (one or two in a row) — the middot from a run that starts at a key's front,
-  at something key-shaped or framed (`NickName=[AK·IA·…`, `9f8e·7d6c·…`), or
-  anywhere once the run has read a cut (so `ms-f·orei·gn01·…` is joined whole);
-  a card's own `·` separators sit between words and stay prose. A vendor front
+  (one or two in a row, at most one space either side) — the middot whenever a
+  piece beside it is not a word (a key's front, a framed or key-shaped head,
+  `NickName=[AK·IA·…`, `9f8e·7d6c·…`), and anywhere once the run has read a cut
+  (so `ms-f·orei·gn01·…` is joined whole); a card's own `·` separators sit
+  between words on both sides and stay prose. A run of single-character pieces
+  is read across any of those gaps, and a piece standing behind a frame's
+  punctuation is its first (`key=1·2·3·…`, `(AK·IA·…`), the frame kept as
+  printed. The CLI's per-word pass reads framed digest pieces too
+  (`123e4567-·e89b-…`). A vendor front
   that is itself cut in two (`xox b-1 234 …`) is read from the piece that
   starts it. Both card and CLI also have a caps pass for a vendor key written
   without its spaces (`AKIAIOSFODNN 7EXAMPLE`, `AKI AIO SFO …`), and a
@@ -123,16 +128,21 @@ Three invariants to keep when touching it:
   and no mixed-case word (it can become no key), at 4×20 on one piece, and
   when it finds no key at all the next start is its end. The run readings
   stop at 32 KiB: past that only the per-word pass runs. Measured on
-  one-character words (the worst case): 32 KiB costs about 0.6 s on the card
-  (`"a " × 16000`) and about 0.7 s for capitals — all passes together, of which
-  the cut reading is most — against a 25 s hook and a 120 s child; ordinary
-  text of 32 KiB costs 0.1–0.3 s.
+  one-character words (the worst case): 32 KiB costs about 0.3 s on the card
+  (`"A " × 16384`) and about 0.15 s in the CLI — all passes together — against a
+  25 s hook and a 120 s child; ordinary text of 32 KiB costs under 50 ms. A run
+  that found nothing hands the scan on to the last word it read, unless it saw
+  a digit or a front on the way (the CLI: before that, `"1A1 " × 8192` took 9 s
+  and 32 KiB of `"A "` 1.8 s).
   Any change to these thresholds has to keep both suites
   green: both carry a table of cut shapes (one, three, four, six, eight,
   twelve characters, line breaks, no-break and ideographic spaces, middots)
   that must be masked, and ordinary sentences and paths that must not. The
-  middot table covers a cut of one, two and four characters of an AWS id, a
-  32-character digest and a ModelScope key, by `·`, `•` and `··`. The threshold counts the key's
+  middot table covers, for four frames (bare, `NickName=[…]`, `(…)`, `key=….`),
+  cuts of one to twelve characters of an AWS id, a 32-character digest, a
+  ModelScope key, a ghp_ token, an sk-ant key and a UUID, by `·`, `•`, `∙`, `‧`,
+  `・`, `··`, `· ` and ` · `, on the card and in the CLI alike (measured 2026-11-10:
+  0 leaks over that matrix; before the round it leaked on every width). The threshold counts the key's
   letters and digits only, not the hyphens or spaces it was written in: a slice
   under `MIN_ECHO` (10) alphanumerics is left alone, and a span rule that also
   counted punctuation was tried and reverted — it masked "said: aaaa1111-b"

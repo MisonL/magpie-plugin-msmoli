@@ -573,11 +573,16 @@ mask it is.
 Text from the server that carries a key cut by whitespace is masked the same
 way as the CLI's (`ghp_ 1234 AbCd …`, `sk-a nt-a pi03 …`), via the same
 reading: a run of words that joins back into a key. The cut it reads across
-is a space, a no-break or ideographic space, a line break, or a middot (one or
-two in a row) — a value copied out of a web page or a Chinese IME carries these
-as often as plain spaces. A middot is read from a key's front or from a run that
-is key material itself (`A·K·I·A·…`, `9f8e·7d6c·…`); the card's own middot sits
-between words ("Qwen3-Max · 调用返还") and stays as written. A full-width hyphen
+is a space, a no-break or ideographic space, a line break, or a middot or a
+bullet (one or two in a row, at most one space either side) — a value copied
+out of a web page or a Chinese IME carries these as often as plain spaces. A
+middot is read across when a piece beside it is not a word (`A·K·I·A·…`,
+`9f8e·7d6c·…`, the pieces of a key cut in fours), and a run of single-character
+pieces is read whatever the separator (`A· K· I· A· …`). The card's own middot
+sits between words on both sides ("Qwen3-Max · 调用返还") and stays as written;
+a middot inside a key stays in its mask when the mask shows only its ends,
+because the mask keeps everything between the first four characters and the
+last four. A full-width hyphen
 (`－`, which Unicode does not fold) is read as the key's own. A run that also
 reads as an ordinary sentence is left alone.
 
@@ -637,6 +642,14 @@ The terms and risks are in
   under one two-minute budget. A hook cut short answers `failed`, the host
   retries in half an hour, and the retry reads the ledger first, so nothing is
   lost.
+- **What a 401 or a 403 says.** A 401 signs the account out only when it
+  reads as the site refusing the token — "unauthorized", an invalid or expired
+  token, an empty body, or a bare status — and never when it names the path
+  instead ("proxy authentication required", a gateway's page). A 403 is
+  reported as ModelScope's risk control only when it carries ModelScope's
+  shape; a proxy's 403 page is reported as an ordinary refusal. A sign-in
+  that was refused after the day's credits landed reports the expiry but
+  keeps the day's answer.
 - **A body it doesn't understand fails; it never reads as zero.** A missing
   `data`, a list where an object belongs, a missing or non-numeric
   `available_balance`: each is a failure with its reason, because

@@ -10,6 +10,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { MsmoliPlugin, testables } from "../index.mjs"
+import { arg } from "../bin/sync.mjs"
 
 const { windowOf, streakOf } = testables
 
@@ -10658,11 +10659,17 @@ test("a nickname that is a name to the card is written back", async () => {
       await withFetch(
         {
           "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
+          "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 5 } } },
           "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
         },
         async () => {
           const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
-          assert.match(String(c.user ?? ""), /^(?!.*…).*$/, `the card masked a name: ${c.user}`)
+          // the card's own text is what auth.usage returns (checkin has no
+          // user field, and an assertion on its absence proved nothing); the
+          // meter is stubbed empty so the name is the only thing shown
+          const u = await p.auth.usage(async () => ({ type: "api", key: token }))
+          assert.equal(u.user, nick, `the card masked or changed a name: ${u.user}`)
+          void c
         },
       )
       assert.equal(writes.length, 1, `a name was refused its write-back: ${JSON.stringify(nick)}`)
@@ -10705,4 +10712,53 @@ test("a proxy's 401 is not the sign-in expiring, and a site's own 401 still is",
   testables.sites.clear()
   const dead = await withFetch({ [BALANCE_PATH]: { status: 401, body: { message: "unauthorized" } } }, () => auth.usage(async () => ({ type: "api", key: token })))
   assert.equal(dead.signIn, "expired", `a site's own 401 no longer expired the sign-in: ${JSON.stringify(dead)}`)
+})
+
+// ── Round twelve: the Codex review's cases, and the middot matrix ──
+test("a 401 behind a frame's punctuation, a proxy's 403, and a key behind a colon", async () => {
+  // The review's round eleven found three shapes the card leaked or
+  // misattributed: an all-caps vendor key behind a colon, a proxy's empty-
+  // object 401 read as the sign-in expiring, and a proxy's 403 reported as
+  // ModelScope risk control. All three come from the shape being judged with
+  // the frame stripped and the status alone.
+  const plain = testables.maskAll("余额查询失败：SK-ANT-API03-EYAI1PKJRF_KBWT", true)
+  assert.ok(!plain.replace(/[^A-Za-z0-9]/g, "").includes("SKANTAPI03EYAI1PKJRFKBWT"), `the key reached the card: ${plain}`)
+  assert.ok(plain.startsWith("余额查询失败："), `the frame is kept: ${plain}`)
+  const token = "ms-shape401-0000-0000-0000-000000000017"
+  testables.sites.clear()
+  // an empty body is not evidence either way and does not sign the account
+  // out (both requests answered with no body, as Codex's repro had them)
+  const empty = await withFetch({ [BALANCE_PATH]: { status: 401, raw: "" } }, () => auth.usage(async () => ({ type: "api", key: token })))
+  assert.equal(empty.signIn, "", `an empty 401 signed the account out: ${JSON.stringify(empty)}`)
+  testables.sites.clear()
+  const proxied = await withFetch({ [BALANCE_PATH]: { status: 403, body: { error: "proxy authentication required" } } }, () => auth.usage(async () => ({ type: "api", key: token })))
+  assert.equal(proxied.signIn, "", "a proxy's 403 is not risk control")
+  assert.ok(!String(proxied.error).includes("风控"), `a proxy's 403 was called ModelScope's risk control: ${proxied.error}`)
+  assert.match(proxied.error, /403/, `the status is still reported: ${proxied.error}`)
+  testables.sites.clear()
+  const risk = await withFetch({ [BALANCE_PATH]: { status: 403, body: { success: false, message: "forbidden" } } }, () => auth.usage(async () => ({ type: "api", key: token })))
+  assert.ok(String(risk.error).includes("风控"), `a site's own 403 is still risk control: ${risk.error}`)
+})
+
+test("the middot matrix: a key cut by any middot, in any frame, is masked whole", () => {
+  // The matrix CONTRIBUTING names: four frames × widths one to twelve × six
+  // key shapes × eight separators, card and CLI. Measured 2026-11-10: zero
+  // leaks. Before this round every width leaked in every frame.
+  const keys = ["AKIAIOSFODNN7EXAMPLE", "9f8e7d6c5b4a39281706f5e4d3c2b1a0", "ms-foreign-0123456789abcdef0123456789abcdef", "ghp_1234AbCd5678EfGh9012IjKl3456MnOp7890", "sk-ant-api03-Eyai1pkJrF_Kbwt", "123e4567-e89b-12d3-a456-426614174000"]
+  const seps = ["·", "•", "∙", "‧", "・", "··", "· ", " · "]
+  const frames = ["%", "NickName=[%]", "(% )", "key=%."]
+  const flat = (x) => String(x).normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "")
+  for (const key of keys) {
+    for (const sep of seps) {
+      for (const w of [1, 2, 4, 9, 12]) {
+        const cut = key.match(new RegExp(`.{1,${w}}`, "g")).join(sep)
+        for (const fr of frames) {
+          const v = fr.replace("%", cut)
+          for (const [tag, out] of [["card", testables.maskAll(v, true)], ["arg", arg(v)]]) {
+            assert.ok(!flat(out).includes(flat(key)), `${key.slice(0, 12)} cut ${w} by ${JSON.stringify(sep)} in ${fr} leaked in ${tag}: ${out}`)
+          }
+        }
+      }
+    }
+  }
 })
