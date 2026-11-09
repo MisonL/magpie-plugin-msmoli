@@ -413,92 +413,120 @@ const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]
 // the cut left the tail in pieces each under every floor, and the longest of
 // them (15 characters) was printed whole. So the key is everything from its
 // front to the end of the value, and what came before it keeps its shape.
-const spacedKey = (s) => {
-  const words = s.trim().split(/\s+/)
-  if (words.length < 2) return null
-  const joined = words.join("")
+// how a cut arrives: a space, tab or line break, a no-break or ideographic
+// space, a middot or a bullet, or a slash. One or two in a row is a cut;
+// three or more ("a   b") is a frame, and ends the run. A piece is a stretch
+// between cuts; control and format characters are not a cut's spelling, and a
+// value carrying one is left to the per-word pass.
+const CUT_RUN = /[ \t\r\n\u00a0\u3000·•∙‧・/]+/g
+const CUT_ONE = /^[ \t\r\n\u00a0\u3000·•∙‧・/]+/
+const PIECE = /[^ \t\r\n\u00a0\u3000·•∙‧・/]+/g
+const KEYCHARS = /^[A-Za-z0-9+/=_.-]+$/
+// RUNCUT is the length at which a run is long enough to be a key: the floor
+// every reading asks for, and all a mask needs to show
+const RUNCUT = 20
+
+// spacedKey reads one value as a key cut into pieces by whitespace (or a
+// middot, a slash): from the key's front to the first piece that is not key
+// material. The front is found in the value with its cuts taken out, so it is
+// found cut anywhere ("m s - 0 1 …", "ghp·_12…"), and what came before it and
+// after the key keeps its shape. Exactly one front: a value carrying two is
+// two keys already, and the per-word pass masks each.
+//
+// A piece of four or more letters is prose and ends the run, unless it is a
+// bare piece of a front ("ghp" then "_12" is a cut, and "sk-a nt-a pi03" is a
+// key whose body is all its pieces) or the body so far already reads as a key.
+// A piece of three or more digits with no digit before it is a version
+// ("ms-access 2019"), not key material. A run already RUNCUT long is not
+// extended by prose: the mask covers 20 characters as well as 40.
+const VERNUM = /^\d{3,}$/
+const PROSE = /^[A-Za-z]{3,}$/
+const FRONT_PIECE = /^(?:m|s|k|ms|sk|s-|g|h|p|u|r|o|x|ox|a|i|l|ali|as|akia|aida|ghp|gho|ghu|ghs|ghr|xox|asia)$/i
+
+function spacedKey(s) {
+  // a control or format character is not a cut's spelling (a key with one in
+  // it is one word); a line break is, and is read like a space
+  if (/(?:(?![\n\r])[\p{Cc}\p{Cf}])/u.test(s)) return null
+  // the pieces, and where each starts in the value
+  const pieces = []
+  for (const m of s.matchAll(PIECE)) pieces.push({ text: m[0], at: m.index })
+  if (pieces.length < 2) return null
+  const joined = pieces.map((p) => p.text).join("")
   const at = joined.search(/ms-/i)
-  // exactly one front: a value carrying two is two keys already, and the
-  // per-word pass masks each (masking the whole would hide both ends)
-  if (at < 0 || joined.slice(at + 3).search(/ms-/i) >= 0) return null
-  const rest = joined.slice(at + 3)
-  // the key's alphabet only: a sentence that happens to carry a key front and
-  // then goes on in other words is not one ("ms-dos is old" is not). A digit
-  // somewhere in the value is what separates a key cut into pieces from a name
-  // with a version after it — "the ms-cli version 2026.11.9 installed" carries
-  // one too, so the walk below has to be able to stop short of it
-  if (rest.length < 11 || !/\d/.test(rest) || !/^[A-Za-z0-9+/=_.-]+$/.test(rest)) return null
-  // where the front sits in the value itself, and where the word it starts in
-  // ends (the pieces can be whitespace apart, so joined indexes are not raw
-  // ones: "m s - 0 1 …" is one key at no raw offset)
+  const sk = joined.search(/sk-/i)
+  const frontAt = at >= 0 ? at : sk
+  if (frontAt < 0) return null
+  // exactly one front of its kind: two is two keys already
+  const mine = at >= 0 ? /ms-/gi : /sk-/gi
+  if ([...joined.matchAll(mine)].length !== 1) return null
+  // where in the value the front starts (the index in the joined string, not
+  // an index in the value: the pieces keep the gaps between them)
   let cum = 0
-  let from = 0
   let start = -1
-  let wordEnd = -1
-  for (const w of words) {
-    const i = s.indexOf(w, from)
-    from = i + w.length
-    if (at >= cum && at < cum + w.length) {
-      start = i + (at - cum)
-      wordEnd = i + w.length
+  let idx = -1
+  for (let k = 0; k < pieces.length; k += 1) {
+    if (frontAt >= cum && frontAt < cum + pieces[k].text.length) {
+      start = pieces[k].at + (frontAt - cum)
+      idx = k
       break
     }
-    cum += w.length
+    cum += pieces[k].text.length
   }
   if (start < 0) return null
-  // The key runs on from its front through the words that are key material —
-  // the pieces an echo was cut into, each carrying a digit or too short to be
-  // a word. It stops at the first word of prose ("for", "provider", "next"),
-  // which keeps "no key ms-… for provider" readable while "ms-01234 56789abc"
-  // is one key. A word of letters only, three or more of them, is prose; a
-  // piece of a key nearly always carries a digit, and the ones that do not are
-  // short ("def").
-  // The value is read as one run of pieces whose gaps are one space: the key
-  // is the same characters with one space or none between them ("ms-01234
-  // 56789abc"). The run starts at the front and walks forward through the
-  // key's alphabet, allowing a single whitespace in between — a two-space gap
-  // ends it ("ms-dos and ms-word", a sentence). A word of three or more letters
-  // and no punctuation is prose ("for", "provider"), and ends the run there,
-  // so "no key ms-… for provider" keeps its frame.
-  //
-  // A line break is a gap like a space here: the README promises that a key
-  // pasted with a newline inside it is masked whole, and a value can carry one
-  // (a copy out of a wrapped chat window). It was not a gap, and the walk made
-  // no progress at all — the pieces after the break went out through `post`,
-  // which is printed as written.
-  let end = start
-  for (;;) {
-    const m = /^([A-Za-z0-9+/=_.-]+)(\r\n|[ \t\n\r]|$)/.exec(s.slice(end))
-    if (!m) break
-    if (/^[A-Za-z]{3,}$/.test(m[1])) break
-    // a version number is not key material: "ms-access 2019", "ms-outlook
-    // 365", "ms-word 2019" are product names with a year after them. The rule
-    // is narrow on purpose — a piece of digits only, longer than the pieces
-    // before it, while the body so far carries no digit at all. A key cut into
-    // fours, eighths or one character at a time has a digit in its first piece
-    // ("ms-a bcd1 …", "ms-0123 4567 …"), and a version's own digits come
-    // three to a group — 365, 2019 — as long as or longer than a year is
-    // never cut shorter
-    if (end > start && /^\d{3,}$/.test(m[1]) && !/\d/.test(s.slice(start, end))) break
-    end += m[1].length
-    if (!m[2]) break
-    // a gap wider than one whitespace is a frame, not a cut: another space left
-    // after the gap means the next piece is not the key's
-    if (/^\s/.test(s.slice(end + m[2].length))) break
-    end += m[2].length
+  // the key's own characters from the front; a digit is what separates a key
+  // cut into pieces from a name with a version after it
+  const bodyFrom = (i) => s.slice(start, i).replace(CUT_RUN, "")
+  if (!/^[A-Za-z0-9+/=_.-]+$/.test(joined.slice(frontAt + 3))) return null
+  if (joined.length - frontAt - 3 < 11 || !/\d/.test(joined.slice(frontAt + 3))) return null
+  // walk forward: a piece is part of the key while it is key characters and
+  // not prose; a gap joins them only when it is a cut (one or two characters).
+  // The walk starts at the end of the piece the front's own characters sit in:
+  // the rest of that piece ("--ms-01234567") is the key's first body, not a
+  // gap
+  if (idx < 0) return null
+  // the front's own characters, then whatever of its piece follows them with
+  // no gap ("ms-aaaa1111", "--ms-01234"): the key begins right after its
+  // front, so the rest of that piece is key material, not filler
+  let end = start + 3
+  while (end < s.length && !CUT_ONE.test(s[end]) && KEYCHARS.test(s[end])) end += 1
+  let bare = false
+  let strong = false
+  for (let guard = 0; guard < 512 && idx < pieces.length - 1; guard += 1) {
+    // the gap before the next piece: one cut joins, a run of three or more
+    // cuts is a frame; any other character ("--ms-", "#ms-", "/tmp/ms-", a
+    // path segment) is the same filler, once the body reads as a key
+    // a gap of three or more joins only after the body reads as a key, and
+    // then only the two-cut spelling ("a··b"): three or more ("a···b") is the
+    // frame a display draws instead of a hidden piece, and the pieces after
+    // it are printed as written
+    const gap = CUT_ONE.exec(s.slice(end))
+    if (!gap) break
+    if (gap[0].length > 2 && (!strong || gap[0].length > 5)) break
+    idx += 1
+    const piece = pieces[idx].text
+    if (VERNUM.test(piece) && !/\d/.test(bodyFrom(end))) break
+    if (!KEYCHARS.test(piece)) break
+    // a piece of three or more letters is prose and ends the run ("no key
+    // ms-… for provider" keeps its frame), unless it is the piece a bare
+    // front was cut into ("sk" then "ant" is a cut, not a word)
+    // prose ends the run even after a bare front: "sk-preset-20261031 is a
+    // provider id" is a sentence, and a key whose pieces are letters is read
+    // by the reading that masks the whole body ("sk-a nt-a pi03", below)
+    if (PROSE.test(piece)) break
+    end = pieces[idx].at + piece.length
+    bare = bare || FRONT_PIECE.test(piece)
+    // a frame wider than a cut is read across only after the body already
+    // reads as a key
+    strong = strong || isKey(bodyFrom(end))
   }
-  // a walk that made no progress would mask an empty body and print the whole
-  // value through `show()`, which only knows the shape of an unbroken key
-  if (end <= start) return null
-  // the run ends on its last piece: the whitespace after it belongs to the frame
-  const bodyEnd = s.slice(start, end).replace(/\s+$/, "").length + start
-  const body = s.slice(start, bodyEnd)
-  // the digit must be in the key material itself, not in the prose or version
-  // that follows it: "the ms-cli version 2026.11.9" has a digit only after
-  // "version", and "ms-cli" alone is a product name, not a key
-  if (!/\d/.test(body)) return null
-  return { pre: s.slice(0, start), body, post: s.slice(bodyEnd) }
+  const body = bodyFrom(end)
+  if (body.length <= 3 || !/\d/.test(body)) return null
+  // a vendor front that carries more than a front ("sk-preset-20261031") is a
+  // provider id, not a key cut up: the per-word and cut readings judge it
+  if (!/^ms-/i.test(body) && !isKey(body)) return null
+  return { pre: s.slice(0, start), body, post: s.slice(end) }
 }
+const keyish = (x) => isKey(x) || /^(?:ms-|sk-)/i.test(x)
 
 const show = (s) =>
   String(s ?? "")
@@ -696,6 +724,8 @@ const glued = (ws) => ws.map((w) => w[0]).join("")
 // startProse: a run's first word is a word of prose — all lower-case letters,
 // two or more of them — and a run that starts with one is no key's head.
 const startProse = (w) => /^[a-z]{4,}$/.test(w) && !VENDOR.test(w) && !/^ms-/.test(w)
+// a word of English written in capitals, three or more letters
+const WORDS = /^[A-Z]{3,}$/
 // a run of capitals and digits is a key written without its spaces
 // ("AKIAIOSF", "AKIAIOSFODNN7EXA")
 const capsPiece = (w) => /^[A-Z0-9]{4,}$/.test(w) && /[A-Z]/.test(w)
@@ -715,8 +745,13 @@ const maskCut = (s) => {
   const gap = (i) => s.slice(end(i - 1), at(i))
   // a middot or a bullet between pieces is a cut's other spelling
   // ("ms-a·b·c") when the run starts at a key's front or at one-character
-  // pieces; a card's or a log's own separators do not start at either
-  const middotGap = (k, w0) => /^[·•∙‧・]$/.test(gap(k)) && (w0.length <= 2 || VENDOR.test(w0) || /^ms-/i.test(w0))
+  // pieces, or the join already reads as a key; a card's or a log's own
+  // separators do not start at either
+  const run = (i, k) => glued(words.slice(i, k + 1)).replace(MASKED, "")
+  // a vendor front may itself be cut ("xox b-1 234 …"): the head's leading
+  // letters and the next word's together carry it
+  const frontSplit = (i) => i + 1 < words.length && /^[A-Za-z]+$/.test(words[i][0]) && words[i][0].length <= 5 && VENDOR.test(words[i][0] + words[i + 1][0])
+  const middotGap = (k, w0, i) => /^[·•∙‧・]{1,2}$/.test(gap(k)) && (w0.length <= 2 || VENDOR.test(w0) || /^ms-/i.test(w0) || frontSplit(i) || isKey(run(i, k - 1)))
   const out = []
   let from = 0
   for (let i = 0; i < words.length; i += 1) {
@@ -751,23 +786,39 @@ const maskCut = (s) => {
     // secret): the join has to be a key of its own, which a sentence's first
     // word after a path is not
     const mixedHead = w0.length <= 16 && /[a-z]/.test(w0) && /[A-Z]/.test(w0)
-    if (!VENDOR.test(w0) && !capsPiece(w0) && !msHead && !tiny && !mixedHead) continue
+    // a vendor front itself cut in two ("xox b-1 234 …", "ghp _1234 …"): the
+    // front is not a word any floor keeps, and the cut falls inside it
+    const frontish =
+      w0.length <= 5 &&
+      /^[A-Za-z]+$/.test(w0) &&
+      i + 1 < words.length &&
+      (VENDOR.test(w0 + words[i + 1][0]) || VENDOR.test(w0 + words[i + 1][0].slice(0, 2)))
+    if (!VENDOR.test(w0) && !capsPiece(w0) && !msHead && !tiny && !mixedHead && !frontish) continue
     // two key-shaped words are two keys: one mask for both would hide the
     // second's front ("ms-aaaa… ms-zzzz…" is not one key)
     const pairOfKeys = i + 1 < words.length && /^[ \t\u00a0\u3000]+$/.test(gap(i + 1)) && keyAt(words[i][0]) && keyAt(words[i + 1][0])
     let j = i
     let head = i
     let body = words[i][0]
-    for (let k = i + 1; !pairOfKeys && k < words.length && k - i <= 48 && (/^[ \t\u00a0\u3000]+$/.test(gap(k)) || middotGap(k, w0)); k += 1) {
+    for (let k = i + 1; !pairOfKeys && k < words.length && k - i <= 48 && (/^[ \t\u00a0\u3000\r\n]+$/.test(gap(k)) || middotGap(k, w0, i)); k += 1) {
       const x = words[k][0]
       // every piece is short enough or a vendor front; a word of a sentence in
       // between ("the log said") goes on only when what follows is key-shaped
       // again and the body has a capital or a digit — an echo's own words
       // ("aaabbb… x aaaccc… 1234", one piece between two of the key's)
       if (x.length > 16 && !VENDOR.test(x)) break
+      // a piece of capitals and digits is key material ("xox b-1 234 567 890
+      // 12- …" is one key cut into threes): a key is written in capitals and
+      // digits more often than a word of prose is
+      // the cut of a vendor front into capitals and digits ("xox b-1 234 567
+      // 890 12- …"): the piece after the front starts with a digit, the pieces
+      // are short, and none is a capitalised word ("Release", "Notes")
+      const capsy = i + 1 < words.length && /^-?[0-9]/.test(words[i + 1][0]) && x.length <= 16 && /[A-Z0-9]/.test(x)
       body += x
       const pieces = words.slice(i, k + 1).map((w) => w[0])
-      const prose = pieces.some((w) => w.length >= 4 && /^[a-z]{4,}$/.test(w) && !VENDOR.test(w))
+      // the head is not a word of the run's own: "xoxb -123 4567 …" begins at
+      // a front cut in two, and reading the front as prose ended the run
+      const prose = pieces.slice(1).some((w) => w.length >= 4 && /^[a-z]{4,}$/.test(w) && !VENDOR.test(w))
       if (prose && !(/^ms-/i.test(w0) && tokenShaped1.test(body)) && !(keyAt(x) && pieces.some((w) => /[A-Z]/.test(w) || /\d/.test(w)))) continue
       // the body of a key cut by spaces: 20+, a key-shaped run in the head —
       // the front, or the word after it ("ghp_ 1234 AbCd…"; "sk-a nt-a pi03…"
@@ -790,7 +841,22 @@ const maskCut = (s) => {
       // the front ("sk-preset-20261031") is a provider id, and its run only
       // counts when the join is a key of its own
       const bareFront = VENDOR.test(pieces[0]) && pieces[0].length <= 8
-      const cut = body.length >= 20 && !body.includes(MASKED) && (isKey(body) || (msHead && tokenShaped1.test(body) && !pieces.some((w) => /^[A-Za-z]{2,}$/.test(w) && !VENDOR.test(w) && w !== w0)) || (bareFront && !plain && (pieces.slice(0, 2).join("").match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r) || r.length >= 4 || keyedBody(body)))) && (k - i >= 2 || !bareFront)
+      // a front cut in two leaves a shorter body than the floor reads: the
+      // front itself is half of it ("xoxb-12345678901" is 16 characters), and
+      // the front's own evidence stands in for the missing four
+      const capMixed = pieces.slice(1).some((w) => /[0-9]/.test(w)) && pieces.slice(1).some((w) => /[A-Z]/.test(w))
+      const capFront = /^[a-z]{1,5}$/.test(pieces[0]) && /[0-9]/.test(pieces[1]) && /[A-Za-z]/.test(pieces[1])
+      const shortFront = frontish && pieces.length >= 3 && pieces.slice(1).some((w) => /[0-9]/.test(w))
+      const cut =
+        /\d/.test(body) &&
+        body.length >= (frontish ? 16 : 20) &&
+        !body.includes(MASKED) &&
+        (isKey(body) ||
+          (msHead && tokenShaped1.test(body) && !pieces.some((w) => /^[A-Za-z]{2,}$/.test(w) && !VENDOR.test(w) && w !== w0)) ||
+          (bareFront && !plain && (pieces.slice(0, 2).join("").match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r) || r.length >= 4 || keyedBody(body))) ||
+          (capsy && (capMixed || capFront) && !pieces.some((w) => /^[A-Z][a-z]{3,}$/.test(w))) ||
+          (shortFront && !pieces.some((w) => /^[A-Z][a-z]{3,}$/.test(w)))) &&
+        (k - i >= 2 || !bareFront)
       if (!cut) continue
       j = k
     }
@@ -826,6 +892,10 @@ const capsRun = (s) => {
     const aws = /^AKIA[0-9A-Z]{16}$/.test(body)
     const long = body.length >= 16 && !/[a-z]/.test(body)
     if (!aws && !long) continue
+    // a run of English words in capitals ("SEE ALSO THE DOCUMENTATION")
+    // joins to one: a sentence is longer than any key this reads, and its
+    // words are three letters or more
+    if (!aws && body.length > 40) continue
     out.push(s.slice(from, words[i].index), mask(body))
     from = words[j].index + words[j][0].length
     i = j

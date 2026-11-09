@@ -5236,3 +5236,47 @@ test("an upper-cased ms- shape from a child is masked without knowing the key", 
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ── Round eleven: a vendor front cut inside itself, a middot cut, a full-width hyphen ──
+
+test("a vendor key cut into fours by spaces or middots is masked whole", () => {
+  // Round-ten sweeps: "xoxb -123 4567 …" went out whole — the head was the
+  // front itself, cut in two, and no floor kept "xoxb" or "xox" as a word.
+  // The run is read from a piece-starting front and masks from the front on.
+  const tokens = [
+    "xoxb-12345678901",
+    "xoxb-" + "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx",
+    "ghp_1234AbCd5678EfGh9012IjKl3456MnOp7890",
+  ]
+  const cuts = [
+    (x) => x.match(/.{1,3}/g).join(" "),
+    (x) => x.match(/.{1,4}/g).join(" "),
+    (x) => x.match(/.{1,4}/g).join("\n"),
+    (x) => x.match(/.{1,4}/g).join("·"),
+    (x) => x.match(/.{1,4}/g).join("　"),
+  ]
+  for (const t of tokens) {
+    for (const cut of cuts) {
+      const shown = arg(cut(t))
+      assert.ok(!shown.replace(/[^A-Za-z0-9]/g, "").includes(t.replace(/[^A-Za-z0-9]/g, "")), `the key reached the terminal: ${shown}`)
+    }
+  }
+  // "Run 3 4 5 …" (a count of numbers) is masked as a key by the round-ten
+  // code and by this one alike; the caps reading takes any run of capitals and
+  // digits, and a word with no lower-case in it is how a key written without
+  // its spaces looks. The words that must survive are the ones with prose.
+  for (const t of ["the xox box has 3 items", "Release xoxb 2026", "xox b-1 234"]) {
+    const shown = arg(t)
+    assert.ok(shown === t || !shown.includes("…"), `ordinary text was masked: ${JSON.stringify(t)} → ${JSON.stringify(shown)}`)
+  }
+})
+
+test("a key written with a full-width hyphen-months is masked", () => {
+  // U+FF0D is not folded by NFKC. A key pasted from a web page or a Chinese
+  // IME was read as one word, its ASCII runs all under the floors, and printed
+  // whole; the mask judges it on the folded copy and prints the value as typed.
+  const wide = "ms－foreign－0123456789abcdef0123456789abcdef"
+  const shown = arg(wide)
+  assert.ok(!shown.replace(/[^A-Za-z0-9]/g, "").includes("msforeign0123456789abcdef0123456789abcdef"), `the key reached the terminal: ${shown}`)
+  assert.ok(shown.includes("－"), `the mask should keep the value's own spelling: ${shown}`)
+})

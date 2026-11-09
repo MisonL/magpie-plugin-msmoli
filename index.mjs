@@ -202,6 +202,25 @@ function saidFailure(e, ctl, budget) {
 // fallback, the way it treats a 5xx. The first failure is the one reported
 // when neither site gives a usable answer, because it is the one the user was
 // closest to (their token most often comes from the domestic site).
+// awaitsSignIn: a 401 is the site refusing the token unless its answer names
+// something else as the one asking to sign in. ModelScope's own 401 says the
+// token is not good; a proxy's challenge says the proxy wants the password
+// ("proxy authentication required", "WWW-Authenticate"), and signing the
+// account out over it costs the user their login. Measured: a proxy answering
+// 401 with its own JSON had the card tell the user the sign-in expired, and a
+// re-login would not have changed the answer.
+const asksElsewhere = /proxy|authenticate|authori[sz]ation|www-authenticate|gateway|forbidden|credential/i
+const awaitsSignIn = (body) => {
+  if (body === null || typeof body !== "object") return false
+  // an empty object is nobody's answer to anything ({} is what a proxy's bare
+  // 401 or a site's "unauthorized" becomes); a 200's empty body is already
+  // left out by `parsed`
+  if (Object.keys(body).length === 0) return true
+  const said = [body.message, body.msg, body.error, body.error_description, body.detail, body.title]
+    .filter((x) => typeof x === "string")
+    .join(" ")
+  return !asksElsewhere.test(said) && !asksElsewhere.test(Object.keys(body).join(" "))
+}
 async function siteRead(token, path, deadline = Infinity) {
   const known = sites.get(token)
   const order = known ? [known, ...SITES.filter((p) => p !== known)] : SITES
@@ -225,12 +244,19 @@ async function siteRead(token, path, deadline = Infinity) {
       first ??= e instanceof Error ? { error: e } : { error: new Error("") }
       continue
     }
-    if (got.res.status === 401 && got.parsed) {
+    if (got.res.status === 401 && got.parsed && awaitsSignIn(got.body)) {
       // A 401 where the token was accepted before: the sign-in may have been
       // re-keyed with a token of the other site, or the remembered site may be
       // stale (a kept `site` value, a proxy's 200 cached as an answer). A 401
-      // that is not ModelScope's own JSON is a middlebox's challenge, not the
-      // token being refused — it falls through like any other non-answer.
+      // that is not ModelScope's own answer is a middlebox's challenge, not
+      // the token being refused — it falls through like any other non-answer.
+      // Measured: a proxy that answered 401 with its own JSON had the card
+      // tell the user the sign-in expired, and a re-login would not have
+      // changed the answer.
+      if (!awaitsSignIn(got.body)) {
+        first ??= { answer: { profile, ...got } }
+        continue
+      }
       if (profile === known) sites.delete(token)
       continue
     }
@@ -902,6 +928,9 @@ const keyAt = (word, letters) => isKeyWord(word, letters) || VENDOR.test(word) |
 // joined; a narrow run of words that are all short pieces (a key written one
 // character per word). A word already carrying a mask is not judged again.
 const MASKED = "…"
+// the length at which a run is long enough to be a key: the floor every
+// reading asks for, and all a mask needs to show
+const RUNCUT = 20
 const startProse = (w) => /^[a-z]{2,}$/.test(w) && !VENDOR.test(w) && !/^ms-/.test(w)
 function maskSpaced(s, letters) {
   if (s.length > 32 * 1024) return s
@@ -916,8 +945,17 @@ function maskSpaced(s, letters) {
   // the front is the evidence that a cut made it, and a card's own middot
   // separators ("version 1.2.3 · build 45") do not start at one
   const front = (w) => VENDOR.test(w) || /^ms-/i.test(w)
+  // a middot or a bullet is a cut's other spelling ("ms-a·b·c",
+  // "A·K·I·A…", "9f8e·7d6c…") when the run's first word is key material
+  // alone, or from a key's front. A card's own middot separator sits between
+  // words ("café · crème", "1.2.3 · build"), and the cut still has to be
+  // key-shaped below
+  // the word before a middot may carry a frame ("NickName=[AK·IA·…"): what
+  // says the run is key material is its trailing letters and digits
+  const tail = (w) => w.match(/[A-Za-z0-9]+$/)?.[0] ?? ""
   const runGap = (k, i) =>
-    (/^[ \t\u00a0\u3000\r\n]+$/.test(gap(k)) && gap(k).length <= 2) || (/^[·•∙‧・]$/.test(gap(k)) && front(words[i][0]))
+    (/^[ \t\u00a0\u3000\r\n]+$/.test(gap(k)) && gap(k).length <= 2) ||
+    (/^[·•∙‧・]{1,2}$/.test(gap(k)) && (front(words[i][0]) || tail(words[i][0]) !== ""))
   const out = []
   let from = 0
   for (let i = 0; i < words.length; i += 1) {
@@ -933,9 +971,38 @@ function maskSpaced(s, letters) {
     if (startProse(words[i][0])) continue
     const pairOfKeys = i + 1 < words.length && /^[ \t\u00a0\u3000]+$/.test(gap(i + 1)) && keyAt(words[i][0], letters) && keyAt(words[i + 1][0], letters)
     let j = i
+    let last = i
     let head = i
+    let mixedCase = words[i][0].length >= 3 && /[a-z]/.test(words[i][0]) && /[A-Z]/.test(words[i][0])
     let body = words[i][0]
     for (let k = i + 1; !pairOfKeys && k < words.length && k - i <= 48 && runGap(k, i); k += 1) {
+      last = k
+      // a run already long enough to be a key is not extended on a guess: 20
+      // characters of key material is the floor every reading below asks for.
+      // Once a cut is found the run does go on, because the key does — the
+      // mask has to cover all of a 32-character digest, not its first 20 —
+      // and it stops at a hard cap so a long run of tiny words stays linear
+      // (a card's own middot separator is not stepped over inside a found cut)
+      if (body.length >= 96 || (j > i && /^[·•∙‧・]$/.test(gap(k)))) break
+      // a cut found is not extended by a word that looks like prose on its
+      // own ("sk-User"), unless the run starts at a key's front or has read
+      // a cut front already ("sk- an t…")
+      const x = words[k][0]
+      mixedCase = mixedCase || (x.length >= 3 && /[a-z]/.test(x) && /[A-Z]/.test(x))
+      // a front whose whole word is a capital and a digit ("-Ey") is a cut
+      // front too, and it is read while every piece so far is not prose
+      const reads = front(words[i][0]) || (/^[A-Z0-9]{1,2}$/.test(words[i][0]) && words.slice(i, k).every((y) => !/^[a-z]{3,}$/.test(y[0])))
+      // (a middle piece joined by a middot or a bullet is key material in any
+      // case: "ms-f·orei·gn01·…" is a key cut every four characters)
+      const middled = /^[·•∙‧・]{1,2}$/.test(gap(k))
+      if (j > i && !reads && !/[0-9A-Z]/.test(x) && !middled && !(body.length >= 24 && !/^[a-z]{1,3}$/.test(x))) break
+      // a run with no digit and no mixed-case word can become no key: the
+      // readings below need one of the two, and reading on to the cap costs
+      // a card its time (a page of one-letter words)
+      if (j === i && body.length >= RUNCUT && !/\d/.test(body) && !mixedCase && !middled) break
+      // a cut here is one whole piece (16+), and a run of tiny words is read
+      // to this cap so a digest cut "9f8e·7d6c·…" is covered whole
+      if (j === i && body.length >= 4 * RUNCUT) break
       // a word of four or more lower-case letters inside the run is prose
       // ("sk-User joined the team"), not a piece of a key. A run of exactly
       // four is a piece as readily as a word ("ms-v qmjh 75qa …" is a key cut
@@ -943,15 +1010,45 @@ function maskSpaced(s, letters) {
       // key's front
       if (words[k][0].length >= 4 && /^[a-z]{4,}$/.test(words[k][0]) && !/[0-9]/.test(body) && (words[k][0].length > 4 || !(VENDOR.test(words[i][0]) || /^ms-/i.test(words[i][0])))) break
       body += words[k][0]
+      // a piece of seven or more letters on its own is a word, not a piece of
+      // a key, and a run holding one is text ("Rebecca Deborah Bradford" is
+      // mixed case and long enough to read as a key otherwise)
       const pieces = words.slice(i, k + 1).map((w) => w[0])
-      const cut = body.length >= 20 && !body.includes(MASKED) && pieces.every((w) => w.length <= 16 || VENDOR.test(w)) && !pieces.some((w) => w.length >= 7 && /^[A-Za-z]{7,}$/.test(w)) && (body.match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r, letters))
+      const cut =
+        body.length >= 20 &&
+        !body.includes(MASKED) &&
+        pieces.every((w) => w.length <= 16 || VENDOR.test(w)) &&
+        !pieces.some((w) => w.length >= 7 && /^[A-Za-z]{7,}$/.test(w)) &&
+        (body.match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r, letters))
       if (!cut) continue
-      const hi = pieces.findIndex((w) => keyAt(w, letters) || (w.length >= 8 && /\d/.test(w) && /[A-Z]/.test(w)))
+      // the run starts at its first key-shaped word when one is in it, so
+      // the mask keeps only where the key begins
       j = k
-      head = hi >= 0 ? i + hi : i
+      head = i
+      for (let q = i + 1; q <= k; q += 1) {
+        const w = words[q][0]
+        if (keyAt(w, letters) || (w.length >= 8 && /\d/.test(w) && /[A-Z]/.test(w))) {
+          head = q
+          break
+        }
+      }
     }
-    if (j === i) continue
-    out.push(s.slice(from, at(head)), maskToken(words.slice(head, j + 1).map((w) => w[0]).join("").replaceAll(MASKED, "")))
+    // a run read from every start is quadratic on a body of tiny words; when
+    // none of the starts inside the run it looked at found a key, the next
+    // start is the end of what it read — a key beginning inside that stretch
+    // would have been found by the start that read across it
+    // a run that found no key anywhere is a run of ordinary words, and nothing
+    // in it is a key's start: the next start is its end
+    if (j === i) {
+      if (last > i) i = last
+      continue
+    }
+    // the separators the key was cut by stay inside the mask (a digest is one
+    // key, "9f8e·7d6c·…" as much as "9f8e 7d6c …"), but a middot or bullet
+    // that is the card's own separator does not ("Qwen3-Max · 调用返还")
+    const pieces = words.slice(head, j + 1).map((w) => w[0])
+    const middotOnly = words.slice(head, j + 1).every((w) => /^\w+$/.test(w[0]))
+    out.push(s.slice(from, at(head)), maskToken(pieces.join("").replaceAll(MASKED, "").replace(middotOnly ? /[·•∙‧・]/g : /$^/g, "")))
     from = end(j)
     i = j
   }
@@ -1094,10 +1191,12 @@ const isKeyWord = (w, letters = true) => {
 // enough to be one of them. The join only covers the pieces that are the
 // key's own alphabet; a word outside it ("the key AKIAIOSFODNN7 EXAM PLES
 // here") is where the join stops, and the joined part is what is masked.
-const maskCaps = (s) => {
+const maskCaps = (s, letters) => {
   // a body with no capital in it has no vendor key written without its
-  // spaces (every one of their shapes is all capitals and digits)
-  if (s.length > 32 * 1024 || !/[A-Z]/.test(s)) return s
+  // spaces (every one of their shapes is all capitals and digits). A name
+  // keeps its capitals: "CHRISTOPHER LEE 2026" is all-capitals and long
+  // enough to read as a key without its spaces, and it is a name
+  if (!letters || s.length > 32 * 1024 || !/[A-Z]/.test(s)) return s
   const words = [...s.matchAll(/[\x21-\x7e]+/g)]
   const at = (i) => words[i].index
   const end = (i) => words[i].index + words[i][0].length
@@ -1120,7 +1219,7 @@ const maskCaps = (s) => {
   return out.join("") + s.slice(from)
 }
 
-const maskAll = (s, letters) => maskKeys(maskCut(maskSpaced(maskCaps(s), letters), letters), letters)
+const maskAll = (s, letters) => maskKeys(maskCut(maskSpaced(maskCaps(s, letters), letters), letters), letters)
 // maskKeys walks the words of a piece of text: one word that is itself a key
 // goes, and inside a word that is not, only the key-like runs and UUIDs go.
 // Punctuation that cannot be part of a key stays where it was, so a card
@@ -1155,10 +1254,11 @@ function maskCut(s, letters) {
   const gap = (i) => s.slice(end(i - 1), at(i))
   // the same line-break join as the run reading, and for the same reason
   // the same gaps as the run reading, and for the same reason
+  // the same run as the run reading
   const front = (w) => VENDOR.test(w) || /^ms-/i.test(w)
   const runGap = (k, i) =>
     s.slice(end(k - 1), at(k)).length <= 2 &&
-    (/^[ \t\u00a0\u3000]+$/.test(gap(k)) || /^\r?\n$/.test(gap(k)) || (/^[·•∙‧・]$/.test(gap(k)) && front(words[i][0])))
+    (/^[ \t\u00a0\u3000]+$/.test(gap(k)) || /^\r?\n$/.test(gap(k)) || (/^[·•∙‧・]{1,2}$/.test(gap(k)) && (front(words[i][0]) || /[A-Za-z0-9]$/.test(words[i][0]))))
   const out = []
   let from = 0
   for (let i = 0; i < words.length; i += 1) {
@@ -1169,11 +1269,25 @@ function maskCut(s, letters) {
     const tiny = w.length <= 2 && words[i + 4] !== undefined && words.slice(i, i + 5).every((x) => x[0].length <= 2)
     if (!VENDOR.test(w) && !conts(w) && !tiny) continue
     let j = i
+    let mixedCase = w.length >= 3 && /[a-z]/.test(w) && /[A-Z]/.test(w)
     let body = w
     let mixed = false
     for (let k = i + 1; w.length <= 16 && k < words.length && k - i <= 64; k += 1) {
       if (!runGap(k, i)) break
+      // the same stop as the run reading: 20 characters of key material is
+      // the floor, and once a cut is found the run goes on to its cap
+      if (body.length >= 96 || (j > i && /^[·•∙‧・]$/.test(gap(k)))) break
       const x = words[k][0]
+      mixedCase = mixedCase || (x.length >= 3 && /[a-z]/.test(x) && /[A-Z]/.test(x))
+      const reads = front(w) || (/^[A-Z0-9]{1,2}$/.test(w) && words.slice(i, k).every((y) => !/^[a-z]{3,}$/.test(y[0])))
+      // (a middle piece joined by a middot or a bullet is key material in any
+      // case: "ms-f·orei·gn01·…" is a key cut every four characters)
+      const middled = /^[·•∙‧・]{1,2}$/.test(gap(k))
+      if (j > i && !reads && !/[0-9A-Z]/.test(x) && !middled && !(body.length >= 24 && !/^[a-z]{1,3}$/.test(x))) break
+      // a run with no digit and no mixed-case word can become no key (the
+      // same reading as the run pass), and one that can is read to the cap
+      if (j === i && body.length >= RUNCUT && !/\d/.test(body) && !mixedCase && !middled) break
+      if (j === i && body.length >= 4 * RUNCUT) break
       if (x.length > 16) break
       // a piece of one capital and lower-case letters right after the head is
       // a word on its own ("sk-User"), and a word of four or more lower-case
@@ -1205,7 +1319,9 @@ function maskCut(s, letters) {
     // a run of words that are each prose-shaped ("Rebecca Deborah Bradford")
     // is two runs of words, not a key
     if (run.every((x) => /^[a-z]{3,}$/i.test(x[0]))) continue
-    out.push(s.slice(from, at(i)), maskToken(run.map((x) => x[0]).join("")))
+    // the mask is the key's characters alone; the separators it was cut by
+    // stay inside it, as in the run reading
+    out.push(s.slice(from, at(i)), maskToken(run.map((x) => x[0]).join("").replace(/[·•∙‧・]/g, "")))
     from = end(j)
     i = j
   }
@@ -1220,7 +1336,7 @@ const maskKeys = (s, letters = true) => {
     // host error carrying "no key ｍｓ－… for provider" printed the whole
     // token, and NFKC put it back together. The folded copy is what the shape
     // tests judge, and the word as written is what is masked.
-    const folded = word.normalize("NFKC")
+    const folded = word.normalize("NFKC").replace(/\uFF0D/g, "-")
     if (folded !== word) {
       const plain = folded.toLowerCase()
       if (isKeyWord(folded, letters) || (plain.match(RUN) ?? []).some((r) => keyRun(r, letters)) || UUID.test(folded)) return maskToken(word)
@@ -1302,17 +1418,6 @@ const hostText = (value) => nameText(value, "")
 // key-shaped to the card as well, and it is not a key — a generated key nearly
 // always carries a digit or a base64 symbol, and a name nearly never does, so
 // nameIsKey asks for one of those beside the card's verdict.
-// The piece is looked for before the cut to 40: a token longer than 40, cut
-// to 40, is no longer equal to the token, and its front would be written to
-// plugin-auth.json as the account's name. A substring of 12+ characters is the
-// piece: a name shorter than that is not an echo worth refusing — a person's
-// name can share nine or ten characters with any key ("cafebabe2026"), and the
-// card still masks whatever a shorter piece is in front of.
-const insideEcho = (name, token) => {
-  const n = fold(name)
-  const t = fold(token)
-  return n.length >= MIN_ECHO + 2 && t.includes(n)
-}
 // tightName is a name with the characters an echo may insert taken out. A
 // server that echoed the token into a nickname can space it out just as a
 // message can, and "ms-01234567 89abcdef…" is no longer a substring of the
@@ -1455,15 +1560,23 @@ const nameShape = (name) => {
   // luck rather than by rule. The space fold after it is for a name written
   // with spaces between the pieces — a shape that survived the key comparison
   // in another spelling.
-  const t = name.replace(GLUE, "").normalize("NFKC").toLowerCase().replace(/\s+/g, "")
+  const u = name.replace(GLUE, "").normalize("NFKC")
+  const t = u.toLowerCase().replace(/\s+/g, "")
   // the ms- arm asks the card's own question of the body (keyBody): a word
   // after the front is a name ("ms-interviewing" is one, and refusing it left
   // the account with no name at all). A name that is a key of another vendor —
   // sk-ant-api03-Eyai1pkJrF_Kbwt has three digits and satisfied none of
   // nameIsKey's extra requirements — is the shape the vendor's own prefix
   // marks, and a vendor key's body is what the shape tests already accept.
+  // the card's own two questions of an ms- body: does it begin like a key
+  // (tokenShaped), and does the run after the front read as one (keyBody),
+  // both asked of the name as written — spaces and all. Asking them of the
+  // space-folded name let a version number join a short word into a body, and
+  // "ms-cli 2026.11.9" and "ms-office 2016" — names the card shows untouched
+  // — were refused their write-back. A name with pieces spaced out is still
+  // refused by the flat forms above when it is this token's
   return /^ms-/.test(t)
-    ? keyBody.test(t)
+    ? [...u.matchAll(tokenShaped)].some((x) => keyBody.test(x[0]))
     : VENDOR.test(t) ||
         /^[0-9a-f]{16,}$/.test(t) ||
         UUID.test(t)
@@ -1711,6 +1824,11 @@ const gate = (profile, res, body, parsed, token, what, risk = RISK) => {
   // sign-in, and signing the account out over it costs the user their login:
   // it falls through to the ordinary error, and the host retries in half an
   // hour.
+  // the same question at the other two statuses: a 401 or a 403 that does not
+  // read as ModelScope's is the path answering, not the account — a proxy's
+  // challenge JSON said the sign-in expired, and a proxy's HTML 403 was
+  // reported as ModelScope's risk control
+  if (res.status === 401 && parsed && !awaitsSignIn(body)) throw new Error(`${what}：HTTP 401（响应不是魔搭的）`)
   if (res.status === 401 && parsed) throw deadToken(profile.where)
   if (res.status === 403) throw new Error(risk)
   if (!parsed) throw new Error(`${what}：响应不是 JSON（HTTP ${res.status}）`)

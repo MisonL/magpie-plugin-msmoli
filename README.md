@@ -560,7 +560,10 @@ The one place a token could still be copied is the account name: a reply whose
 `NickName` is the token, or a piece of it, or a key of a vendor's shape
 (`sk-…`, `ghp_…`, `AKIA…`) is not written back as `accountId` and is masked
 on the card instead. A name that happens to begin like one is refused too: `sk-`
-is a key's front before it is a nickname. Three situations the mask cannot cover: the
+is a key's front before it is a nickname. Whether a name reads as a key is the
+card's own question, asked of the name as written, so "ms-office 2016",
+"ms-cli 2026.11.9" and all-capitals names ("CHRISTOPHER LEE 2026") are names
+and are written back. Three situations the mask cannot cover: the
 first 4 and last 4 characters of the token do appear, that is the mask; a key
 of a shape this plugin does not recognise, echoed back in a spelling it does
 not fold (the `ms-` shapes are covered in any case and full width); and a word
@@ -570,10 +573,13 @@ mask it is.
 Text from the server that carries a key cut by whitespace is masked the same
 way as the CLI's (`ghp_ 1234 AbCd …`, `sk-a nt-a pi03 …`), via the same
 reading: a run of words that joins back into a key. The cut it reads across
-is a space, a no-break or ideographic space, a line break, or (from a key's
-front) a middot — a value copied out of a web page or a Chinese IME carries
-these as often as plain spaces. A run that also reads as an ordinary sentence
-is left alone.
+is a space, a no-break or ideographic space, a line break, or a middot (one or
+two in a row) — a value copied out of a web page or a Chinese IME carries these
+as often as plain spaces. A middot is read from a key's front or from a run that
+is key material itself (`A·K·I·A·…`, `9f8e·7d6c·…`); the card's own middot sits
+between words ("Qwen3-Max · 调用返还") and stays as written. A full-width hyphen
+(`－`, which Unicode does not fold) is read as the key's own. A run that also
+reads as an ordinary sentence is left alone.
 
 The run readings give up on a body past 32 KiB and only the per-word pass
 runs: a body of thousands of one-word pieces ("s k - a n t" repeated) costs

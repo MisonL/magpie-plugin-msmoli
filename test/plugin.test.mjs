@@ -10613,3 +10613,96 @@ test("a slice of a key in a host error is masked even with no key in hand", asyn
     assert.ok(u.error.includes(w), `${w} was masked as a key: ${u.error}`)
   }
 })
+
+// ── Round eleven: middot cuts, a name that reads as a key, a proxy's 401 ──
+
+test("a key cut by middots or bullets is masked on the card too", async () => {
+  // Codex's round-ten finding: the middot rule read a run only from a key's
+  // front, so a foreign key cut one character per middot — the shape
+  // NickName=[...].join("·") produces — went out whole, and a bare digest cut
+  // the same way went out in pieces. The card's own "·" separator sits between
+  // words and stays.
+  const creds = ["AKIAIOSFODNN7EXAMPLE", "9f8e7d6c5b4a39281706f5e4d3c2b1a0", "ms-foreign-0123456789abcdef0123456789abcdef"]
+  for (const c of creds) {
+    for (const sep of ["·", "•", "··"]) {
+      for (const n of [1, 2, 4]) {
+        const cut = c.match(new RegExp(`.{1,${n}}`, "g")).join(sep)
+        const shown = await withFetch({ [BALANCE_PATH]: { status: 500, body: { success: false, message: `NickName=[${cut}]` } } }, async () =>
+          (await auth.usage(async () => ({ type: "api", key: "ms-middot-0000-0000-0000-000000000001" }))).error,
+        )
+        assert.ok(!String(shown).replace(/[^A-Za-z0-9]/g, "").includes(c.replace(/[^A-Za-z0-9]/g, "")), `${c.slice(0, 8)} cut ${n} by ${JSON.stringify(sep)}: the key reached the card whole: ${shown}`)
+      }
+    }
+  }
+  for (const t of ["Qwen3-Max · 调用返还", "today · 42 · points", "café · crème · brûlée", "version 1.2.3 · build 45"]) {
+    const shown = await withFetch({ [BALANCE_PATH]: { status: 500, body: { success: false, message: t } } }, async () =>
+      (await auth.usage(async () => ({ type: "api", key: "ms-middot-0000-0000-0000-000000000001" }))).error,
+    )
+    assert.ok(String(shown).includes(t), `ordinary text was masked: ${JSON.stringify(t)} → ${JSON.stringify(shown)}`)
+  }
+})
+
+test("a nickname that is a name to the card is written back", async () => {
+  // "ms-office 2016" was refused because nameShape asked the card's ms- body
+  // question of the whole space-folded name; "CHRISTOPHER LEE 2026" was masked
+  // to "CHRI…2026" on the card because the capitals reading does not know a
+  // name from a key. Both are names the card shows untouched, write-back too.
+  const nicks = ["ms-office 2016", "ms-cli 2026.11.9", "ms-interviewing", "CHRISTOPHER LEE 2026", "MisonLiangWithALongName"]
+  for (const [q, nick] of nicks.entries()) {
+    const dir = tmpDir("msmoli-name-")
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    await withDirectory(dir, async () => {
+      const writes = []
+      const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
+      const token = `ms-nameok-0000-0000-0000-00000000001${q}`
+      await withFetch(
+        {
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+        },
+        async () => {
+          const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+          assert.match(String(c.user ?? ""), /^(?!.*…).*$/, `the card masked a name: ${c.user}`)
+        },
+      )
+      assert.equal(writes.length, 1, `a name was refused its write-back: ${JSON.stringify(nick)}`)
+      assert.equal(writes[0].body.accountId, nick)
+    })
+  }
+  // and the shapes that are keys stay refused
+  for (const nick of ["ms-foreign-0123456789abcdef0123456789abcdef", "sk-ant-api03-Eyai1pkJrF_Kbwt"]) {
+    const dir = tmpDir("msmoli-namebad-")
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    await withDirectory(dir, async () => {
+      const writes = []
+      const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
+      await withFetch(
+        {
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [] } } },
+        },
+        async () => {
+          await p.auth.checkin(async () => ({ type: "api", key: "ms-namebad-0000-0000-0000-000000000015" }))
+        },
+      )
+      assert.equal(writes.length, 0, `a key shape was written back as a name: ${JSON.stringify(nick)}`)
+    })
+  }
+})
+
+test("a proxy's 401 is not the sign-in expiring, and a site's own 401 still is", async () => {
+  // Round nine: any parseable 401 expired the sign-in, so a proxy's JSON
+  // challenge told the user to log in again. The refusal is now ModelScope's
+  // when its wording does not name a challenge; a bare 401 body is nobody's
+  // answer; and a site that says "unauthorized" is still a dead token.
+  const token = "ms-proxy401-0000-0000-0000-000000000016"
+  testables.sites.clear()
+  for (const body of [{ error: "proxy authentication required" }, { message: "WWW-Authenticate: Basic", title: "Gateway" }]) {
+    const u = await withFetch({ [BALANCE_PATH]: { status: 401, body } }, () => auth.usage(async () => ({ type: "api", key: token })))
+    assert.equal(u.signIn, "", `a proxy's 401 expired the sign-in: ${JSON.stringify(body)} → ${JSON.stringify(u)}`)
+    assert.match(u.error ?? "", /401/, `the status is still reported: ${u.error}`)
+  }
+  testables.sites.clear()
+  const dead = await withFetch({ [BALANCE_PATH]: { status: 401, body: { message: "unauthorized" } } }, () => auth.usage(async () => ({ type: "api", key: token })))
+  assert.equal(dead.signIn, "expired", `a site's own 401 no longer expired the sign-in: ${JSON.stringify(dead)}`)
+})
