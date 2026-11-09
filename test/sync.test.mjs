@@ -6,6 +6,7 @@ import { join, sep } from "node:path"
 import { test } from "node:test"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import {
+  arg,
   findConfigDir,
   findMagpieBin,
   isMain,
@@ -546,6 +547,16 @@ test("--help exits 0 and every other exit is a number", () => {
   assert.match(bad.stderr, /不认识的参数/)
 })
 
+test("--version answers the package's own version, beside a stray argument too", () => {
+  const pkg = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"))
+  for (const args of [["--version"], ["-v"], ["--nope", "--version"]]) {
+    const r = run(args)
+    assert.equal(r.status, 0, `${args.join(" ")}: ${r.stderr}`)
+    assert.equal(r.stdout.trim(), `magpie-plugin-msmoli ${pkg.version}`, `the version drifted from package.json: ${r.stdout}`)
+  }
+  assert.match(run(["--help"]).stdout, /--version/, "the usage page names the flag")
+})
+
 test("a key typed as wipe-unknown-argument is masked in every spelling", () => {
   // The final review typed the key into a position the parser does not know.
   // The error prints the value through arg(), and the value has no job here:
@@ -568,6 +579,52 @@ test("a key typed as wipe-unknown-argument is masked in every spelling", () => {
   const benign = run(["ms-dos"])
   assert.equal(benign.status, 1)
   assert.match(`${benign.stdout}${benign.stderr}`, /ms-dos/, "a product name is not a key")
+})
+
+test("a vendor key cut into pieces is masked in arg(), and ordinary text is not", () => {
+  // Round 10: arg() reads the whitespace routes of a value and masks what it
+  // finds (a run of words, a pair either side of a line break). Measured
+  // without them: a 40-character ghp_ token cut into four went out whole, a
+  // foreign ms- key cut the same way, and an sk-proj key in eighths. The same
+  // pass must leave the frames alone — a sentence, a path, a provider id.
+  const creds = [
+    "ghp_1234AbCd5678EfGh9012IjKl3456MnOp7890",
+    "sk-ant-api03-Eyai1pkJrF_Kbwt",
+    "ms-foreign-0123456789abcdef0123456789abcdef",
+    "sk-proj-AbCdEf123456GhIjK7890LmNoPqRs",
+  ]
+  const cuts = {
+    three: (x) => x.match(/.{1,3}/g).join(" "),
+    four: (x) => x.match(/.{1,4}/g).join(" "),
+    line: (x) => x.match(/.{1,4}/g).join("\n"),
+    line3: (x) => x.match(/.{1,3}/g).join("\n"),
+    line1: (x) => x.match(/.{1,1}/g).join("\n"),
+    eight: (x) => x.match(/.{1,8}/g).join(" "),
+    twelve: (x) => x.match(/.{1,12}/g).join(" "),
+    one: (x) => x.match(/.{1,1}/g).join(" "),
+    middot: (x) => x.match(/.{1,4}/g).join("\u00b7"),
+    middot3: (x) => x.match(/.{1,3}/g).join("\u00b7"),
+    middot1: (x) => x.match(/.{1,1}/g).join("\u00b7"),
+  }
+  for (const c of creds) {
+    // a no-break space and an ideographic one are the same cut (a copy out of
+    // a Chinese IME, a web page): the run reading joins across them, or the
+    // pieces were too short each to be judged and the key went out whole
+    const gaps = { ...cuts, nbsp: (x) => x.match(/.{1,4}/g).join("\u00a0"), ideographic: (x) => x.match(/.{1,4}/g).join("\u3000") }
+    for (const [how, f] of Object.entries(gaps)) {
+      for (const line of [f(c), `--from ${f(c)}`, `no key ${f(c)} for provider`]) {
+        const out = arg(line)
+        // the separators go with the whitespace: a middot between the pieces
+        // is a cut's spelling too, and a key left whole with its middots in
+        // place is just as readable
+        assert.ok(!out.replace(/[^A-Za-z0-9]/g, "").includes(c.replace(/[^A-Za-z0-9]/g, "")), `${c.slice(0, 12)} cut ${how}: ${JSON.stringify(out)}`)
+      }
+    }
+  }
+  for (const t of ["see ms-dos and ms-word now", "the package manager told us to check", "sk-preset-20261031 is a provider id", "/Users/mison/documents/notes"]) {
+    const out = arg(t)
+    assert.ok(out.includes(t), `ordinary text was masked: ${JSON.stringify(t)} → ${JSON.stringify(out)}`)
+  }
 })
 
 test("a key cut into pieces by spaces is masked whole, however it was cut", () => {
@@ -605,6 +662,60 @@ test("a key cut into pieces by spaces is masked whole, however it was cut", () =
     const r = run([v])
     const text = `${r.stdout}${r.stderr}`
     assert.ok(text.includes(v), `a benign argument was masked: ${JSON.stringify(v)}\n${text}`)
+  }
+})
+
+test("a key behind a flag prefix, and in capitals, is masked the same way", () => {
+  // A review found the pieces an echo writes behind a prefix ("--token=ms-…")
+  // and an upper-cased AWS secret printed whole: the first because the front's
+  // position in the value was computed from the joined string alone, the second
+  // because isKey compared ASCII cases. Both go through the same two doors now.
+  const T = "ms-" + "0123456789abcdef".repeat(2)
+  const cases = {
+    flag_prefix: "--token=" + T,
+    flag_prefix_spaced: "--token=" + T.match(/.{1,8}/g).join(" "),
+    uppercase_aws: "x AKIAIOSFODNN7EXAMPLE y",
+    uppercase_aws_solo: "AKIAIOSFODNN7EXAMPLE",
+    newline_inside: "ms-01234567\n89abcdef0123456789abcdef",
+    crlf_inside: "ms-01234567\r\n89abcdef0123456789abcdef",
+  }
+  for (const [name, v] of Object.entries(cases)) {
+    const r = run([v])
+    assert.equal(r.status, 1, `${name}: an unknown argument is an error`)
+    const text = `${r.stdout}${r.stderr}`
+    for (const piece of T.slice(3).match(/.{8}/g)) {
+      assert.ok(!text.includes(piece), `${name}: a key run reached the terminal:\n${text}`)
+    }
+  }
+  // and the prose around a masked key is printed as it was written, so the
+  // host's "no key … for provider" wording keeps its frame
+  const prose = run(["no key ms-aaaa1111 bbbb-2222-cccc-333344445555 for provider"])
+  assert.equal(prose.status, 1)
+  const ptext = `${prose.stdout}${prose.stderr}`
+  assert.match(ptext, /no key .* for provider（/, `the frame was lost: ${ptext}`)
+  assert.ok(!ptext.includes("aaaa1111") && !ptext.includes("333344445555"), `a piece reached the terminal: ${ptext}`)
+})
+
+test("a two-space gap ends the key run, and a version number is not a piece of one", () => {
+  // A two-space frame on the key's own alphabet lets the tail leak.
+  // A product name with a version after it ("ms-access 2019") was read as
+  // a key cut into pieces and masked, which is the kind of over-masking
+  // that makes the tool look broken.
+  for (const v of ["the ms-cli version 2026.11.9 installed", "Microsoft ms-access 2019 document", "our ms-outlook 365 account"]) {
+    const r = run([v])
+    const text = `${r.stdout}${r.stderr}`
+    assert.ok(text.includes(v), `a product name was masked as a key: ${JSON.stringify(v)}\n${text}`)
+  }
+  // and the pieces a key is really cut into still mask: the 8-character groups
+  // and the one-character-per-word spelling both keep their digits in the
+  // first pieces, so the version rule cannot reach them
+  const T = "ms-" + "0123456789abcdef".repeat(2)
+  for (const v of [T.match(/.{1,8}/g).join(" "), [...T].join(" ")]) {
+    const r = run([v])
+    const text = `${r.stdout}${r.stderr}`
+    for (const piece of T.slice(3).match(/.{8}/g)) {
+      assert.ok(!text.includes(piece), `a key piece reached the terminal: ${piece}\n${text}`)
+    }
   }
 })
 
@@ -3952,6 +4063,41 @@ test("a fragment of a secret in the child's output is masked too", async () => {
     assert.equal(code, 1)
     assert.ok(!text.includes(frag), `片段漏到了终端:\n${text}`)
     assert.match(text, /ms-a…5555/, `片段该被整串掩码替代:\n${text}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("an echo with a letter dropped in between its pieces is masked, and the words around it are not", async () => {
+  // The pieces a child is given can be under MIN_ECHO each while their sum is
+  // the key, with a letter of the child's own text between them. One such
+  // letter is stepped over always; more than one only once the run already
+  // carries MIN_ECHO characters, so "said: aaaa1111-b" stays readable. The
+  // mask replaces the run only, and the frame around it ("no key … for
+  // provider") is printed as it was.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-echo-filler-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    const body = A.slice(3).replace(/-/g, "")
+    const cases = [
+      ["one filler, the whole key behind it", `no key ms-aaaa1111x ${A.slice(3)} for provider`, /^no key ms-a…5555 for provider$/],
+      ["two fillers, both pieces over the floor", `the log said ${body.slice(0, 10)}x ${body.slice(10, 20)}x ${body.slice(20)} end`, /^the log said ms-a…5555 end$/],
+    ]
+    for (const [name, line, want] of cases) {
+      for (const where of ["stdout", "stderr"]) {
+        const out = []
+        await main({
+          argv: ["--dir", dir, "--to-plugin", "--magpie", "/nonexistent"],
+          log: (s) => out.push(s),
+          spawn: () => ({ status: 7, stdout: where === "stdout" ? line : "", stderr: where === "stderr" ? line : "" }),
+        })
+        const shown = out.join("\n").split("\n").filter((l) => l.startsWith(line.slice(0, 4))).pop() ?? ""
+        assert.match(shown, want, `${name} (${where}): 一行输出被读成了 ${JSON.stringify(shown)}，原文 ${JSON.stringify(out.join("\n"))}`)
+        for (const piece of body.match(/.{10}/g)) {
+          assert.ok(!shown.includes(piece), `${name} (${where}): 一段 key 漏了: ${piece}\n${shown}`)
+        }
+      }
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

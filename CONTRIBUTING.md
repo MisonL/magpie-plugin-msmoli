@@ -99,8 +99,35 @@ Three invariants to keep when touching it:
   shows its length instead, since there would be no middle left to hide. The
   same key in another spelling is still the key: case and full-width (`NFKC`)
   forms are folded before the comparison, and a key broken into short groups
-  by spaces or invisible characters is joined across them — in the plugin's
-  card text and in the CLI's echoes alike. The
+  by spaces, line breaks or invisible characters is joined across them — in the
+  plugin's card text and in the CLI's echoes alike. That join is one reading
+  among three: the run reading (`maskSpaced` in `index.mjs`, `maskCut` in
+  `bin/sync.mjs`) takes a key whose pieces all clear the word floors, the cut
+  reading takes one whose front is itself cut (`sk-a nt-a pi03 …`), and the
+  per-word pass takes everything else. A key written one character per word is
+  the cut reading too, read only from a head of five or more consecutive
+  pieces of one or two characters (asking after every short word made a body
+  of them quadratic). The gaps a run is read across are one space, a no-break
+  space, an ideographic space, a single line break, and — from a key's front
+  or one-character pieces only, so a card's own `·` separators stay prose — a
+  middot or a bullet. Both card and CLI also have a caps pass for a vendor key
+  written without its spaces (`AKIAIOSFODNN 7EXAMPLE`, `AKI AIO SFO …`). The
+  run readings stop at 32 KiB: past that only the per-word pass runs.
+  Measured on one-character words (the worst case): 6 KiB costs about 1 s
+  on the card and 1 s in `arg()`, and a body just under the bound costs
+  about 3–3.5 s and 5–7 s, against a 25 s hook and a 120 s child; ordinary
+  text of 32 KiB costs 0.1–0.3 s.
+  Any change to these thresholds has to keep both suites
+  green: both carry a table of cut shapes (one, three, four, six, eight,
+  twelve characters, line breaks, no-break and ideographic spaces, middots)
+  that must be masked, and ordinary sentences and paths that must not. The threshold counts the key's
+  letters and digits only, not the hyphens or spaces it was written in: a slice
+  under `MIN_ECHO` (10) alphanumerics is left alone, and a span rule that also
+  counted punctuation was tried and reverted — it masked "said: aaaa1111-b"
+  (nine characters of a token) as if it were longer. Words that already carry
+  a mask (`ms-a…5555`) are not judged again: NFKC folds the ellipsis to three
+  dots, which read as key material.
+  The
   failure path scrubs a child command's output too: that is the path most
   likely to echo the key back. Every key a command touches is a secret, not
   just the one in its arguments — `--to-preset` replaces the preset's key, and

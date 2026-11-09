@@ -1050,6 +1050,40 @@ test("an exactly full page with no total reads one more page to learn it was who
   }
 })
 
+test("a later page whose shape is unreadable stops the walk, it does not fail the hook", async () => {
+  // records() throwing on page 2 (no data, records not a list) escaped dayRows
+  // and failed the whole check-in with its sentence, throwing away the first
+  // page's rows — where the same page answering 500 stops the walk with the
+  // rows in hand and "未读完". The two have to read the same way.
+  const token = "ms-badpage-0000-0000-0000-0000000abcd"
+  const first = Array.from({ length: 50 }, (_, i) => spend(1, i + 1))
+  for (const bad of [{ success: true }, { success: true, data: { records: 5 } }, { success: true, data: null }]) {
+    const u = await withFetch(
+      {
+        [BALANCE_PATH]: { body: { success: true, data: { available_balance: 1 } } },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+        [TX_PATH]: { body: { success: true, data: { records: first } } },
+        "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: bad },
+      },
+      () => auth.usage(async () => ({ type: "api", key: token })),
+    )
+    const shown = u.windows?.[0]?.display ?? JSON.stringify(u)
+    assert.match(shown, /今日用 50 .*账单未读完/, `${JSON.stringify(bad)}: ${shown}`)
+  }
+  // the check-in sees the same: a floor, retried, not a hard failure with the
+  // parser's sentence
+  const c = await withFetch(
+    {
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      [TX_PATH]: { body: { success: true, data: { records: first } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: 5 } } },
+    },
+    () => auth.checkin(async () => ({ type: "api", key: token })),
+  )
+  assert.equal(c.outcome, "failed", JSON.stringify(c))
+  assert.match(c.message, /账单读取不完整/, `the parser's sentence reached the card: ${c.message}`)
+})
+
 test("a page that cannot be read leaves the streak unsaid, and the check-in still answers", async () => {
   // A 403 on page 2 says nothing about the claim that already landed. The
   // streak is dropped; the answer keeps its outcome and credit, and the host
@@ -7176,19 +7210,18 @@ test("the usage card's target moves with the date", async () => {
 })
 
 test("a key that is not a string is no key, not the token 'null'", async () => {
-  // rawKey's `String(auth.key ?? "")`: for null / undefined `??` gives the
-  // empty string (no key). Miss this default and it becomes String(null) =
-  // "null" — a token SENDABLE lets through, the plugin requests with it, and
-  // the card reports the account is out of the active range instead of no
-  // login information. Conversely, 0 / false are values that are not nullish:
-  // `??` keeps them, and after String they are "0" / "false", a key that truly
-  // can go out; `||` reads them as the empty string and throws a key that has
-  // a value away as no login information.
+  // rawKey once stringified whatever the store held: null / undefined fell
+  // through `??` to "", but an array or a number was sent as a Cookie —
+  // measured, `key: [token]` put the token on the wire and `key: 1234…` sent
+  // the number. The host writes a string; anything else is a store this plugin
+  // cannot read, and it is reported as such rather than sent.
   for (const [key, want] of [
-    [null, "none"],
-    [undefined, "none"],
-    [0, "sent"],
-    [false, "sent"],
+    [null, /没有登录信息/],
+    [undefined, /没有登录信息/],
+    [0, /无法识别/],
+    [false, /无法识别/],
+    [[`ms-arrayheld-0000-0000-0000-000000abcd`], /无法识别/],
+    [1234567890123456, /无法识别/],
   ]) {
     const calls = []
     const realFetch = globalThis.fetch
@@ -7198,15 +7231,9 @@ test("a key that is not a string is no key, not the token 'null'", async () => {
     }
     try {
       const r = await auth.checkin(async () => ({ type: "api", key }))
-      if (want === "none") {
-        assert.equal(r.outcome, "failed", `${JSON.stringify(key)} must not check in: ${r.message}`)
-        assert.match(r.message, /没有登录信息/, `a nullish key is no sign-in: ${r.message}`)
-        assert.equal(calls.length, 0, "and nothing may be sent with it")
-      } else {
-        assert.equal(r.outcome, "inactive", `${JSON.stringify(key)} is a key: ${r.message}`)
-        assert.ok(calls.length > 0, `${JSON.stringify(key)} stringifies to a key that is sent`)
-        assert.ok(!calls.some((c) => /undefined|null/.test(c)), `no bogus token on the wire: ${calls[0]}`)
-      }
+      assert.equal(r.outcome, "failed", `${JSON.stringify(key)} must not check in: ${r.message}`)
+      assert.match(r.message, want, `the message names the reason for ${JSON.stringify(key)}: ${r.message}`)
+      assert.equal(calls.length, 0, `nothing may be sent with ${JSON.stringify(key)}`)
     } finally {
       globalThis.fetch = realFetch
     }
@@ -7894,6 +7921,73 @@ const longestKeptIn = (text, secret) => {
   return best
 }
 
+test("a key cut into pieces by spaces or line breaks is masked on the card too", async () => {
+  // A card's text is read three ways since round 10: the run reading, the
+  // harder cut (a front itself cut, or pieces cut in two), and word by word.
+  // Measured without them, a ghp_ token cut into four went out whole, and so
+  // did a foreign ms- key and an sk-ant key cut the same way — each piece
+  // cleared the word floors on its own, and the masked ends were the ends of
+  // a piece. The prose cases are here too: the masking must not swallow a
+  // server's ordinary sentence.
+  const creds = [
+    "ghp_1234AbCd5678EfGh9012IjKl3456MnOp7890",
+    "sk-ant-api03-Eyai1pkJrF_Kbwt",
+    "ms-foreign-0123456789abcdef0123456789abcdef",
+    // a body of pure lower-case letters and digits, the shape the run
+    // readings' piece-versus-prose rule sits on: the others carry hyphens,
+    // which a line break does not cut the same way
+    "ms-abcd1234efgh5678ijkl9012mnop3456",
+    // a four-letter piece right after the front, before any digit: the run
+    // readings must read past a four-letter piece for a key's front
+    "ms-vqmjh75qa651ittg5gli9zadx8zg9jez",
+    "AKIAIOSFODNN7EXAMPLE",
+  ]
+  const cuts = {
+    plain: (x) => x,
+    three: (x) => x.match(/.{1,3}/g).join(" "),
+    four: (x) => x.match(/.{1,4}/g).join(" "),
+    line: (x) => x.match(/.{1,4}/g).join("\n"),
+    // a key wrapped one piece to a line: the run reading joins across a line
+    // break, or every piece is under a floor and the key goes out whole
+    line3: (x) => x.match(/.{1,3}/g).join("\n"),
+    line1: (x) => x.match(/.{1,1}/g).join("\n"),
+    eight: (x) => x.match(/.{1,8}/g).join(" "),
+    twelve: (x) => x.match(/.{1,12}/g).join(" "),
+    one: (x) => x.match(/.{1,1}/g).join(" "),
+    // a cut's other spelling: a no-break space or an ideographic one (a copy
+    // out of a web page or a Chinese IME) is still the whitespace the run
+    // reading joins across
+    nbsp: (x) => x.match(/.{1,4}/g).join("\u00a0"),
+    ideographic: (x) => x.match(/.{1,4}/g).join("\u3000"),
+    // a middot between the pieces, from a key's front only
+    middot: (x) => x.match(/.{1,4}/g).join("\u00b7"),
+  }
+  for (const c of creds) {
+    for (const [how, f] of Object.entries(cuts)) {
+      if (how === "plain" && c === "AKIAIOSFODNN7EXAMPLE") continue
+      const shown = await withFetch({ "/openapi/v1/magicubes/balance": { status: 500, body: { success: false, message: f(c) } } }, async () => {
+        const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
+        return u.error
+      })
+      assert.ok(!String(shown).replace(/[^A-Za-z0-9]/g, "").includes(c.replace(/[^A-Za-z0-9]/g, "")), `${c.slice(0, 12)} cut ${how}: the key reached the card whole: ${shown}`)
+    }
+  }
+  for (const t of ["see ms-dos and ms-word now", "the package manager told us to check", "Rebecca Deborah Bradford", "Unusual activity detected, please try again later", "sk-preset-20261031 is a provider id"]) {
+    const shown = await withFetch({ "/openapi/v1/magicubes/balance": { status: 500, body: { success: false, message: t } } }, async () => (await auth.usage(async () => ({ type: "api", key: "ms-test" }))).error)
+    assert.ok(String(shown).includes(t), `ordinary text was masked: ${JSON.stringify(t)} → ${JSON.stringify(shown)}`)
+  }
+  // the readings themselves, on the text as a server wrote it: the card's
+  // error path turns line breaks into spaces before the mask (text()), so the
+  // pass that has to read a line break is exercised here directly rather than
+  // through a message that no longer carries one
+  for (const c of creds) {
+    for (const how of ["line", "line3", "line1"]) {
+      const masked = testables.maskAll(cuts[how](c), true)
+      assert.ok(!masked.replace(/\s+/g, "").includes(c), `${c.slice(0, 12)} cut ${how}: maskAll left the key whole: ${JSON.stringify(masked)}`)
+    }
+  }
+})
+
 test("a key the plugin does not hold is masked on the card too", async () => {
   // Of cardText's three gates, the first two revolve around this account's
   // token and the third only recognises the ms- shape. So when the ledger
@@ -7927,6 +8021,33 @@ test("a key the plugin does not hold is masked on the card too", async () => {
     const kept = longestKeptIn(msg, key)
     assert.ok(kept.length < 12, `${name}：卡片上原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}：${msg}`)
     assert.match(msg, /bonus /, `${name}：卡片该只剩标题，别把整条吞了：${msg}`)
+  }
+})
+
+test("a key cut across a ledger title's line breaks is masked too", async () => {
+  // The error card's text has its line breaks turned into spaces before the
+  // mask (text()), so an error is covered either way. A ledger title is not
+  // sanitized first: its newlines reach the readings, and a key wrapped one
+  // piece to a line has every piece under a floor on its own.
+  for (const key of ["ghp_1234AbCd5678EfGh9012IjKl3456MnOp7890", "ms-abcd1234efgh5678ijkl9012mnop3456"]) {
+    for (const how of [3, 4, 1]) {
+      // two rows, one key split between them: the row is masked on its own
+      // and the two are joined after, so a card that sanitizes its text
+      // before masking still hides each row's own cut
+      const pieces = key.match(new RegExp(`.{1,${how}}`, "g"))
+      const half = Math.ceil(pieces.length / 2)
+      const rows = [pieces.slice(0, half).join("\n"), pieces.slice(half).join("\n")]
+      const ledger = { success: true, data: { records: rows.map((title) => day({ title: `bonus ${title}` })), total: 2 } }
+      const r = await withFetch(
+        {
+          "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: ledger },
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+        },
+        () => auth.checkin(async () => ({ type: "api", key: "ms-test" })),
+      )
+      const msg = `${r.message ?? r.error ?? ""}`
+      assert.ok(!msg.replace(/\s+/g, "").includes(key), `cut ${how}: the key reached the card whole: ${JSON.stringify(msg)}`)
+    }
   }
 })
 
@@ -9875,7 +9996,12 @@ test("a key broken into eight-character pieces and joined by a letter is masked"
       return (await auth.usage(async () => ({ type: "api", key: token }))).error
     })
     assert.ok(!out.includes(echo), `${where}: the joined pieces reached the text: ${out}`)
-    assert.ok(!out.includes("01234567x"), `${where}: a piece survived: ${out}`)
+    // each piece of it too. The literal "01234567x" that used to be asserted
+    // on belongs to another fixture's token, so it passed without looking at
+    // anything this test writes.
+    for (const piece of body.match(/.{1,8}/g)) {
+      assert.ok(!out.includes(piece), `${where}: the piece ${piece} survived: ${out}`)
+    }
     assert.match(out, /ms-e…abcd/, `${where}: it is masked as the key: ${out}`)
   }
 })
@@ -9916,7 +10042,10 @@ test("a nickname that hides the key behind a leading stray letter is refused", a
 
 test("a nickname that is another key in full width is refused", async () => {
   const token = "ms-wideforeign-0000-0000-0000-000000abcd"
-  const other = "ms-" + "fedcba9876543210".repeat(2)
+  // the double hyphen and underscore survive NFKC unchanged: a nameShape that
+  // tightens the folded name before testing it has to mask this one, and the
+  // spelling of the key is what makes that test possible
+  const other = "ms--fedcba98_7654-3210-fedcba98_7654-3210"
   const wide = other.replace(/[!-~]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0))
   const dir = tmpDir("msmoli-wideforeign-")
   writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
@@ -9936,6 +10065,76 @@ test("a nickname that is another key in full width is refused", async () => {
         assert.deepEqual(writes, [], `another key in full width became the account name: ${JSON.stringify(writes)}`)
       },
     )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a nickname written as another key with an underscore in it is refused too", async () => {
+  // nameShape's ms- arm listed the characters a hyphenated key is written in
+  // and stopped there: ms-foreign_key-1234-5678-9012 carries an underscore, the
+  // card's own mask recognises the shape, and the narrow arm passed it through
+  // to be stored as accountId — the one field the card's mask does not reach.
+  // The shape every header can carry is the key's, not one spelling of it.
+  const token = "ms-underscore-0000-0000-0000-0000abcd"
+  for (const nick of ["ms-foreign_key-1234-5678-9012", "ms-foreign+key=1234-5678-9012"]) {
+    const dir = tmpDir("msmoli-underscore-nick-")
+    writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    const saved = process.env.MAGPIE_MSMOLI_CONFIG
+    delete process.env.MAGPIE_MSMOLI_CONFIG
+    const writes = []
+    const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
+    try {
+      await withFetch(
+        {
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
+          [TX_PATH]: { body: { success: true, data: { records: [day()], total: 1 } } },
+        },
+        async () => {
+          const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+          assert.equal(c.outcome, "done", c.message)
+          assert.deepEqual(writes, [], `${nick} became the account name: ${JSON.stringify(writes)}`)
+        },
+      )
+    } finally {
+      if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+      else process.env.MAGPIE_MSMOLI_CONFIG = saved
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test("a nickname too long for the run test is refused without spending the hook's budget", async () => {
+  // runsThrough measures the longest run a name shares with the key by a DP
+  // over their two folded strings. Both are server/host-controlled and the DP
+  // is synchronous: before the cap, a 128 KiB nickname against a 128 KiB
+  // response spent ~19 s of CPU inside a 25 s hook. A name cut to 40 for the
+  // write-back is never that long; refusing it costs nothing a user needs.
+  const token = "ms-" + "0123456789abcdef".repeat(16)
+  const nick = "z" + "0123456789abcdef".repeat(8192)
+  const dir = tmpDir("msmoli-lcs-bound-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const writes = []
+  const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
+  const t0 = performance.now()
+  try {
+    await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
+        [TX_PATH]: { body: { success: true, data: { records: [day()], total: 1 } } },
+      },
+      async () => {
+        const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(c.outcome, "done", c.message)
+      },
+    )
+    const ms = performance.now() - t0
+    assert.ok(ms < 3000, `病理昵称耗时 ${ms.toFixed(0)}ms，判定为 LCS 未设上界`)
+    assert.deepEqual(writes, [], `一个不可能由用户选择的昵称被写回：${JSON.stringify(writes[0]?.body?.accountId?.slice(0, 60))}`)
   } finally {
     if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
     else process.env.MAGPIE_MSMOLI_CONFIG = saved
@@ -10010,19 +10209,27 @@ test("a page shifted between reads is not summed twice", async () => {
   // page and the top of the next. The pages are not identical (a whole-page
   // stamp would not fire), so only per-row identity can see the repeat — and
   // without it the day's grant is counted twice and the card reads 领 400.
+  // The rows on each page are distinct — spend() takes (amount, count, day),
+  // so the earlier fixture's fourth argument was discarded and both pages were
+  // one repeated row: the walk then saw "every row already counted", a branch
+  // that fires without any shifting at all. The overlap is explicit here: the
+  // tail row closes page 1 and opens page 2, and page 2 also carries a new
+  // row, so the walk must dedupe one and count the other.
   const token = "ms-shiftedpg-0000-0000-0000-000000abcd"
-  const p1 = [day(), ...Array.from({ length: 48 }, (_, i) => spend(0, 1, today, `s${i}`)), spend(0, 1, today, "tail")]
-  const p2 = [day(), spend(0, 1, today, "n50")]
+  const spendId = (id) => ({ ...spend(0, 1, today), rule_key: "api_inference_" + id, id })
+  const p1 = [day(), ...Array.from({ length: 48 }, (_, i) => spendId(`s${i}`)), spendId("tail")]
+  const p2 = [day(), spendId("tail"), spendId("n50")]
   const u = await withFetch(
     {
       [BALANCE_PATH]: { body: { success: true, data: { available_balance: 0 } } },
       "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
-      [TX_PATH]: { body: { success: true, data: { records: p1, total: 51 } } },
-      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: p2, total: 51 } } },
+      [TX_PATH]: { body: { success: true, data: { records: p1, total: 52 } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: p2, total: 52 } } },
     },
     () => auth.usage(async () => ({ type: "api", key: token })),
   )
   assert.match(u.windows?.[0]?.display ?? "", /领 200/, `the same grant was counted twice: ${JSON.stringify(u)}`)
+  assert.match(u.windows?.[0]?.display ?? "", /今日用 0 /, "the fixture's rows carry no spend")
 })
 
 test("a full page whose total is reached needs no next page", async () => {
@@ -10143,4 +10350,266 @@ test("a budget already gone writes nothing back", async () => {
     globalThis.fetch = undefined
   }
   assert.deepEqual(writes, [], `a spent budget still took the store lock: ${JSON.stringify(writes)}`)
+})
+
+test("an echo whose pieces carry two filler characters is masked as one key", async () => {
+  // maskEchoes steps over one character between two pieces of the key; two in
+  // a row ("01234567xx 89abcdefxx …") was prose to it and the whole body
+  // reached the card. Up to as many as the run has already matched are stepped
+  // over now, and the pieces under MIN_ECHO are one echo.
+  const token = "ms-0123456789abcdef0123456789abcdef"
+  const echo = token.slice(3).match(/.{1,8}/g).join("xx ")
+  for (const where of ["title", "error", "nickname"]) {
+    const out = await withFetch(
+      where === "title"
+        ? {
+            "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+            [TX_PATH]: { body: { success: true, data: { records: [day({ title: echo })], total: 1 } } },
+          }
+        : where === "error"
+          ? { [BALANCE_PATH]: { status: 500, body: { success: false, message: `bad ${echo} end` } } }
+          : {
+              [BALANCE_PATH]: { body: { success: true, data: { available_balance: 5 } } },
+              "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: echo } } },
+              [TX_PATH]: { body: { success: true, data: { records: [day()], total: 1 } } },
+            },
+      async () => {
+        const p = await MsmoliPlugin({ directory: tmpDir("msmoli-twofill-"), client: { auth: { set: async () => {} }, app: { log() {} } } })
+        if (where === "title") return (await p.auth.checkin(async () => ({ type: "api", key: token }))).message
+        if (where === "error") return (await p.auth.usage(async () => ({ type: "api", key: token }))).error
+        const c = await p.auth.checkin(async () => ({ type: "api", key: token }))
+        return `${c.message}\n${(await p.auth.usage(async () => ({ type: "api", key: token }))).user ?? ""}`
+      },
+    )
+    const flat = out.normalize("NFKC").replace(/\s/g, "")
+    assert.ok(!flat.includes(token.slice(3)), `${where}: the joined pieces reached the text: ${out}`)
+  }
+})
+
+test("a nickname that spells the key out and hides the run behind a stray letter is refused", async () => {
+  // runsThrough counted one greedy pass in each direction, and a stray f (the
+  // token's last character) at the front, and an m at the back, put the run
+  // out of reach of both. The longest run the name shares with the key is what
+  // is counted now, so a stray character at either end cannot hide it. An
+  // ordinary name shares a few characters with any key and is still written.
+  const dir = tmpDir("msmoli-runsthru-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const writeNick = async (token, nick) => {
+    // a fresh plugin and a fresh state directory per case: the first run of a
+    // key records that it has been seen, and a second run on the same key is a
+    // different question than the one this test asks
+    const one = tmpDir("msmoli-runsthru-case-")
+    writeFileSync(join(one, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+    const writes = []
+    const withClient = await MsmoliPlugin({ directory: one, client: { auth: { set: async (o) => writes.push(o) }, app: { log() {} } } })
+    await withFetch(
+      {
+        [BALANCE_PATH]: { body: { success: true, data: { available_balance: 5 } } },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: nick } } },
+        [TX_PATH]: { body: { success: true, data: { records: [day()], total: 1 } } },
+      },
+      async () => {
+        const c = await withClient.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(c.outcome, "done", c.message)
+      },
+    )
+    rmSync(one, { recursive: true, force: true })
+    return writes
+  }
+  try {
+    for (const [token, nick, why] of [
+      ["ms-0123456789abcde0123456789abcdef", "f 01234567x 89abcde0x 12345678x m", "a stray letter on both ends"],
+      ["ms-aaaa1111-bbbb-2222-cccc-333344445555", "x aaaa1111-bbbb-2222 y", "a piece of a repeating key"],
+      ["ms-aaaa1111-bbbb-2222-cccc-333344445555", "1 aaaa1111-bbbb-2222 z", "the same piece behind stray characters"],
+    ]) {
+      const writes = await writeNick(token, nick)
+      assert.deepEqual(writes, [], `${why}: ${JSON.stringify(writes)}`)
+    }
+    // the control: a name is still written, so the refusals above are about the
+    // name and not about every name. Its own token: the names map remembers a
+    // refused name as "" for its token, and a fresh state directory does not
+    // clear it.
+    const writes = await writeNick("ms-cccc3333-dddd-4444-eeee-555566667777", "leep 2026")
+    assert.equal(writes.length, 1, "an ordinary name is still written back")
+    assert.equal(writes[0].body.accountId, "leep 2026")
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a full-width token in a host error is masked where no key is in hand", async () => {
+  // hostText (getAuth itself failed) reaches cardText with no token at all, so
+  // the exact split cannot run; the shape passes saw a word of full-width
+  // characters, and NFKC put the whole key back together. The folded copy is
+  // judged now, and the word as written is masked.
+  const token = "ms-0123456789abcdef0123456789abcdef"
+  const wide = token.replace(/[!-~]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0))
+  for (const where of ["checkin", "usage"]) {
+    const p = await MsmoliPlugin({ directory: tmpDir("msmoli-widehost-"), client: { auth: { set: async () => {} }, app: { log() {} } } })
+    const bad = async () => {
+      throw new Error("no key " + wide + " for provider")
+    }
+    const got = where === "checkin" ? await p.auth.checkin(bad) : await p.auth.usage(bad)
+    const said = (got.message ?? got.error ?? "").normalize("NFKC")
+    assert.ok(!said.includes(token), `${where}: the full-width key survived: ${said}`)
+    assert.match(got.message ?? got.error, /for provider/, `${where}: the frame went too: ${said}`)
+  }
+})
+
+test("a ledger read to the page cap is a floor, not the end of the ledger", async () => {
+  // dayRows read a full page with no `total` at the page cap as complete, and
+  // a day of 300 rows answered 250 with no "未读完" and nothing on the
+  // check-in's side to retry. Only a page older than the day, a page with room
+  // to spare, or a total the rows account for proves the end.
+  const token = "ms-pagecap-0000-0000-0000-00000000abcd"
+  const rows = Array.from({ length: 300 }, (_, i) => day({ gmt_created: today, type: "SPEND_CONFIRM", rule_key: "api_inference" + i, total_amount: 1, count: 1 }))
+  const u = await withFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 100 } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      [TX_PATH]: { body: { success: true, data: { records: rows.slice(0, 50), count: 50 } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: rows.slice(50, 100), count: 50 } } },
+    },
+    () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.match(u.windows[0].display, /今日用 100 \/ 领 0 .*账单未读完，数字偏低/, JSON.stringify(u.windows[0]))
+})
+
+test("the day's walk reads four extra pages and no more", async () => {
+  // DAY_PAGES had no test that could see its value: the cap case above hands
+  // back only two pages, so 4→3 stayed green. Here the ledger is six full pages
+  // of today's rows with no total, so only the cap ends the walk: pages 1–5 is
+  // five reads of today's rows, and not one may be skipped (3) or one more
+  // taken (5).
+  const token = "ms-daypages-0000-0000-0000-0000000abcd"
+  const rows = Array.from({ length: 300 }, (_, i) => day({ gmt_created: today, type: "SPEND_CONFIRM", rule_key: "api_inference" + i, total_amount: 1, count: 1 }))
+  const responses = {
+    [BALANCE_PATH]: { body: { success: true, data: { available_balance: 100 } } },
+    "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+    [TX_PATH]: { body: { success: true, data: { records: rows.slice(0, 50) } } },
+  }
+  for (let page = 2; page <= 8; page += 1) {
+    responses[`/openapi/v1/magicubes/transactions?page=${page}&page_size=50`] = {
+      body: { success: true, data: { records: rows.slice((page - 1) * 50, page * 50) } },
+    }
+  }
+  let calls = null
+  const u = await withFetch(responses, () => {
+    const before = globalThis.fetch
+    const spy = (url) => {
+      calls ??= []
+      const q = new URL(url).searchParams.get("page")
+      if (q) calls.push(Number(q))
+      return before(url)
+    }
+    globalThis.fetch = spy
+    return auth.usage(async () => ({ type: "api", key: token })).finally(() => {
+      globalThis.fetch = before
+    })
+  })
+  const shown = u.windows?.[0]?.display ?? JSON.stringify(u)
+  assert.match(shown, /今日用 250 \/ .*账单未读完/, `five pages of 50, the cap one row short of the end: ${shown}`)
+  assert.deepEqual(calls, [1, 2, 3, 4, 5], `the walk read the wrong pages: ${JSON.stringify(calls)}`)
+})
+
+test("a page that prints a grown total keeps the walk going", async () => {
+  // The walk's stop test read the first page's `total`: a ledger that grew
+  // between the reads printed 51 on page 1 and 52 on page 2, so the walk ended
+  // on the old number with one row unread and the card said 51. The latest
+  // number wins now.
+  const token = "ms-grewtotal-0000-0000-0000-00000000abcd"
+  const first = Array.from({ length: 50 }, (_, i) => day({ gmt_created: today, type: "SPEND_CONFIRM", rule_key: "api_inference" + i, total_amount: 1, count: 1 }))
+  const u = await withFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 100 } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      [TX_PATH]: { body: { success: true, data: { records: first, total: 51 } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: [day({ type: "SPEND_CONFIRM", rule_key: "api_inference_50", total_amount: 1, count: 1 })], total: 52 } } },
+    },
+    () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.match(u.windows?.[0]?.display ?? "", /今日用 51 /, `the row the second page promised was dropped: ${JSON.stringify(u)}`)
+})
+
+test("a short page that omits its total does not shrink the one page 1 printed", async () => {
+  // totalOf answers "that is the whole ledger" for a short page with no
+  // `total`, which is right for the page it was asked about and wrong as a
+  // replacement for a number an earlier page printed: page 1 said 52, page 2
+  // carried 5 rows and no total, the known 52 was replaced by 51 seen, the
+  // walk stopped, and the 300 credits on page 3 were never read. Only a
+  // number the server printed may move the total.
+  const token = "ms-shortpage-0000-0000-0000-0000000abcd"
+  const first = [day(), ...Array.from({ length: 49 }, (_, i) => spend(1, i + 1))]
+  const second = Array.from({ length: 5 }, (_, i) => spend(1, 100 + i))
+  const third = Array.from({ length: 5 }, (_, i) => spend(2, 200 + i))
+  const u = await withFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 100 } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      [TX_PATH]: { body: { success: true, data: { records: first, total: 60 } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: second } } },
+      "/openapi/v1/magicubes/transactions?page=3&page_size=50": { body: { success: true, data: { records: third } } },
+    },
+    () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  const shown = u.windows?.[0]?.display ?? ""
+  assert.match(shown, /今日用 64 /, `the page behind a short page's missing total was dropped: ${shown}`)
+})
+
+test("a bodyless 401 is a proxy's challenge, not the token being refused", async () => {
+  // A bare 401 with no body (nginx's auth_request, a proxy's challenge) parsed
+  // as {} — an object, so parsed — and expired the sign-in: the one 401 the
+  // host cannot take back. An empty body is not an answer at all now.
+  const token = "ms-empty401-0000-0000-0000-0000000abcd"
+  const u = await withFetch({ [BALANCE_PATH]: { status: 401, raw: "" } }, () =>
+    auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.equal(u.signIn, "", "a bodyless 401 signed the account out")
+  assert.match(u.error ?? "", /401/, `the failure should still say which status it met: ${u.error}`)
+  const c = await withFetch({ [TX_PATH]: { status: 401, raw: "" }, [BALANCE_PATH]: { body: { success: true, data: { available_balance: 1 } } } }, () =>
+    auth.checkin(async () => ({ type: "api", key: token })),
+  )
+  assert.equal(c.signIn, undefined, "a bodyless 401 signed the account out on the check-in too")
+})
+
+test("a streak the walk could not see the end of is left out, not sent as 0", async () => {
+  // The answer used to carry `streak: undefined`, which is not "said nothing":
+  // the host reads it with num() and renders 0, so a card said "0 天" for a run
+  // the plugin could not see the end of. The key must be absent instead.
+  const token = "ms-nostreak-0000-0000-0000-0000000abcd"
+  const first = [day(), ...Array.from({ length: 49 }, (_, i) => spend(0, 1, today))]
+  const c = await withFetch(
+    {
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      [TX_PATH]: { body: { success: true, data: { records: first } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { status: 500, raw: "boom" },
+    },
+    () => auth.checkin(async () => ({ type: "api", key: token })),
+  )
+  assert.equal(c.outcome, "done", JSON.stringify(c))
+  assert.equal(Object.hasOwn(c, "streak"), false, `an unreadable run reached the host as a number: ${JSON.stringify(c)}`)
+})
+
+test("a slice of a key in a host error is masked even with no key in hand", async () => {
+  // getAuth failed, so the mask has no key to compare against; the host's
+  // message can still carry a 12–15-character slice of one. A slice like that
+  // has no case mix and no length floor to catch it, so it is judged by its
+  // shape: a run with no vowels, letters and digits alternating, or mostly
+  // digits. A word — a provider name, a rule id — keeps its vowels.
+  const cases = ["5gli9zadx8zg9jez", "d8e3a6f0b5c9"]
+  for (const frag of cases) {
+    const c = await withFetch({}, () => auth.checkin(async () => { throw new Error(`no key ${frag} for provider`) }))
+    assert.equal(c.outcome, "failed", JSON.stringify(c))
+    assert.ok(!c.message.includes(frag), `a key slice reached the card: ${c.message}`)
+    assert.match(c.message, /no key .* for provider/, `the frame was lost: ${c.message}`)
+  }
+  // and the words this must not eat, in the same no-key path
+  for (const w of ["modelscope", "workbuddy", "trae-global", "daily_active"]) {
+    const u = await withFetch({}, () => auth.usage(async () => { throw new Error(`cannot reach ${w} right now`) }))
+    assert.ok(u.error.includes(w), `${w} was masked as a key: ${u.error}`)
+  }
 })

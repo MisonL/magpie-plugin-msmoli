@@ -129,7 +129,8 @@ tells you whether it is on `PATH`; if not, use the app's full path,
 The plugin relies on the host's plugin API — the account scope a check-in and
 a usage read run in, the provider argument `auth.checkin` is handed, the
 `input.directory` the plugin's own folder comes from, and `auth.set` writing
-back into the same account. It is maintained against **magpie 0.1.3096**.
+back into the same account. It is checked against **magpie 0.1.3354**; an older
+host may lack part of that contract.
 
 Pick one of three ways. They all end the same: an `msmoli` row under
 **Settings → Usage → Plugins**. The sign-in is kept per provider id, not per
@@ -213,11 +214,12 @@ From a clone, run `./bin/sync.mjs` (or `node bin/sync.mjs` on Windows and
 WSL). npm 12 blocks `npx github:…` by default, so don't start from that.
 
 `npx`, `magpie plugin add magpie-plugin-msmoli` and `magpie plugin update` all
-follow the npm package, and the npm package still serves **0.2.0** — the last
-release. That version does ship an older `bin/sync.mjs` with both directions,
-but it keeps the international site in a second provider, and it predates this
-round of fixes (chunked echoes, the row-level ledger dedupe, the budgets). Run
-it from a clone to get what this document describes.
+follow the npm package. Until 0.3.0 is published, the npm package still serves
+**0.2.0** — the last release. That version does ship an older `bin/sync.mjs`
+with both directions, but it keeps the international site in a second
+provider, and it predates this round of fixes (chunked echoes, the row-level
+ledger dedupe, the budgets). Run it from a clone to get what this document
+describes.
 
 It syncs the **domestic site only**: the built-in preset it reads is the
 `modelscope.cn` one. Sign an international account in by hand.
@@ -232,6 +234,7 @@ It syncs the **domestic site only**: the built-in preset it reads is the
 | `--dry-run` | Print the commands, masked, without running them or writing anything; no magpie binary needed |
 | `--dir <folder>` | Where magpie's config is (a portable install's `data` folder) |
 | `--magpie <path>` | Path to the magpie binary; a bare `magpie` is refused |
+| `--version` | Print the version (read from the package's own `package.json`) |
 
 <details>
 <summary><b>How the CLI keeps your config and your token safe</b></summary>
@@ -259,11 +262,14 @@ It syncs the **domestic site only**: the built-in preset it reads is the
   tokens, AWS secrets, UUIDs, hex digests, base64 bodies. A key with a space,
   newline or invisible character pasted into it is still masked whole, and so
   is one printed another way: upper-cased, in full-width characters, or broken
-  into short groups (`ms-01234 56789abc …`). A value that starts like a path
-  keeps its shape, and only the key-like part inside it is masked, so
-  `--dir /tmp/ghp_16C7…` still names the folder. What the masking cannot know:
-  a key of *another* vendor's shape split into groups small enough that no
-  piece reads as a key, and typed into an argument the CLI does not know.
+  into short groups (`ms-01234 56789abc …`), and so is a vendor key cut the
+  same way (`ghp_ 1234 AbCd 5678 …`, `sk-a nt-a pi03 …`, one character per
+  word, `AKIAIOSF ODNN7EXA MPLE`) — the words are judged as one key joined
+  back up. A value that starts like a path keeps its shape, and only the
+  key-like part inside it is masked, so `--dir /tmp/ghp_16C7…` still names the
+  folder. What the masking cannot know: a key typed into an argument the CLI
+  does not know, inside a path segment (`/keys/sk-ant-…`), and a run of words
+  that reads as prose as well as as a key.
 
 </details>
 
@@ -546,14 +552,42 @@ accounts under the same `msmoli` row, not new rows.
 plugin reads `NickName` / `Name` and drops the rest as soon as the response is
 parsed. The token lives only in magpie's own `plugin-auth.json`: the plugin
 never writes it anywhere, never logs it, and never sends it anywhere but the
-site it came from.
+two ModelScope sites (`modelscope.cn` and `modelscope.ai`) — the domestic one
+first, and the international one when the domestic one refuses the token, or
+when the sign-in is already known to belong there.
 
 The one place a token could still be copied is the account name: a reply whose
-`NickName` is the token, or a piece of it, is not written back as `accountId`
-and is masked on the card instead. Two situations the mask cannot cover: the
-first 4 and last 4 characters of the token do appear, that is the mask, and a
-key of a shape this plugin does not recognise, echoed back in a spelling it
-does not fold (the `ms-` shapes are covered in any case and full width).
+`NickName` is the token, or a piece of it, or a key of a vendor's shape
+(`sk-…`, `ghp_…`, `AKIA…`) is not written back as `accountId` and is masked
+on the card instead. A name that happens to begin like one is refused too: `sk-`
+is a key's front before it is a nickname. Three situations the mask cannot cover: the
+first 4 and last 4 characters of the token do appear, that is the mask; a key
+of a shape this plugin does not recognise, echoed back in a spelling it does
+not fold (the `ms-` shapes are covered in any case and full width); and a word
+that is already masked is not judged again, so its ellipsis is printed as the
+mask it is.
+
+Text from the server that carries a key cut by whitespace is masked the same
+way as the CLI's (`ghp_ 1234 AbCd …`, `sk-a nt-a pi03 …`), via the same
+reading: a run of words that joins back into a key. The cut it reads across
+is a space, a no-break or ideographic space, a line break, or (from a key's
+front) a middot — a value copied out of a web page or a Chinese IME carries
+these as often as plain spaces. A run that also reads as an ordinary sentence
+is left alone.
+
+The run readings give up on a body past 32 KiB and only the per-word pass
+runs: a body of thousands of one-word pieces ("s k - a n t" repeated) costs
+two orders of magnitude more reading than any message this pass exists for,
+and a key stored inside such a body as whole words is still masked. The
+bound exists so a hostile server's error cannot eat a hook's budget.
+
+A piece is masked only when it carries ten characters of the key's own —
+**letters and digits, not the hyphens or spaces the token was written in**. A
+five-character slice of a hyphenated key (`ms-…`'s middle `c-3333`) is left as
+it is written: no one can read a full key out of a slice that short, and
+masking every string that shares six characters would eat ordinary words. The
+same floor is what keeps a nickname a person actually picked ("Mison 2026")
+from being refused as an echo.
 
 The plugin writes two things, both onto the sign-in it already has and through
 the host's own `client.auth.set`: the nickname, as `accountId` (so the card
@@ -583,11 +617,14 @@ The terms and risks are in
   four more, for both the check-in and the card. Asks before the window send
   nothing. A usage read is two requests and never touches the sign-in
   endpoint, so menu-bar polling cannot turn into check-ins.
-- **International accounts cost one extra read, once per process**: the 401
-  from the domestic site. A domestic account costs nothing extra. A remembered
-  site that 401s drops the memory and probes again; one that times out or
-  answers nothing usable is asked no more than the other site, so a dead link
-  costs the 8-second request timeout, not the whole budget.
+- **International accounts cost one extra 401 per token, per process**, and
+  that 401 is on the first read that does not already know the site: the
+  sign-in's `site` field saves it after a restart, so an international usage
+  read is three requests the first time (domestic 401, balance, ledger) and two
+  after that. A domestic account costs nothing extra. A remembered site that
+  401s drops the memory and probes again; one that times out or answers
+  nothing usable is asked no more than the other site, so a dead link costs
+  the 8-second request timeout, not the whole budget.
 - **Time limits.** Every request gives up after 8 seconds, body included, and a
   body is read to at most 256 KiB. A whole check-in gives up after 25 seconds
   and a usage read after 18, because magpie runs every provider's check-ins

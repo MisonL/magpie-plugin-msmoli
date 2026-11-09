@@ -106,13 +106,22 @@ const USAGE_BUDGET_MS = 18 * 1000
 // rule, one place — tokenOf and unusableKey must agree on it, or a key one of
 // them accepts and the other refuses has no single answer to give the user.
 const SENDABLE = /^[\x21-\x7e]+$/
-const rawKey = (auth) => (auth?.type === "api" ? String(auth.key ?? "").trim() : "")
+// A key that is not a string is not a key: String() on an array or a number
+// turns it into text that passes SENDABLE, and the sign-in's key then goes out
+// as a Cookie — measured, `key: [token]` sent the token and `key: 1234…` sent
+// the number. The host writes a string; anything else is a file this plugin
+// could not read, and it is refused the way an unsendable key is, not sent.
+const rawKey = (auth) => (auth?.type === "api" && typeof auth.key === "string" ? auth.key.trim() : "")
 
 // tokenOf is the key this sign-in carries, or "" when there is none or it is
 // not one we can send. The two are told apart by the caller so a key that is
 // there and unusable does not read as "you never signed in".
 const unusableKey = (auth) => {
-  const key = rawKey(auth)
+  if (auth?.type !== "api" || auth.key === undefined || auth.key === null) return false
+  // a key of the wrong type is a store this plugin cannot read, not an absent
+  // one: reported as unusable so the message says the token is unreadable
+  if (typeof auth.key !== "string") return true
+  const key = auth.key.trim()
   return Boolean(key) && !SENDABLE.test(key)
 }
 const tokenOf = (auth) => {
@@ -290,7 +299,10 @@ async function json(site, token, path, deadline = Infinity) {
     try {
       body = text ? JSON.parse(text) : {}
     } catch {}
-    return { res, body, parsed: body !== null }
+    // an empty body is not an answer at all: a bare 401 from a proxy is the
+    // path, not the site saying the token is refused, and reading it as "{}"
+    // (parsed, an object) signed the account out over a middlebox's refusal
+    return { res, body, parsed: body !== null && (text !== "" || res.status === 200) }
   } catch (e) {
     throw saidFailure(e, ctl, budget)
   } finally {
@@ -769,21 +781,36 @@ const maskEchoes = (s, token) => {
         v++
         continue
       }
-      // One character the token does not hold may sit between two pieces of
-      // it: a server that prints "01234567x 89abcde0x …" writes 8-character
-      // pieces under MIN_ECHO and a letter between them, and the pieces
-      // together are the key. A single filler is stepped over when the next
-      // character continues the run; two in a row is prose, and stops it.
-      // A filler may only be stepped over *inside* a run: skipping a leading
-      // character before anything matched swallowed the word in front of the
-      // key ("x ms-…" lost its x).
-      if (piece.length > 0 && fillers === 0 && v + 1 < vis.length && flat.includes(piece + vis[v + 1])) {
-        fillers = 1
-        v++
-        continue
-      }
-      break
+      // Characters the token does not hold at this point, between two pieces
+      // of it: a server that prints "01234567x 89abcde0x …" writes
+      // 8-character pieces under MIN_ECHO and a letter between them, and the
+      // pieces together are the key. Up to as many characters as the run has
+      // already matched are stepped over — an echo is mostly the key — and the
+      // run resumes at the first of them that continues it. A filler may only
+      // be stepped over *inside* a run: skipping a leading character before
+      // anything matched swallowed the word in front of the key ("x ms-…" lost
+      // its x). One filler was the first cut; two in a row then went through
+      // ("01234567xx 89abcdefxx …" kept the whole body).
+      if (piece.length === 0) break
+      const stop = Math.min(vis.length, v + 1 + (piece.length - fillers))
+      let hit = -1
+      for (let j = v + 1; j < stop; j += 1) if (flat.includes(piece + vis[j])) { hit = j; break }
+      // one character is stepped over however little has matched (a server's
+      // single letter between pieces); more than one only when the run is
+      // already long enough to be an echo under the lower floor. Without that
+      // second half, "said: aaaa1111-b" matched the last s of "said" and then
+      // skipped "id" to join the piece, and a 9-character slice that the floor
+      // is meant to leave alone was masked as if it were longer.
+      if (hit < 0 || (hit - v > 1 && piece.length < MIN_ECHO - 2)) break
+      fillers += hit - v
+      v = hit
     }
+    // The floor counts the key's own characters, not the characters the echo
+    // wrote them in: a slice carrying its own hyphens ("1-bbbb-2222-") is
+    // twelve characters on the card and nine of the key, and nine is under the
+    // floor by design — a fragment that short is not the key, and counting
+    // punctuation would mask ordinary hyphenated text ("2026-11-08" is eight
+    // of them). The README says so.
     if (piece.length >= MIN_ECHO) {
       // The span of the whole run, the characters skipped between its pieces
       // included. What sat between the last character written and the run's
@@ -807,6 +834,8 @@ const maskEchoes = (s, token) => {
 // the next line's words. maskEchoes no longer needs a separate predicate —
 // it keeps the alphanumeric characters and skips everything else.
 const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
+// the one place a token-shaped run is turned into a mask is maskShaped, below:
+// the shape alone found a run; the body it carries is what decides.
 
 // A key of another shape with an invisible character inside it reaches the card
 // as two words once that character is turned into a space, and neither half
@@ -832,8 +861,102 @@ const GLUE = new RegExp(String.raw`(?<=[A-Za-z0-9+\/=_.-])${INV}(?=[A-Za-z0-9+\/
 // same key, and each half is under every word floor on its own: that is the
 // second arm, six characters, one space, five more. "ms-dos and ms-word" has
 // no such shape (six and five characters either side of its real spaces).
+// The body has to read as key material, not merely be eleven characters:
+// an ordinary word after the front ("The ms-interviewing feature is
+// unavailable" on the card, a nickname of the same) was masked whole and the
+// nickname refused its write-back. A ModelScope key is hex or base64 with a
+// digit in it, nearly always in hyphen-separated groups (aaaa1111-bbbb-2222-
+// cccc-…); a word carries no digit and a version carries its digits as one
+// dotted group ("ms-office 2016", "ms-cli 2026.11.9"). Either spelling does:
+// 11+ that are all hex, or 11+ that carry a digit, and the body's last
+// character joined to a letter or digit is a cut, not the end of a key
+// ("ms-abc12345678abc" is one body, not "…5678" and "abc").
 const keyChar = String.raw`(?:${INV}*[\x21-\x7e])`
-const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${keyChar}{11,}|${keyChar}{6,}[^\S\n\r]+${keyChar}{5,})`, "gu")
+const tokenShaped = new RegExp(
+  String.raw`m${INV}*s${INV}*-(?:${keyChar}{11,}|${keyChar}{6,}[^\S\n\r]+${keyChar}{5,})`,
+  "gu",
+)
+const keyBody = new RegExp(String.raw`(?:[0-9a-f]{11,}(?![0-9a-z])|(?=[\x21-\x7e]{11,})(?!\w)[\x21-\x7e]*\d)`)
+// maskShaped is the replace both passes share: the shape finds a run that
+// begins like a key; keyBody asks whether the run after the front reads as
+// one. A run that does not is ordinary text and is handed back as written,
+// untouched — the caller's own passes then judge it word by word.
+const maskShaped = (m) => (keyBody.test(m) ? maskToken(m) : m)
+// The vendor prefixes whose keys are not distinguishable from a name by its
+// characters alone: the prefix is the evidence ("sk-" is Anthropic and OpenAI's,
+// "sk_live_" Stripe's, "ghp_" GitHub's, "xoxb-" Slack's, "AKIA" AWS'). The body
+// behind it is not asked — a name that starts with one of these is a key first.
+const VENDOR = /^(?:sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|akia|asia|aida|aliyun|ssh-rsa|-----begin)/
+const keyAt = (word, letters) => isKeyWord(word, letters) || VENDOR.test(word) || /^ms-/i.test(word)
+// maskSpaced is the other reading of a piece of text: a key cut by whitespace
+// is read as one key. Measured without it: a 40-character ghp_ token cut into
+// four went out whole, a foreign ms- key cut the same way, and each piece
+// cleared the word floors on its own. The check gets both readings — maskKeys
+// per word, and this per run — and text that reads as a key under either is
+// masked.
+//
+// Three readings, the same shapes bin/sync.mjs's maskCut reads: a run of words
+// on one line (the body of a key cut by spaces — the key-shaped word at an
+// end of it is where the mask begins, its pieces short or a vendor front); a
+// pair either side of a line break (the break a wrapped copy leaves), judged
+// joined; a narrow run of words that are all short pieces (a key written one
+// character per word). A word already carrying a mask is not judged again.
+const MASKED = "…"
+const startProse = (w) => /^[a-z]{2,}$/.test(w) && !VENDOR.test(w) && !/^ms-/.test(w)
+function maskSpaced(s, letters) {
+  if (s.length > 32 * 1024) return s
+  const words = [...s.matchAll(/[\x21-\x7e]+/g)]
+  if (words.length < 2) return s
+  const at = (i) => words[i].index
+  const end = (i) => words[i].index + words[i][0].length
+  const gap = (i) => s.slice(end(i - 1), at(i))
+  // a run's gaps: one space, a no-break or ideographic one, or one line break
+  // (a key wrapped across lines, "ms-vqmjh\n75qa651i\n…"). A middot or a
+  // bullet is a cut's other spelling ("ms-a·b·c") only from a key's front:
+  // the front is the evidence that a cut made it, and a card's own middot
+  // separators ("version 1.2.3 · build 45") do not start at one
+  const front = (w) => VENDOR.test(w) || /^ms-/i.test(w)
+  const runGap = (k, i) =>
+    (/^[ \t\u00a0\u3000\r\n]+$/.test(gap(k)) && gap(k).length <= 2) || (/^[·•∙‧・]$/.test(gap(k)) && front(words[i][0]))
+  const out = []
+  let from = 0
+  for (let i = 0; i < words.length; i += 1) {
+    if (i > 0 && /^\r?\n$/.test(gap(i)) && end(i) - at(i - 1) >= 20) {
+      const pair = words[i - 1][0] + words[i][0]
+      if (!pair.includes(MASKED) && isKeyWord(pair, letters)) {
+        out.push(s.slice(from, at(i - 1)), maskToken(pair))
+        from = end(i)
+        i += 1
+        continue
+      }
+    }
+    if (startProse(words[i][0])) continue
+    const pairOfKeys = i + 1 < words.length && /^[ \t\u00a0\u3000]+$/.test(gap(i + 1)) && keyAt(words[i][0], letters) && keyAt(words[i + 1][0], letters)
+    let j = i
+    let head = i
+    let body = words[i][0]
+    for (let k = i + 1; !pairOfKeys && k < words.length && k - i <= 48 && runGap(k, i); k += 1) {
+      // a word of four or more lower-case letters inside the run is prose
+      // ("sk-User joined the team"), not a piece of a key. A run of exactly
+      // four is a piece as readily as a word ("ms-v qmjh 75qa …" is a key cut
+      // into fours), so it ends the run only when the run does not start at a
+      // key's front
+      if (words[k][0].length >= 4 && /^[a-z]{4,}$/.test(words[k][0]) && !/[0-9]/.test(body) && (words[k][0].length > 4 || !(VENDOR.test(words[i][0]) || /^ms-/i.test(words[i][0])))) break
+      body += words[k][0]
+      const pieces = words.slice(i, k + 1).map((w) => w[0])
+      const cut = body.length >= 20 && !body.includes(MASKED) && pieces.every((w) => w.length <= 16 || VENDOR.test(w)) && !pieces.some((w) => w.length >= 7 && /^[A-Za-z]{7,}$/.test(w)) && (body.match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r, letters))
+      if (!cut) continue
+      const hi = pieces.findIndex((w) => keyAt(w, letters) || (w.length >= 8 && /\d/.test(w) && /[A-Z]/.test(w)))
+      j = k
+      head = hi >= 0 ? i + hi : i
+    }
+    if (j === i) continue
+    out.push(s.slice(from, at(head)), maskToken(words.slice(head, j + 1).map((w) => w[0]).join("").replaceAll(MASKED, "")))
+    from = end(j)
+    i = j
+  }
+  return out.join("") + s.slice(from)
+}
 
 // keyShaped catches a key this plugin does not hold. tokenShaped knows only
 // the ms- prefix, so a server — or a proxy in front of it — that echoes
@@ -918,8 +1041,30 @@ const base64y = (w) => {
 // flipping pieces, is what keeps the vendor key (one flipping piece) from
 // being lost
 const alternates = (w) => (w.match(/[a-z][A-Z]/g) ?? []).length >= 2
+// A slice of a generated key can be handed back with no known key to compare
+// against — "no key 5gli9zadx8zg9jez for provider" from a host whose
+// getAuth failed — and a 12–15-character lowercase run has no case mix, no
+// digit by shape alone and no length floor to catch it. Its letters do not
+// read as a word: a run of them has few vowels (usually none), letters and
+// digits alternate, or digits make up much of it. A real word — "modelscope",
+// "workbuddy", "trae-global" — carries vowels; a long provider id with a date
+// in it sits under the length floor. The band is narrow on purpose: 40 and
+// over is the other shapes' business, and under 12 the fragments a legitimate
+// message carries (a version, a rule id) are short enough to stay.
+const VOWELS = /[aeiouy]/g
+const randomish = (r) => {
+  if (r.length < 12 || r.length > 40 || !/[a-z]/.test(r)) return false
+  if ((r.match(VOWELS) ?? []).length / r.length >= 0.2) return false
+  const digits = (r.match(/\d/g) ?? []).length
+  const transitions = (r.match(/[a-z][0-9]|[0-9][a-z]/g) ?? []).length
+  return transitions >= 2 || digits >= 4
+}
 const isKeyWord = (w, letters = true) => {
   if (w.length < 12) return false
+  // a run with no word in it (a slash of a key a host printed with no key in
+  // hand) is judged by shape; the caller that knows a name from a key skips
+  // this arm by passing `letters: false` (nameText, when a name is being shown)
+  if (letters && /^[a-z0-9]+$/.test(w) && randomish(w)) return true
   if (!/[\\/]/.test(w)) {
     if (UUID.test(w) || base64y(w) || (w.match(RUN) ?? []).some((r) => keyRun(r, letters))) return true
     // the separators out: a key cut into pieces by - _ . is still one key, and
@@ -938,10 +1083,50 @@ const isKeyWord = (w, letters = true) => {
   return !PATHY.test(w) && parts.length >= 2
 }
 
+// maskAll is the three readings a card's text gets, in order: the run reading
+// (maskSpaced), the harder cut (maskCut), and then word by word (maskKeys) —
+// whatever one of them finds is masked, and what it masked is left alone by
+// the next two.
+// maskCaps is the key written without its spaces ("AKIAIOSFODNN 7EXAMPLE"),
+// after the run readings: a word mixing capitals and digits, or one from a
+// vendor's front ("AKIA"), joined with the words after it where the join is
+// all capitals and digits — the shape every vendor key keeps — and long
+// enough to be one of them. The join only covers the pieces that are the
+// key's own alphabet; a word outside it ("the key AKIAIOSFODNN7 EXAM PLES
+// here") is where the join stops, and the joined part is what is masked.
+const maskCaps = (s) => {
+  // a body with no capital in it has no vendor key written without its
+  // spaces (every one of their shapes is all capitals and digits)
+  if (s.length > 32 * 1024 || !/[A-Z]/.test(s)) return s
+  const words = [...s.matchAll(/[\x21-\x7e]+/g)]
+  const at = (i) => words[i].index
+  const end = (i) => words[i].index + words[i][0].length
+  const out = []
+  let from = 0
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i][0]
+    if (!VENDOR.test(w) && !(/^[A-Z0-9]{4,}$/.test(w) && /[A-Z]/.test(w))) continue
+    let j = i
+    let body = w
+    while (j + 1 < words.length && s.slice(end(j), at(j + 1)).length <= 2 && /^[A-Z0-9]{2,}$/.test(words[j + 1][0]) && /^[A-Z0-9]+$/.test(body)) {
+      j += 1
+      body += words[j][0]
+    }
+    if (j === i || body.length < 16 || /[a-z]/.test(body)) continue
+    out.push(s.slice(from, at(i)), maskToken(body))
+    from = end(j)
+    i = j
+  }
+  return out.join("") + s.slice(from)
+}
+
+const maskAll = (s, letters) => maskKeys(maskCut(maskSpaced(maskCaps(s), letters), letters), letters)
 // maskKeys walks the words of a piece of text: one word that is itself a key
 // goes, and inside a word that is not, only the key-like runs and UUIDs go.
 // Punctuation that cannot be part of a key stays where it was, so a card
-// reads "（bonus ghp_16C7…8B4a）" rather than losing its brackets.
+// reads "（bonus ghp_16C7…8B4a）" rather than losing its brackets. A key cut by
+// spaces is not this walk's to find — it sees one word at a time, and four
+// pieces under the floors are four words kept; maskSpaced reads the run.
 //
 // The lead and tail of punctuation are found by walking in from each end, not
 // by an anchored regex. `word.slice(lead).match(/[^…]*$/)` backtracked from
@@ -950,8 +1135,96 @@ const isKeyWord = (w, letters = true) => {
 // one match, and a server controls the ledger title it sits in. (A word of
 // nothing but punctuation does not show it — the first start position matches
 // cleanly — so the test uses that shape)
-const maskKeys = (s, letters = true) =>
-  s.replace(/[^\s]+/g, (word) => {
+// maskCut is the harder cut: a key whose front is itself cut, or whose pieces
+// are cut in two ("ghp _12 34A …", "sk-a nt-a pi03 -Eya …"). Read from a head
+// — a word carrying a vendor prefix, or folding the key's own case down to a
+// capital and a digit, or a run of capitals and digits alone (a key written
+// without its spaces: "AKIAIOSF ODNN7EXA MPLE") — the run goes on while every
+// piece is short and none is prose, and the join is a key or the key's pieces
+// keep flipping case between them. The head is where the mask begins.
+const conts = (w) => (/[0-9]/.test(w) || /[A-Z]/.test(w)) && !VENDOR.test(w)
+function maskCut(s, letters) {
+  // a body of many KiB of one-character words costs far more reading than a
+  // card ever shows, and a hook's whole budget is 25 seconds: past 32 KiB the
+  // pass is skipped, and the other two readings (linear in the text) still run
+  if (s.length > 32 * 1024) return s
+  const words = [...s.matchAll(/[\x21-\x7e]+/g)]
+  if (words.length < 3) return s
+  const at = (i) => words[i].index
+  const end = (i) => words[i].index + words[i][0].length
+  const gap = (i) => s.slice(end(i - 1), at(i))
+  // the same line-break join as the run reading, and for the same reason
+  // the same gaps as the run reading, and for the same reason
+  const front = (w) => VENDOR.test(w) || /^ms-/i.test(w)
+  const runGap = (k, i) =>
+    s.slice(end(k - 1), at(k)).length <= 2 &&
+    (/^[ \t\u00a0\u3000]+$/.test(gap(k)) || /^\r?\n$/.test(gap(k)) || (/^[·•∙‧・]$/.test(gap(k)) && front(words[i][0])))
+  const out = []
+  let from = 0
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i][0]
+    // a key written one character per word starts at a piece of one or two
+    // characters inside such a run (five or more one-character words); the
+    // join decides whether the pieces are one key
+    const tiny = w.length <= 2 && words[i + 4] !== undefined && words.slice(i, i + 5).every((x) => x[0].length <= 2)
+    if (!VENDOR.test(w) && !conts(w) && !tiny) continue
+    let j = i
+    let body = w
+    let mixed = false
+    for (let k = i + 1; w.length <= 16 && k < words.length && k - i <= 64; k += 1) {
+      if (!runGap(k, i)) break
+      const x = words[k][0]
+      if (x.length > 16) break
+      // a piece of one capital and lower-case letters right after the head is
+      // a word on its own ("sk-User"), and a word of four or more lower-case
+      // letters inside the run is prose ("the team") — unless the head is a
+      // run of capitals and digits, where every piece is the key's
+      if (/^[A-Z][a-z]+$/.test(x) && k === i + 1 && !/[0-9]/.test(body)) break
+      // the same piece-versus-prose split as the run reading: four lower-case
+      // letters end the run unless the run starts at a key's front
+      if (/^[a-z]{4,}$/.test(x) && body.length >= 4 && !/[0-9]/.test(body) && !/^[A-Z0-9]+$/.test(body) && (x.length > 4 || !(VENDOR.test(w) || /^ms-/i.test(w)))) break
+      body += x
+      if (body.length < 20 || body.includes(MASKED)) continue
+      const whole = body.length >= 16 && (body.match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r, letters)) // every keyRun arm floors at 16
+      const flips = body.match(/[a-z][A-Z]/g) ?? []
+      // (only asked once both is on the table; most of a run's words carry one case)
+      let pairMix = -1
+      let shortMix = false
+      if (whole || flips.length >= 2) {
+        const run = words.slice(i, k + 1)
+        pairMix = run.filter((y) => /[a-z]/.test(y[0]) && /[A-Z]/.test(y[0])).length
+        shortMix = pairMix > 0 && run.some((y) => y[0].length <= 12 && /[a-z]/.test(y[0]) && /[A-Z]/.test(y[0]))
+      }
+      if (whole || flips.length >= 2 || (pairMix >= 2 && shortMix)) {
+        j = k
+        mixed = whole || flips.length >= 2
+      }
+    }
+    if (j === i || !mixed) continue
+    const run = words.slice(i, j + 1)
+    // a run of words that are each prose-shaped ("Rebecca Deborah Bradford")
+    // is two runs of words, not a key
+    if (run.every((x) => /^[a-z]{3,}$/i.test(x[0]))) continue
+    out.push(s.slice(from, at(i)), maskToken(run.map((x) => x[0]).join("")))
+    from = end(j)
+    i = j
+  }
+  return out.join("") + s.slice(from)
+}
+
+const maskKeys = (s, letters = true) => {
+  return s.replace(/[^\s]+/g, (word) => {
+    // The word in the other spellings a key is printed in — full-width
+    // characters, mostly. Nothing below can read it: there is no ASCII body
+    // and no ASCII path prefix, so every pass saw ordinary text. Measured, a
+    // host error carrying "no key ｍｓ－… for provider" printed the whole
+    // token, and NFKC put it back together. The folded copy is what the shape
+    // tests judge, and the word as written is what is masked.
+    const folded = word.normalize("NFKC")
+    if (folded !== word) {
+      const plain = folded.toLowerCase()
+      if (isKeyWord(folded, letters) || (plain.match(RUN) ?? []).some((r) => keyRun(r, letters)) || UUID.test(folded)) return maskToken(word)
+    }
     let a = 0
     while (a < word.length && !IDCH.has(word[a])) a += 1
     let b = word.length
@@ -969,6 +1242,7 @@ const maskKeys = (s, letters = true) =>
       : body.replace(RUN, (r) => (keyRun(r, letters) ? maskToken(r) : r)).replace(UUID_ANY, (m) => maskToken(m))
     return lead + masked + tail
   })
+}
 
 // cardText is what a host error becomes before it reaches the account card or
 // the terminal. The host's message is not our text: magpie's own CLI scrubs
@@ -993,7 +1267,8 @@ const maskKeys = (s, letters = true) =>
 const cardText = (value, token, max = 200) => {
   let s = String(value ?? "").replace(GLUE, "")
   if (typeof token === "string" && token) s = s.split(token).join(maskToken(token))
-  return text(maskKeys(maskEchoes(s, token).replace(tokenShaped, (m) => maskToken(m))), max)
+  s = maskEchoes(s, token).replace(tokenShaped, maskShaped)
+  return text(maskAll(s, true), max)
 }
 // The account's own name is text the user picked, not a server's message: a
 // long camelCase name ("MisonLiangWithALongName") is key-shaped to maskKeys and
@@ -1005,7 +1280,7 @@ const nameText = (value, token, max = 200) => {
   if (typeof token === "string" && token) s = s.split(token).join(maskToken(token))
   // with no token in hand the mask's shape pass is the only guard there is,
   // so the case-mix arm has to stay on
-  return text(maskKeys(maskEchoes(s, token).replace(tokenShaped, (m) => maskToken(m)), !token), max)
+  return text(maskAll(maskEchoes(s, token).replace(tokenShaped, maskShaped), !token), max)
 }
 
 // hostText is cardText for the two exits where there is no token to split on:
@@ -1013,7 +1288,7 @@ const nameText = (value, token, max = 200) => {
 // The host's message can still carry one — magpie's own wording for a missing
 // key is "no key <key> for provider" — and these two lines would print it
 // whole. With no key in hand the shape is all there is, which cardText does.
-const hostText = (value) => cardText(value, "")
+const hostText = (value) => nameText(value, "")
 
 // unusableName is a nickname that must not be written back: empty, the token
 // itself or a piece of it (the server would be handed it twice), a key the
@@ -1029,9 +1304,15 @@ const hostText = (value) => cardText(value, "")
 // nameIsKey asks for one of those beside the card's verdict.
 // The piece is looked for before the cut to 40: a token longer than 40, cut
 // to 40, is no longer equal to the token, and its front would be written to
-// plugin-auth.json as the account's name. A substring of 20+ characters is
-// the piece; a nickname of a few characters that happens to sit inside a
-// token ("ms", "ab") is a nickname.
+// plugin-auth.json as the account's name. A substring of 12+ characters is the
+// piece: a name shorter than that is not an echo worth refusing — a person's
+// name can share nine or ten characters with any key ("cafebabe2026"), and the
+// card still masks whatever a shorter piece is in front of.
+const insideEcho = (name, token) => {
+  const n = fold(name)
+  const t = fold(token)
+  return n.length >= MIN_ECHO + 2 && t.includes(n)
+}
 // tightName is a name with the characters an echo may insert taken out. A
 // server that echoed the token into a nickname can space it out just as a
 // message can, and "ms-01234567 89abcdef…" is no longer a substring of the
@@ -1059,7 +1340,7 @@ const insideToken = (name, token) => {
 }
 // echoesToken: the name is the token being handed back — the token itself, or
 // a piece long enough to be an echo. The threshold is the mask's own (MIN_ECHO,
-// 12) rather than the 20 it used to be: a nickname of 12–19 characters is not
+// 10) rather than the 20 it used to be: a nickname of 10–19 characters is not
 // a name a person picks, and the card's `user` line printed it whole while the
 // mask said nothing about pieces that short. A name of a few characters that
 // happens to sit inside a token ("ms", "ab") is still a name.
@@ -1081,34 +1362,63 @@ const echoesToken = (name, token) => {
 // not a name a person picks; a short name ("ms", "Mison") cannot reach the
 // floor.
 //
-// Both directions are counted, and a name is refused on either: greedy
-// matching can hide a run behind one stray character ("f 01234567x 89abcde0x …"
-// takes an f at the token's last position on the first pass and the rest has
-// nowhere to go after it, while walked backwards the run is the whole body).
-// The forward floor is a dozen; the backward floor is 20 — ordinary
-// nicknames' forward counts reach 6 on realistic hex tokens and their
-// backward counts 6 as well, while a key body spelled out counts 30+ either
-// way.
+// The run is measured as the longest run the name shares with the key, not by
+// one greedy pass: a stray character at the name's start or end used to take
+// the key's first or last position on that pass and hide the body behind it
+// ("f 01234567x 89abcde0x …" either way round). Ordinary nicknames share 6 or
+// 7 characters in a row with a realistic key; a key body spelled out shares
+// 30+.
+//
+// A name can reach a run by luck too: a nickname that is a string of digits
+// is a run of any key holding them in order ("1234567890" is nine characters
+// of most of them). A run is taken for the key when it is most of the name (a
+// dozen characters and half of it, or twenty of it however short the name is),
+// or when the name's whole folded self is a run of the key that a person's
+// name could not be — anything but digits, spaces and hyphens ("bbbb 2222"
+// against a key with those characters in a row).
 const MANY = MIN_ECHO + 2
 const BACK_MANY = MANY + MIN_ECHO
-const walkThrough = (a, b, stop) => {
-  let j = 0
-  let hits = 0
-  for (const ch of a) {
-    const k = b.indexOf(ch, j)
-    if (k === -1) continue
-    hits++
-    j = k + 1
-    if (hits >= stop) return true
+// The DP below is n × t cells. Neither side is bounded by this plugin: the
+// name comes from the server's answer (a 256 KiB body is allowed) and the key
+// from the host's sign-in. Measured before this cap existed: a 128 KiB name
+// against a 32 Ki-character key spent 19 s of CPU inside a hook whose whole
+// budget is 25 s, and an ordinary 128 KiB nickname against a realistic key
+// spent ~1.8 s. No answer needs that: the write-back is cut to 40 characters,
+// so a longer name is not a name a person picks, and refusing it is the safe
+// direction. The cell cap keeps the work under ~60 ms at the measured rate and
+// refuses the name instead of spending the budget on it.
+const NAME_LCS_MAX = 512
+const LCS_CELLS = 2_000_000
+function longestRun(n, t) {
+  let prev = new Int32Array(t.length + 1)
+  let cur = new Int32Array(t.length + 1)
+  for (let i = 1; i <= n.length; i += 1) {
+    for (let j = 1; j <= t.length; j += 1) {
+      cur[j] = n[i - 1] === t[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1])
+    }
+    const swap = prev
+    prev = cur
+    cur = swap
+    cur.fill(0)
   }
-  return false
+  return prev[t.length]
 }
 const runsThrough = (name, token) => {
   const n = fold(name)
   const t = fold(token)
   if (n.length < MIN_ECHO || t.length < MIN_ECHO) return false
-  if (walkThrough(n, t, MANY)) return true
-  return walkThrough([...n].reverse(), [...t].reverse(), BACK_MANY)
+  if (insideToken(name, token) && n.length < 20) return false
+  // too long a name to be a name, or too much DP work to spend a hook's budget
+  // on: treat it as unusable, which is what the write-back does with any name
+  // it cannot vouch for. The card still shows its usual mask for the shape.
+  if (n.length > NAME_LCS_MAX || t.length > NAME_LCS_MAX || n.length * t.length > LCS_CELLS) return true
+  const run = longestRun(n, t)
+  if (run >= MANY && (run * 2 >= n.length || run >= BACK_MANY)) return true
+  // a nickname that is almost nothing but the key's characters, in the key's
+  // order, is the key written with something between its characters. A string
+  // of digits is not: those are a run of any key that holds them, and a name
+  // made of them says nothing about which.
+  return run >= MIN_ECHO && run * 3 >= n.length * 2 && !/^[\d\s-]+$/.test(tightName(name))
 }
 const nameIsKey = (name, token) =>
   !insideToken(name, token) &&
@@ -1131,11 +1441,47 @@ const unusableName = (name, token) =>
 // ("ｍｓ－…" in full width, a bare 32-character body) matched none of them and
 // was written back as accountId. Only credential shapes count: an ordinary
 // name, camelCase or carrying a year (WangXiaoming2026), is a name.
+//
+// The ms- arm is the shape the card's own mask uses (tokenShaped), not a
+// narrower list of characters: a nickname written as ms-foreign_key… carries an
+// underscore, the card masks it, and the narrow arm passed it through to be
+// stored as the account's name — the one field the card's mask does not reach.
+// Every character a header can carry is a key's character, so the question is
+// the shape, not the spelling.
 const nameShape = (name) => {
-  const t = name.normalize("NFKC").toLowerCase().replace(/\s+/g, "")
-  return /^ms-[a-z0-9-]{11,}$/.test(t) || /^[0-9a-f]{16,}$/.test(t) || UUID.test(t)
+  // the same invisible-character join the card runs before its shape test:
+  // "ms-foreign​_key…" is the same key to the card, and a nameShape that
+  // read it as "ms-foreign_key…" (with a zero-width space in it) refused it by
+  // luck rather than by rule. The space fold after it is for a name written
+  // with spaces between the pieces — a shape that survived the key comparison
+  // in another spelling.
+  const t = name.replace(GLUE, "").normalize("NFKC").toLowerCase().replace(/\s+/g, "")
+  // the ms- arm asks the card's own question of the body (keyBody): a word
+  // after the front is a name ("ms-interviewing" is one, and refusing it left
+  // the account with no name at all). A name that is a key of another vendor —
+  // sk-ant-api03-Eyai1pkJrF_Kbwt has three digits and satisfied none of
+  // nameIsKey's extra requirements — is the shape the vendor's own prefix
+  // marks, and a vendor key's body is what the shape tests already accept.
+  return /^ms-/.test(t)
+    ? keyBody.test(t)
+    : VENDOR.test(t) ||
+        /^[0-9a-f]{16,}$/.test(t) ||
+        UUID.test(t)
 }
 
+// withStreak puts the streak on an answer only when it was read to the end.
+// An explicit `streak: undefined` is not "said nothing": the host reads the
+// field with num(), and undefined becomes 0 — a card showing "0 天" for a run
+// the plugin could not see the end of. The key is left out instead, and the
+// answer is told about an expiry the walk met on the way (`marks`), which the
+// walk records because a claim that already landed still has to reach the
+// host as "the token was refused".
+const withStreak = (answer, streak, marks) =>
+  ({
+    ...answer,
+    ...(streak === undefined ? {} : { streak }),
+    ...(marks?.expired ? { signIn: "expired" } : {}),
+  })
 // WRITE_WAIT_MS caps how long a hook waits for the host's write-back. The
 // lock it takes can block for ~20s (host.js's lockAuth, when another process
 // holds plugin-auth.json), and magpie runs every provider's check-ins under
@@ -1316,8 +1662,13 @@ const signedOut = (e) => Boolean(e?.signIn === "expired" || e?.expired)
 // object without a message, a host's own rejection value — would reach String()
 // as "[object Object]", which tells the user nothing and reads like a bug in the
 // plugin. The empty string lets the caller say something of its own instead.
-const whyOf = (e) =>
-  typeof e?.message === "string" && e.message ? e.message : typeof e === "string" ? e : ""
+const whyOf = (e) => {
+  const m = typeof e?.message === "string" && e.message ? e.message : typeof e === "string" ? e : ""
+  // a body nested deep enough to overflow the identity pass is a shape this
+  // plugin does not read, and the card must not carry the runtime's English
+  // sentence for it
+  return m.includes("Maximum call stack size exceeded") ? "账单格式不认识：嵌套过深" : m
+}
 
 // EXPIRED is what a 401 says, wherever it is met: the ledger read before the
 // touch, the touch itself, or either of usage's two reads. Three wordings
@@ -1375,7 +1726,7 @@ async function todayEarn(token, deadline) {
   gate(profile, res, body, parsed, token, "账单查询失败")
   const day = todayCN()
   const first = recordsOf(body)
-  const { all, pages, complete, last, seenPages, seenRows } = await dayRows(profile, token, day, first, deadline, body)
+  const { all, pages, complete, last, seenPages, seenRows, total } = await dayRows(profile, token, day, first, deadline, body)
   return {
     profile,
     day,
@@ -1385,7 +1736,10 @@ async function todayEarn(token, deadline) {
     last,
     seenPages,
     seenRows,
-    total: totalOf(body, first).total,
+    // the number the walk finished on, not the first page's: a total that grew
+    // on a later page (or was printed only there) is the one that says whether
+    // the streak's next page is worth reading
+    total,
     rows: all.filter((r) => r?.type === "EARN" && onDay(r?.gmt_created, day)),
   }
 }
@@ -1415,16 +1769,23 @@ const DAY_PAGES = 4
 // again and made the ledger look finished one page early).
 // stable is a value's identity with its object keys sorted: JSON.stringify
 // keeps insertion order, so the same rows with their fields in another order
-// read as a different page and were summed twice.
-const stable = (v) =>
-  Array.isArray(v)
-    ? `[${v.map(stable).join(",")}]`
-    : v && typeof v === "object"
-      ? `{${Object.keys(v)
-          .sort()
-          .map((k) => `${JSON.stringify(k)}:${stable(v[k])}`)
-          .join(",")}}`
-      : JSON.stringify(v)
+// read as a different page and were summed twice. `deep` bounds the recursion:
+// a body nested thousands deep overflowed the stack and answered the card with
+// the runtime's English sentence; past the bound a value is identified by its
+// depth alone, which keeps the pass cheap and total (a server that sends such
+// a row has no identity to lose).
+const STABLE_DEPTH = 64
+const stable = (v, deep = 0) =>
+  deep > STABLE_DEPTH
+    ? `"<depth ${deep}>"`
+    : Array.isArray(v)
+      ? `[${v.map((x) => stable(x, deep + 1)).join(",")}]`
+      : v && typeof v === "object"
+        ? `{${Object.keys(v)
+            .sort()
+            .map((k) => `${JSON.stringify(k)}:${stable(v[k], deep + 1)}`)
+            .join(",")}}`
+        : JSON.stringify(v)
 const rowKey = (r) => stable(r)
 
 async function dayRows(profile, token, day, first, deadline, body) {
@@ -1437,7 +1798,7 @@ async function dayRows(profile, token, day, first, deadline, body) {
   // reports it twice.
   const seenPages = new Set([stable(first)])
   const seenRows = new Set(first.map(rowKey))
-  const { total, contradicted } = totalOf(body, first)
+  let { total, contradicted } = totalOf(body, first)
   let complete = false
   for (;;) {
     const older = rows.some((r) => {
@@ -1455,16 +1816,13 @@ async function dayRows(profile, token, day, first, deadline, body) {
       complete = true
       break
     }
-    // An exactly full page with no next page is the end, and a page that
-    // cannot be read says nothing about whether there is one: neither may be
-    // read as "the ledger could not be finished", or a check-in answered
-    // `failed` for a day whose grant had landed on the page it held.
-    const noNextPage =
-      total === null && rows.length >= PAGE_SIZE && (pages > DAY_PAGES || deadline <= Date.now())
-    if (noNextPage) {
-      complete = true
-      break
-    }
+    // A full page with no `total` that the walk stopped reading (the page cap,
+    // the budget) is a truncation, not an end: the ledger may continue past
+    // it. It used to be called complete here, and a day with 300 rows answered
+    // 250 with no "未读完" on the card and no failed on the check-in. Proving
+    // the end needs a page older than the day, a page with room to spare, or a
+    // total the rows account for.
+    if (total === null && rows.length >= PAGE_SIZE && (pages > DAY_PAGES || deadline <= Date.now())) break
     // a page with room to spare is the end — unless `total` still promises
     // rows, in which case the server is contradicting itself and the rest may
     // be on the next page anyway (bounded by DAY_PAGES below)
@@ -1491,13 +1849,42 @@ async function dayRows(profile, token, day, first, deadline, body) {
     // dead-token throw the first page's gate uses.
     if (got.parsed && res.status === 401) throw deadToken(profile.where)
     if (!got.parsed || res.status !== 200 || !okOf(got.body)) break
-    const raw = recordsOf(got.body)
-    pages += 1
-    // the page's own `total` is checked the way the first page's was: a page
-    // that prints fewer rows than its number promises is contradicting itself
-    // and cannot end the walk on that number.
-    const pageTotal = totalOf(got.body, raw)
+    // a page whose shape this walk cannot read — no data, records not a list —
+    // is a page it failed to read, the same as a 500 on it: the walk stops with
+    // the rows it has and `complete` false, so the card says the number is low
+    // and the check-in retries. Letting recordsOf throw here failed the whole
+    // hook with its sentence and threw away the first page's rows.
+    let raw
+    let pageTotal
+    try {
+      raw = recordsOf(got.body)
+      pages += 1
+      // the page's own `total` is checked the way the first page's was: a page
+      // that prints fewer rows than its number promises is contradicting itself
+      // and cannot end the walk on that number.
+      pageTotal = totalOf(got.body, raw)
+    } catch {
+      break
+    }
     if (pageTotal.contradicted) break
+    // the page's own `total` is the ledger's count as the server sees it now;
+    // a ledger that grew between the reads printed 51 on the first page and 52
+    // on the second, and the walk ended on the first page's number with one
+    // row still unread. The latest number wins, and a total that has grown
+    // keeps the walk going. Only a number the server *printed* can win: a
+    // short page that omits `total` synthesises one from the rows in hand,
+    // and overwriting the known total with it ended a walk before the page
+    // that held the rest of the day's rows (measured: 52 promised, 5 seen,
+    // page 3 never read).
+    //
+    // A printed total below the rows already read, or below one an earlier page
+    // printed, is the ledger contradicting itself — 50 read, then a page
+    // claiming 52 while the rows in hand pass it — and adopting it would end
+    // the walk on the number it just refuted. The walk stops here, incomplete.
+    if (pageTotal.said !== null) {
+      if (pageTotal.said < all.length || (total !== null && pageTotal.said < total)) break
+      total = pageTotal.said
+    }
     // an empty page is the end of the ledger, or — with a `total` still
     // counting rows — the server saying two things at once; no page after it
     // is worth reading. A page repeating one already read is the page number
@@ -1530,6 +1917,7 @@ async function dayRows(profile, token, day, first, deadline, body) {
     all,
     pages,
     complete,
+    total,
     last: complete || !rows.length ? null : rows,
     seenPages,
     seenRows,
@@ -1544,6 +1932,14 @@ async function dayRows(profile, token, day, first, deadline, body) {
 // spare is complete by definition, so a missing `total` is answered by the
 // rows in hand there; a full page without one is unknown, and the streak walk
 // leaves its answer unsaid rather than treat the page as the whole ledger.
+//
+// `said` is the distinction the two callers need: the number the server
+// printed, or null. A short page that prints no `total` synthesises one from
+// the rows in hand — correct to read as "that is the whole ledger" for the page
+// it was computed from, and wrong to *overwrite* a number an earlier page
+// printed. Measured: a ledger whose first page promised 52 rows, whose second
+// carried 5 and no total, had the known 52 replaced by the 5 it could see, the
+// walk stopped at 51 rows, and the 300 credits on page 3 were never read.
 const totalOf = (body, rows) => {
   const n = dataObjectOf(body, "账单格式不认识：没有 data").total
   // a total below the rows it is printed beside is the ledger contradicting
@@ -1551,8 +1947,14 @@ const totalOf = (body, rows) => {
   // That is not the same as a missing total, which the caller reads as "the
   // rows in hand are the ledger": a short page of a contradicted ledger must
   // not be called complete on the strength of the number it just refuted.
-  if (Number.isInteger(n)) return n >= rows.length ? { total: n, contradicted: false } : { total: null, contradicted: true }
-  return { total: rows.length < PAGE_SIZE ? rows.length : null, contradicted: false }
+  //
+  // A total of another type ("60", 5.5) is the same contradiction, not a
+  // missing one: the server printed a number it did not stand behind, and
+  // reading the short page beside it as "that is the whole ledger" ends the
+  // walk before the pages that hold the rest of today's rows.
+  if (n !== undefined && n !== null && !Number.isInteger(n)) return { total: null, said: null, contradicted: true }
+  if (Number.isInteger(n)) return n >= rows.length ? { total: n, said: n, contradicted: false } : { total: null, said: null, contradicted: true }
+  return { total: rows.length < PAGE_SIZE ? rows.length : null, said: null, contradicted: false }
 }
 
 // prevDay is the Beijing day before `day`. The rows carry date labels with no
@@ -2021,21 +2423,23 @@ export async function MsmoliPlugin(input) {
             const wasDay = before.day
             before = await todayEarn(token, deadline)
             probe = before.profile
-            // The touch was this run's, and the new day had no rows in the
-            // page read before it: what the new day's ledger now carries in
-            // daily grants is what this run's window produced. Answering
-            // `done` on that page would settle the new day without claiming.
-            // The baseline is the old day's by construction — `gained` reads
-            // an empty one when the page's day is not the one `before` holds.
+            // The touch was this run's, and the day changed under it: the
+            // baseline is yesterday's, and `gained` reads an empty one for a
+            // page whose day is not the one it is handed. So the new day's
+            // whole page is the diff — every daily grant on it was written
+            // between the two reads (the page had nothing for the new day when
+            // the baseline was read). A grant the server stamped with
+            // yesterday's date (a late write) is not on this page at all, and
+            // is not claimed here: it belongs to yesterday's answer, which
+            // this run already gave.
             const bornToday = gained(before.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)), wasDay)
             if (bornToday) {
-              return {
+              return withStreak({
                 outcome: "claimed",
                 credit: bornToday.credit,
-                streak: await streakOf(before.all, before.day, before.total, ledgerReader(profile, token, deadline, before.pages, before.last, before.seenPages, before.seenRows, marks), deadline),
                 message: `领取 ${bornToday.credit} 魔粒：${bornToday.which}` + (before.complete ? "" : "；账单未读完，数字偏低"),
                 ...(marks.expired ? { signIn: "expired" } : {}),
-              }
+              }, await streakOf(before.all, before.day, before.total, ledgerReader(profile, token, deadline, before.pages, before.last, before.seenPages, before.seenRows, marks), deadline), marks)
             }
             if (!before.complete) {
               return { outcome: "failed", message: "账单读取不完整，稍后自动重试", ...(marks.expired ? { signIn: "expired" } : {}) }
@@ -2071,26 +2475,24 @@ export async function MsmoliPlugin(input) {
             // the touch grants nothing new for an account already claimed, so
             // the two readings answer the same thing, and this one is the page
             // the totals above were taken from.
-            return {
+            return withStreak({
               outcome: "done",
               credit: shown,
-              streak: await streakOf(before.all, before.day, before.total, ledgerReader(profile, token, deadline, before.pages, before.last, before.seenPages, before.seenRows, marks), deadline),
               message: `今日已领取 ${shown} 魔粒` + (which ? `（${which}）` : "") + (before.complete ? "" : "；账单未读完，数字偏低"),
               ...(marks.expired ? { signIn: "expired" } : {}),
-            }
+            }, await streakOf(before.all, before.day, before.total, ledgerReader(profile, token, deadline, before.pages, before.last, before.seenPages, before.seenRows, marks), deadline), marks)
           }
 
           // Both claimed exits answer the same way; the streak is computed in
           // one place so a change to it cannot land in one branch only.
           const claimedNow = async (page, gain) => {
             const streak = await streakOf(page.all, page.day, page.total, ledgerReader(profile, token, deadline, page.pages, page.last, page.seenPages, page.seenRows, marks), deadline)
-            return {
+            return withStreak({
               outcome: "claimed",
               credit: gain.credit,
-              streak,
               message: `领取 ${gain.credit} 魔粒：${gain.which}` + (page.complete ? "" : "；账单未读完，数字偏低"),
               ...(marks.expired ? { signIn: "expired" } : {}),
-            }
+            }, streak, marks)
           }
 
           const fresh = await todayEarn(token, deadline)
@@ -2123,6 +2525,16 @@ export async function MsmoliPlugin(input) {
             return { outcome: "failed", message: "账单读取不完整，稍后自动重试" }
           }
           const hourCN = Math.floor(minuteCN() / 60)
+          // Before noon the host re-asks a provisional answer every half hour,
+          // so an `inactive` here is safe: a grant that is simply late is read
+          // again, and the repeat past noon gets the `until` below. From noon
+          // the host settles the day, so the first `inactive` from noon on
+          // carries `until`, once per day. A check-in that lands just after
+          // midnight is before SURE_HOUR and already covered by the host's
+          // provisional re-ask — that is the guard, and it is the hour, not a
+          // stale day flag: `deferred` holds the Beijing day the `until` was
+          // given on, and a new day starts with no flag, so the afternoon of
+          // the new day gets its own `until` like any other day.
           if (hourCN >= SURE_HOUR && deferred.get(token) !== today) {
             for (const [k, d] of deferred) if (d !== today) deferred.delete(k)
             deferred.set(token, today)
@@ -2382,6 +2794,6 @@ export async function MsmoliPlugin(input) {
 // exporting them as functions: magpie's loader treats every exported function
 // as a plugin entry (see windowOf above), but an object it skips. The tests
 // are the only reader.
-export const testables = { windowOf, streakOf, CN, INTL, sites }
+export const testables = { windowOf, streakOf, CN, INTL, sites, maskAll }
 
 export default MsmoliPlugin

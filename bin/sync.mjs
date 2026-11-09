@@ -31,6 +31,18 @@ const ID = "msmoli"
 const PRESET = "modelscope"
 const HOST = "api-inference.modelscope.cn"
 
+// VERSION is what --version answers. Read from the package's own manifest so
+// the two can never drift — a published tarball carries package.json beside
+// bin/, and so does a clone. An unreadable manifest is not a reason to fail a
+// version question: the answer is just unknown.
+const VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")).version ?? "unknown"
+  } catch {
+    return "unknown"
+  }
+})()
+
 const USAGE = `magpie-plugin-msmoli — 把 magpie 里已有的 ModelScope 令牌同步给签到插件
 
 用法：node bin/sync.mjs [选项]（发布到 npm 后也可 npx magpie-plugin-msmoli）
@@ -46,23 +58,28 @@ const USAGE = `magpie-plugin-msmoli — 把 magpie 里已有的 ModelScope 令�
   --status      只报告，不执行
   --dry-run     打印将要执行的命令，不执行
   -h, --help    这一页
+  -v, --version 打印版本号
 
 令牌不会出现在输出里。写入一律走 magpie 自己的 CLI。`
 
 function parseArgs(argv) {
-  const out = { dir: "", magpie: "", from: "", to: "", force: false, dryRun: false, status: false, help: false }
+  const out = { dir: "", magpie: "", from: "", to: "", force: false, dryRun: false, status: false, help: false, version: false }
   // help wins over everything else on the line: `--help --nope` and
-  // `--nope --help` should show the page, not an error about --nope
+  // `--nope --help` should show the page, not an error about --nope. Version
+  // is the same courtesy one step down: it is how a packaged CLI answers
+  // "which one am I running", and a stray argument beside it should not turn
+  // that into an error.
   if (argv.includes("-h") || argv.includes("--help")) return { ...out, help: true }
+  if (argv.includes("-v") || argv.includes("--version")) return { ...out, version: true }
   // A flag is not a value. `--dir --dry-run` would otherwise take "--dry-run"
   // as the folder and then fail somewhere far from the mistake, and
   // `--dir ""` would read as "not given" and silently fall back to the
   // machine's own magpie — writing a credential to a target nobody named.
-  const take = (i) => {
+  const take = (i, flag) => {
     const v = argv[i]
     // A single "-h" or "-x" is a flag too: `--dir -h` must not put "-h" in
     // the folder position and silently look there.
-    if (v === undefined || v.trim() === "" || v.startsWith("-")) throw new Error(`缺少值：${argv[i - 1]} 后面要跟一个参数`)
+    if (v === undefined || v.trim() === "" || v.startsWith("-")) throw new Error(`缺少值：${flag} 后面要跟一个参数`)
     return v
   }
   // A value flag given twice is refused, as the two directions are: the
@@ -83,7 +100,7 @@ function parseArgs(argv) {
       const v = a.slice(eq + 1)
       if (v.trim() === "" || v.startsWith("-")) throw new Error(`缺少值：${flag}= 后面要跟一个参数`)
       set(flag, v)
-    } else if (VALUE[a]) set(a, take(++i))
+    } else if (VALUE[a]) set(a, take(++i, a))
     else if (a === "--to-plugin" || a === "--to-preset") {
       // When both directions are given, the later one silently wins and the
       // earlier is quietly dropped: saying so is better than picking one
@@ -357,7 +374,14 @@ export function presetCandidates(providers, from = "", keyed = true) {
   // must see that one — the check-in plugin trims it too (tokenOf), so the
   // two halves of the tool otherwise disagree about the same credential
   const out = (ps) => ps.map((p) => ({ ...p, key: typeof p.key === "string" ? p.key.trim() : "" }))
-  const usable = (p) => !keyed || keyedOf(p)
+  // An entry that is not an object (a null in the list, a string) is not a
+  // provider: it is dropped before anything reads p.id, and dropping it
+  // filters it here the way keyedOf does for --to-plugin, rather than leaving
+  // --to-preset (keyed=false) to dereference the null and crash with a raw
+  // TypeError the refusal that stands over every other malformed file never
+  // gets to say
+  const entry = (p) => p !== null && typeof p === "object" && !Array.isArray(p)
+  const usable = (p) => entry(p) && (!keyed || keyedOf(p))
   if (from) return out(list.filter((p) => usable(p) && p.id === from && oursOf(p)))
   const byId = list.filter((p) => usable(p) && (p.id === PRESET || p.preset === PRESET))
   if (byId.length) return out(byId)
@@ -380,36 +404,100 @@ export function presetCandidates(providers, from = "", keyed = true) {
 // still ends a run — a token never spans one.
 const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
 const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]){11,}`, "giu")
-// A key cut into pieces by whitespace is still one key. The value reaches the
-// unknown-argument error as one string, and the per-word judgement below sees
-// only the pieces: "ms-01234 56789abc …" came back whole, and so did a key cut
-// into eight-character chunks or one character per word. The plugin's own
-// secret is not in reach of an argument that was refused, so the shape is what
-// is left — the ms- front and the pieces' letters and digits. The words are
-// joined in order before the test, because that is what the key is: the same
-// characters with the spaces taken out. The joined string must still begin
-// with ms- (after the flag's "--" or an opening quote the argument came with)
-// and the body after it must clear the plugin's token floor with a digit in it.
-// A sentence does not qualify — it does not begin with ms- — and joining is
-// what tells this case apart from a list of words that each stay short.
-const KEYCH = /[A-Za-z0-9+/=_.-]/
-const spacedKey = (folded) => {
-  const words = folded.trim().split(/\s+/)
-  if (words.length < 2) return false
+// A key cut into pieces by whitespace is still one key, and the key starts
+// where the ms- front does. The value may carry anything before it: the flag
+// it was pasted behind ("--token=ms-01234 56789abc …"), a path (--dir
+// "/tmp/ms-01234 56789abc …"), an account id ("msmoli#ms-…"), or a sentence a
+// child printed around it ("no key ms-… for provider"). Masking the whole
+// value hid the flag or the folder the user meant to see; not joining across
+// the cut left the tail in pieces each under every floor, and the longest of
+// them (15 characters) was printed whole. So the key is everything from its
+// front to the end of the value, and what came before it keeps its shape.
+const spacedKey = (s) => {
+  const words = s.trim().split(/\s+/)
+  if (words.length < 2) return null
   const joined = words.join("")
-  // the ms- front may sit behind the flag's dashes or an opening quote-quote
-  // pair: "--ms-01234 56789abc …". Only punctuation may precede it — a letter
-  // before it means the "ms-" is part of a word, not the start of a key.
-  // exactly one ms- front: a value carrying two is two keys already, and the
-  // per-word pass masks each (masking the whole would hide both ends of a long
-  // poisoned id and say less than it knows)
   const at = joined.search(/ms-/i)
-  if (at < 0 || joined.slice(at + 3).search(/ms-/i) >= 0) return false
-  if (/[A-Za-z0-9]/.test(joined.slice(0, at))) return false
-  const body = joined.slice(at)
-  if (!/^ms-/i.test(body)) return false
-  const rest = body.slice(3)
-  return rest.length >= 11 && /\d/.test(rest) && words.every((w) => w.length > 0)
+  // exactly one front: a value carrying two is two keys already, and the
+  // per-word pass masks each (masking the whole would hide both ends)
+  if (at < 0 || joined.slice(at + 3).search(/ms-/i) >= 0) return null
+  const rest = joined.slice(at + 3)
+  // the key's alphabet only: a sentence that happens to carry a key front and
+  // then goes on in other words is not one ("ms-dos is old" is not). A digit
+  // somewhere in the value is what separates a key cut into pieces from a name
+  // with a version after it — "the ms-cli version 2026.11.9 installed" carries
+  // one too, so the walk below has to be able to stop short of it
+  if (rest.length < 11 || !/\d/.test(rest) || !/^[A-Za-z0-9+/=_.-]+$/.test(rest)) return null
+  // where the front sits in the value itself, and where the word it starts in
+  // ends (the pieces can be whitespace apart, so joined indexes are not raw
+  // ones: "m s - 0 1 …" is one key at no raw offset)
+  let cum = 0
+  let from = 0
+  let start = -1
+  let wordEnd = -1
+  for (const w of words) {
+    const i = s.indexOf(w, from)
+    from = i + w.length
+    if (at >= cum && at < cum + w.length) {
+      start = i + (at - cum)
+      wordEnd = i + w.length
+      break
+    }
+    cum += w.length
+  }
+  if (start < 0) return null
+  // The key runs on from its front through the words that are key material —
+  // the pieces an echo was cut into, each carrying a digit or too short to be
+  // a word. It stops at the first word of prose ("for", "provider", "next"),
+  // which keeps "no key ms-… for provider" readable while "ms-01234 56789abc"
+  // is one key. A word of letters only, three or more of them, is prose; a
+  // piece of a key nearly always carries a digit, and the ones that do not are
+  // short ("def").
+  // The value is read as one run of pieces whose gaps are one space: the key
+  // is the same characters with one space or none between them ("ms-01234
+  // 56789abc"). The run starts at the front and walks forward through the
+  // key's alphabet, allowing a single whitespace in between — a two-space gap
+  // ends it ("ms-dos and ms-word", a sentence). A word of three or more letters
+  // and no punctuation is prose ("for", "provider"), and ends the run there,
+  // so "no key ms-… for provider" keeps its frame.
+  //
+  // A line break is a gap like a space here: the README promises that a key
+  // pasted with a newline inside it is masked whole, and a value can carry one
+  // (a copy out of a wrapped chat window). It was not a gap, and the walk made
+  // no progress at all — the pieces after the break went out through `post`,
+  // which is printed as written.
+  let end = start
+  for (;;) {
+    const m = /^([A-Za-z0-9+/=_.-]+)(\r\n|[ \t\n\r]|$)/.exec(s.slice(end))
+    if (!m) break
+    if (/^[A-Za-z]{3,}$/.test(m[1])) break
+    // a version number is not key material: "ms-access 2019", "ms-outlook
+    // 365", "ms-word 2019" are product names with a year after them. The rule
+    // is narrow on purpose — a piece of digits only, longer than the pieces
+    // before it, while the body so far carries no digit at all. A key cut into
+    // fours, eighths or one character at a time has a digit in its first piece
+    // ("ms-a bcd1 …", "ms-0123 4567 …"), and a version's own digits come
+    // three to a group — 365, 2019 — as long as or longer than a year is
+    // never cut shorter
+    if (end > start && /^\d{3,}$/.test(m[1]) && !/\d/.test(s.slice(start, end))) break
+    end += m[1].length
+    if (!m[2]) break
+    // a gap wider than one whitespace is a frame, not a cut: another space left
+    // after the gap means the next piece is not the key's
+    if (/^\s/.test(s.slice(end + m[2].length))) break
+    end += m[2].length
+  }
+  // a walk that made no progress would mask an empty body and print the whole
+  // value through `show()`, which only knows the shape of an unbroken key
+  if (end <= start) return null
+  // the run ends on its last piece: the whitespace after it belongs to the frame
+  const bodyEnd = s.slice(start, end).replace(/\s+$/, "").length + start
+  const body = s.slice(start, bodyEnd)
+  // the digit must be in the key material itself, not in the prose or version
+  // that follows it: "the ms-cli version 2026.11.9" has a digit only after
+  // "version", and "ms-cli" alone is a product name, not a key
+  if (!/\d/.test(body)) return null
+  return { pre: s.slice(0, start), body, post: s.slice(bodyEnd) }
 }
 
 const show = (s) =>
@@ -558,8 +646,19 @@ const isKey = (word) => {
   // without taking the folder away. Two segments of 12+ characters mixing
   // cases is the whole of this arm, and it is what keeps
   // /Users/mison/Documents/SomeLongDirectoryName a path
-  const segs = word.split(/[\\/]/).filter((seg) => seg.length >= 12 && /[a-z]/.test(seg) && /[A-Z]/.test(seg))
-  return !PATHY.test(word) && segs.length >= 2
+  const pieces = word.split(/[\\/]/)
+  const segs = pieces.filter((seg) => seg.length >= 12 && /[a-z]/.test(seg) && /[A-Z]/.test(seg))
+  if (!PATHY.test(word) && segs.length >= 2) return true
+  // an AWS secret written in capitals is the same secret: a word with no
+  // lower-case letter at all whose slashes cut it into two or more pieces of
+  // 12+ capitals ("WJALRXUTNFEMI/K7MDENG/BPXRFICYEXAMPLEKEY" — measured, all
+  // 40 characters reached the terminal, and the README says upper-cased keys
+  // are masked). A path in capitals is not: /USERS/MISON/DOCUMENTS is a path
+  // (PATHY) and its pieces are short anyway, and a word with a lower-case
+  // letter in it is the case-mix arm's business, not this one
+  if (/[a-z]/.test(word)) return false
+  const caps = pieces.filter((seg) => seg.length >= 12 && /^[A-Z0-9]+$/.test(seg) && /[A-Z]/.test(seg))
+  return !PATHY.test(word) && caps.length >= 2
 }
 const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
 // A key of another shape pasted with an invisible character inside it — a
@@ -575,29 +674,258 @@ const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g
 // each lookaround, so it is a linear pass, not the kind of scan that backtracked
 // to minutes on a body of control characters.
 const GLUE = new RegExp(String.raw`(?<=[A-Za-z0-9+\/=_.-])${INV}(?=[A-Za-z0-9+\/=_.-])`, "gu")
-const arg = (v) => {
-  const s = show(String(v ?? "").replace(GLUE, ""))
-  // isKey compares ASCII, so a key written full-width or upper-cased reached the
-  // terminal through the per-word judgement. The folded copy is what the shape
-  // tests judge; the original word is what gets masked, so no second copy in
-  // the other spelling is printed.
-  const folded = s.normalize("NFKC").toLowerCase()
-  if (spacedKey(folded)) return mask(s.trim())
-  return s.replace(/[^\s]+/g, (w) => {
+// VENDOR and MASKED are index.mjs's, to the letter: a key's front that is no
+// key on its own, and the ellipsis a mask carries.
+const VENDOR = /^(?:sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|akia|asia|aida|aliyun|ssh-rsa|-----begin)/
+const MASKED = "…"
+// keyAt: a word is the front of a key when it is key-shaped on its own or
+// carries a vendor's front. A front like "ghp_" or "sk-" is under every word
+// floor, and a key cut by whitespace leaves it as a word of its own.
+// keyAt: a word is the front of a key when it carries a vendor's front
+// ("ghp_", "sk-", "ms-") or is key-shaped on its own
+const keyAt = (w) => VENDOR.test(w) || /^ms-/i.test(w) || isKey(w)
+// a body of a vendor key cut by whitespace keeps its prefix together — "ghp_"
+// on one line and 1234 on the next is ghp_ 1234 — and nothing else is joined:
+// a key-shaped word next to a prose word is a key's end (its own pass masks
+// it by its own ends), and joining the prose would move the ends
+const PREFIX = /^(?:sk_(?:live|test)_|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida)/i
+// a word after the front continues it when it is key material the floors miss
+// on its own: a digit in it, or a short piece with a capital
+const continues = (w) => (/[0-9]/.test(w) || /[A-Z]/.test(w)) && !VENDOR.test(w)
+const glued = (ws) => ws.map((w) => w[0]).join("")
+// startProse: a run's first word is a word of prose — all lower-case letters,
+// two or more of them — and a run that starts with one is no key's head.
+const startProse = (w) => /^[a-z]{4,}$/.test(w) && !VENDOR.test(w) && !/^ms-/.test(w)
+// a run of capitals and digits is a key written without its spaces
+// ("AKIAIOSF", "AKIAIOSFODNN7EXA")
+const capsPiece = (w) => /^[A-Z0-9]{4,}$/.test(w) && /[A-Z]/.test(w)
+// tokenShaped is a /g pattern (used with replace); test() on it would carry
+// lastIndex from one call to the next and answer false on the second look
+const tokenShaped1 = new RegExp(tokenShaped.source, "iu")
+const keyedBody = (body) => (body.match(/[a-z][A-Z]/g) ?? []).length >= 2 && /[A-Z]/.test(body) && /[a-z]/.test(body)
+const maskCut = (s) => {
+  if (s.length > 32 * 1024) return s
+  // a middot or a bullet splits words here: it is one of the spellings a cut
+  // arrives in ("ms-a·b·c"), and one word with middots inside it is a shape no
+  // reading below can take apart
+  const words = [...s.matchAll(/[^\s·•∙‧・]+/g)]
+  if (words.length < 2) return s
+  const at = (i) => words[i].index
+  const end = (i) => words[i].index + words[i][0].length
+  const gap = (i) => s.slice(end(i - 1), at(i))
+  // a middot or a bullet between pieces is a cut's other spelling
+  // ("ms-a·b·c") when the run starts at a key's front or at one-character
+  // pieces; a card's or a log's own separators do not start at either
+  const middotGap = (k, w0) => /^[·•∙‧・]$/.test(gap(k)) && (w0.length <= 2 || VENDOR.test(w0) || /^ms-/i.test(w0))
+  const out = []
+  let from = 0
+  for (let i = 0; i < words.length; i += 1) {
+    // a pair either side of a line break — the break of a wrapped copy, where
+    // nothing in between is prose — read joined: the second half of a key
+    // behind its front ("ghp_\n1234AbCd…", "no key ghp_\n1234…"). The front
+    // is a bare prefix ("ghp_", "sk-", "AKIA"), a word no key floor keeps.
+    const brk = i > 0 && /^\r?\n$/.test(gap(i))
+    const bare = i > 0 && (PREFIX.test(words[i - 1][0]) || (!keyAt(words[i - 1][0]) && words[i - 1][0].length < 12))
+    if (brk && bare && continues(words[i][0]) && end(i) - at(i - 1) >= 20) {
+      const pair = glued([words[i - 1], words[i]])
+      if (!pair.includes(MASKED) && isKey(pair)) {
+        out.push(s.slice(from, at(i - 1)), mask(pair))
+        from = end(i)
+        i += 1
+        continue
+      }
+    }
+    // a run is read from a head: a word carrying a vendor's front or the ms-
+    // shape written with its body cut off ("ms-f"), or a run of capitals and
+    // digits (a key written without its spaces), or a piece of a key written
+    // one character per word. Anything else is the per-word pass's
+    // ("spawnSync /tmp/…" is a sentence, not a cut).
+    const w0 = words[i][0]
+    // a key written one character per word runs five or more such pieces
+    // together ("s k - a n t") — a single short word beside a long one is not
+    // a head, and asking after it at every position is what made a body of
+    // them quadratic
+    const tiny = w0.length <= 2 && words[i + 4] !== undefined && words.slice(i, i + 5).every((x) => x[0].length <= 2)
+    const msHead = /^ms-/i.test(w0) && !isKey(w0) && !/^ms-[\x21-\x7e]{11,}$/i.test(w0)
+    // a key cut inside a mixed-case word ("wJal rXUt nFEM …" is an AWS
+    // secret): the join has to be a key of its own, which a sentence's first
+    // word after a path is not
+    const mixedHead = w0.length <= 16 && /[a-z]/.test(w0) && /[A-Z]/.test(w0)
+    if (!VENDOR.test(w0) && !capsPiece(w0) && !msHead && !tiny && !mixedHead) continue
+    // two key-shaped words are two keys: one mask for both would hide the
+    // second's front ("ms-aaaa… ms-zzzz…" is not one key)
+    const pairOfKeys = i + 1 < words.length && /^[ \t\u00a0\u3000]+$/.test(gap(i + 1)) && keyAt(words[i][0]) && keyAt(words[i + 1][0])
+    let j = i
+    let head = i
+    let body = words[i][0]
+    for (let k = i + 1; !pairOfKeys && k < words.length && k - i <= 48 && (/^[ \t\u00a0\u3000]+$/.test(gap(k)) || middotGap(k, w0)); k += 1) {
+      const x = words[k][0]
+      // every piece is short enough or a vendor front; a word of a sentence in
+      // between ("the log said") goes on only when what follows is key-shaped
+      // again and the body has a capital or a digit — an echo's own words
+      // ("aaabbb… x aaaccc… 1234", one piece between two of the key's)
+      if (x.length > 16 && !VENDOR.test(x)) break
+      body += x
+      const pieces = words.slice(i, k + 1).map((w) => w[0])
+      const prose = pieces.some((w) => w.length >= 4 && /^[a-z]{4,}$/.test(w) && !VENDOR.test(w))
+      if (prose && !(/^ms-/i.test(w0) && tokenShaped1.test(body)) && !(keyAt(x) && pieces.some((w) => /[A-Z]/.test(w) || /\d/.test(w)))) continue
+      // the body of a key cut by spaces: 20+, a key-shaped run in the head —
+      // the front, or the word after it ("ghp_ 1234 AbCd…"; "sk-a nt-a pi03…"
+      // is a vendor key whose body is all its pieces, and the head's run is
+      // no key on its own: sk / ant / a are all short)
+      // the body is a key when it reads as one written: joined it reads as the
+      // ms- shape with its body intact ("ms-f orei gn-0 1234 …"), or the key it
+      // writes joined is one word ("sk-a nt-a pi03…" is
+      // sk-ant-api03-Eyai1pkJrF_Kbwt), or — from a vendor front — the head
+      // flips case inside itself. A word after the first piece is prose
+      // ("sk-preset-20261031 is a provider id")
+      // ("sk-a" is not a vendor front, and the vendor front of "sk-preset" is
+      // the whole word; either way the words after the first piece are prose)
+      // a piece of exactly four lower-case letters is a piece while the run is
+      // on the key's own alphabet from its front
+      const allKey = pieces.slice(1).every((w) => /^[A-Za-z0-9+/=_.-]+$/.test(w))
+      const plain = pieces.slice(1).some((w) => w.length >= 4 && /^[a-z]{4,}$/.test(w) && (w.length > 4 || !allKey))
+      // a bare front (ghp_, sk-, xoxb-) is a word no key floor keeps, and the
+      // pieces after it are the key; a vendor-like word that carries more than
+      // the front ("sk-preset-20261031") is a provider id, and its run only
+      // counts when the join is a key of its own
+      const bareFront = VENDOR.test(pieces[0]) && pieces[0].length <= 8
+      const cut = body.length >= 20 && !body.includes(MASKED) && (isKey(body) || (msHead && tokenShaped1.test(body) && !pieces.some((w) => /^[A-Za-z]{2,}$/.test(w) && !VENDOR.test(w) && w !== w0)) || (bareFront && !plain && (pieces.slice(0, 2).join("").match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r) || r.length >= 4 || keyedBody(body)))) && (k - i >= 2 || !bareFront)
+      if (!cut) continue
+      j = k
+    }
+    if (j === i) continue
+    out.push(s.slice(from, at(head)), mask(glued(words.slice(head, j + 1)).replace(MASKED, "")))
+    from = end(j)
+    i = j
+  }
+  return out.join("") + s.slice(from)
+}
+
+// maskCaps is the vendor key written without its spaces, a run of capitals and
+// digits ("AKIAIOSF ODNN7EXA MPLE"): a whole word is the general pass's, and
+// this reading joins a run of pieces of capitals and digits when they add up
+// to an AWS key id or a long run of capitals.
+const capsRun = (s) => {
+  if (s.length > 32 * 1024 || !/[A-Z]/.test(s)) return s
+  const words = [...s.matchAll(/[\x21-\x7e]+/g)]
+  const out = []
+  let from = 0
+  for (let i = 0; i < words.length; i += 1) {
+    // three characters is a key's piece too ("AKI AIO SFO …" is a key cut
+    // into threes); the join still has to be long enough to be one, so a
+    // sentence of two capitals is not read
+    if (!/^[A-Z0-9]{3,}$/.test(words[i][0]) || !/[A-Z0-9]/.test(words[i][0])) continue
+    let j = i
+    let body = words[i][0]
+    while (j + 1 < words.length && s.slice(words[j].index + words[j][0].length, words[j + 1].index).length <= 2 && /^[A-Z0-9]{3,}$/.test(words[j + 1][0])) {
+      j += 1
+      body += words[j][0]
+    }
+    if (j === i) continue
+    const aws = /^AKIA[0-9A-Z]{16}$/.test(body)
+    const long = body.length >= 16 && !/[a-z]/.test(body)
+    if (!aws && !long) continue
+    out.push(s.slice(from, words[i].index), mask(body))
+    from = words[j].index + words[j][0].length
+    i = j
+  }
+  return out.join("") + s.slice(from)
+}
+
+// joinedKey is the whole-value judgement the full-width reading needs: every
+// word joined back up begins at one ms- front and the rest reads as key
+// material. Unlike spacedKey's walk it does not stop at a word of letters: a
+// key cut into four-character groups has such pieces ("qmjh") in it, and the
+// walk was the full-width reading's only path to a mask — a full-width space
+// between the groups then went out with every piece printed. The mask covers
+// the whole value, so a trailing frame is hidden with it, which is what the
+// full-width reading has always done (the same value with ASCII spaces keeps
+// its frame: spacedKey finds the span there).
+const joinedKey = (s) => {
+  const words = s.trim().split(/\s+/)
+  if (words.length < 2) return false
+  const joined = words.join("")
+  const at = joined.search(/ms-/i)
+  // only punctuation may precede the front: a letter or digit before it means
+  // the "ms-" is part of a word ("Microsoftms-access…" is not a key)
+  if (at < 0 || /[A-Za-z0-9]/.test(joined.slice(0, at))) return false
+  if (joined.slice(at + 3).search(/ms-/i) >= 0) return false
+  const rest = joined.slice(at + 3)
+  return rest.length >= 11 && /\d/.test(rest) && /^[A-Za-z0-9+/=_.-]+$/.test(rest)
+}
+
+export function arg(v) {
+  const orig = String(v ?? "")
+  // the ms- front has its own joiner for pieces of any width (one to a
+  // character), and it reads the value as it was typed
+  const cut = spacedKey(orig.replace(GLUE, ""))
+  // the body spans the gaps the pieces were cut with; the key is the
+  // characters themselves, and mask() keeps its first and last four — a
+  // three-character last piece ("… nop3 456") otherwise shows the gap in the
+  // mask ("ms-a… 456")
+  if (cut) return argRun(cut.pre) + mask(cut.body.replace(/\s+/g, "")) + argRun(cut.post)
+  // full-width pieces fold to a key; an ellipsis folds to three dots and would
+  // read as key material ("ms-a…5555" → "ms-a...5555"), so a value that
+  // already carries a mask is not asked again
+  const foldedRaw = orig.normalize("NFKC").toLowerCase()
+  const raw = orig.replace(GLUE, "")
+  // the mask keeps the value's first and last four: those are the key's own
+  // characters, not the no-break or ideographic spaces it was cut with
+  if (foldedRaw !== raw && !raw.includes("…") && joinedKey(foldedRaw)) return mask(raw.replace(/\s+/g, "").trim())
+  return argRun(raw)
+}
+
+// argRun is the whitespace routes of one value, tried until none finds more
+// ("ghp_ 1234 AbCd 5678…" is one body only from 1234 on, and the front is
+// part of a key-shaped piece by then): a run of words; a line break (or a
+// wide space a full-width copy left) between two words; then the per-word
+// judgement. Each route masks strictly more, so the walk ends.
+function argRun(text) {
+  // a body of many KiB of one-character words (a pretty-printed page) costs
+  // far more reading than the masking is worth here: past 32 KiB the cut
+  // reading is skipped and the per-word pass (linear) still runs
+  if (text.length > 32 * 1024) return argWords(text)
+  // The two readings the body has are applied together, until neither finds
+  // anything: the whitespace routes (maskCut, and capsRun for a vendor key
+  // written without its spaces, "AKIAIOSF ODNN7EXA MPLE") each mask what they
+  // join, and argWords then judges every word the join did not take. One
+  // pass of each per round, so a round over ordinary text is a couple of
+  // scans, not a dozen.
+  let s = text
+  for (let n = 0; n < 4; n += 1) {
+    const next = argWords(maskCut(capsRun(s)))
+    if (next === s) break
+    s = next
+  }
+  return s
+}
+
+// argWords is the per-word judgement: one word key-shaped is masked whole,
+// and inside a word that is not, its key-like runs and UUIDs are masked. The
+// word in the other spellings a key is printed in — full-width characters,
+// mostly — is judged by its folded copy and masked as written.
+const argWords = (x) =>
+  show(x).replace(/[^\s]+/g, (w) => {
     const f = w.normalize("NFKC").toLowerCase()
+    // the word as written and its fold. The capitals need no third call: a
+    // word that is already all capitals is judged whole by isKey (its slashed
+    // arm), and upper-casing a lower-case word to ask the question would read
+    // every long provider id with a date in it as a key (modelscope20261031)
     if (isKey(w) || isKey(f)) return mask(w)
-    const marks = (x) => x.replace(RUN, (r) => (keyRun(r) ? mask(r) : r)).replace(UUID_ANY, (m) => mask(m))
+    const marks = (y) => y.replace(RUN, (r) => (keyRun(r) ? mask(r) : r)).replace(UUID_ANY, (m) => mask(m))
     const out = marks(w)
     // the folded copy can be key-shaped where the original is not — a token
     // written in full width has no ASCII runs and no ASCII path prefix, so the
     // passes above saw a word of ordinary text. When the folded copy would be
     // masked, the word is masked whole: mapping the mask back onto the
     // original spelling is not something NFKC can promise, and the whole word
-    // is what the user typed anyway.
-    if (out === w && (marks(f) !== f || f.match(tokenShaped))) return mask(w)
+    // is what the user typed anyway. A key already masked ("ms-a…5555") is left
+    // as it is: it is a short string of letters now, and the token shape no
+    // longer matches it — but its mask is not a word to be judged again.
+    if (out === w && (marks(f) !== f || f.match(tokenShaped)) && !w.includes("…")) return mask(w)
     return out
   })
-}
 
 // SENDABLE is the plugin's own test (index.mjs's tokenOf): a key with
 // anything but visible ASCII in it goes out in a Cookie/Authorization header
@@ -852,10 +1180,41 @@ function maskEchoes(s, secret) {
   for (let k = 0; k < vis.length; ) {
     let piece = ""
     let v = k
-    while (v < vis.length && flat.includes(piece + vis[v])) {
-      piece += vis[v]
-      v++
+    let fillers = 0
+    while (v < vis.length) {
+      if (flat.includes(piece + vis[v])) {
+        piece += vis[v]
+        v++
+        continue
+      }
+      // characters the secret does not hold here, between two pieces of it: a
+      // child that prints "01234567x 89abcdefx …" writes pieces under MIN_ECHO
+      // with one letter between them, and the pieces together are the key. Up
+      // to as many as the run has already matched are stepped over — an echo
+      // is mostly the secret — and the run resumes at the first that continues
+      // it. Only inside a run: skipping a leading character before anything
+      // matched swallows the word in front of the key. The same rule, and the
+      // same reason, as index.mjs's card mask.
+      if (piece.length === 0) break
+      // one character is stepped over however little has matched; more than
+      // one only when the run is already long enough to be an echo on its own
+      // (MIN_ECHO, the same floor the mask applies). Without that second half,
+      // "said: aaaa1111-b" matched the last s of "said" and then skipped "id"
+      // to join the piece, and a 9-character slice that the floor is meant to
+      // leave alone was masked as if it were longer. Here the source text
+      // after the cut is "01234 56789…", and "234 56789" are not a piece to
+      // bridge.
+      if (piece.length < MIN_ECHO) break
+      const stop = Math.min(vis.length, v + 1 + (piece.length - fillers))
+      let hit = -1
+      for (let j = v + 1; j < stop; j += 1) if (flat.includes(piece + vis[j])) { hit = j; break }
+      if (hit < 0) break
+      fillers += hit - v
+      v = hit
     }
+    // the floor counts the secret's own characters, not the punctuation the
+    // echo wrote them in — the same rule, and the same reason, as index.mjs's
+    // card mask
     if (piece.length >= MIN_ECHO) {
       // what sat between the last character written and the run's first one is
       // written out first, so masking does not swallow the words around it
@@ -888,14 +1247,15 @@ function maskEchoes(s, secret) {
 // scrub() alone, with only the known secrets, was the leak the failing path
 // had.
 function scrub(out, ...secrets) {
-  let s = out
+  let s = out.length > 32 * 1024 ? out : maskCut(out)
   for (const secret of secrets) {
     if (secret) s = maskEchoes(s.split(secret).join(mask(secret)), secret)
   }
-  // arg() per line, not over the whole text: its control-character pass turns
-  // "\n" into a space too, and both callers split on the line breaks to echo
-  // (or quote) the child's answer. A token never spans a line, so the shape
-  // pass loses nothing by running per line either.
+  // arg() over the whole text first: its run reading covers a key cut by a
+  // line break or by spaces across the child's lines (a wrapped page, a
+  // pretty-printed error), which a line at a time cannot see. Then per line,
+  // as before: the control-character pass turns "\n" into a space, and both
+  // callers split on the line breaks to echo (or quote) the child's answer.
   return s.replace(/\r\n?/g, "\n").split("\n").map(arg).join("\n")
 }
 
@@ -991,6 +1351,10 @@ export async function main({
   const args = parseArgs(argv)
   if (args.help) {
     log(USAGE)
+    return 0
+  }
+  if (args.version) {
+    log(`magpie-plugin-msmoli ${VERSION}`)
     return 0
   }
 
@@ -1260,6 +1624,17 @@ if (isMain()) {
     if (e && e.code === "EPIPE") process.exit(0)
     throw e
   })
+  // A Ctrl-C or a TERM during a --force sequence can land between the logout
+  // and the login: the logout has run and the account is signed out. The
+  // child is left to finish on its own (spawnSync cannot be interrupted
+  // mid-wait), but the run says so before it goes, so the shell is not left
+  // showing a silent 130/143 and a signed-out account.
+  for (const [sig, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+    process.on(sig, () => {
+      process.stderr.write(`\nmagpie-plugin-msmoli: 被 ${sig} 中断。如果正在 --force 的登出→登录之间，现有登录可能已被登出；\n${RECOVER}\n`)
+      process.exit(code)
+    })
+  }
   // process.exit() while stdout is a pipe drops whatever is still buffered:
   // a long plan or a big `--status` list would lose its tail — including the
   // ✓ line — and still exit 0. Setting the exit code lets the loop drain the
