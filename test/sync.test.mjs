@@ -19,6 +19,7 @@ import {
   presetCandidates,
   readJson,
   sameFolder,
+  scrub,
 } from "../bin/sync.mjs"
 
 // Fake token: the shape is right, but it is obviously not real (the sample in the README has the same shape)
@@ -5408,4 +5409,64 @@ test("a key quoted in a frame shows its own four characters, not the frame's", (
   assert.ok(prefixed.includes("…") && !prefixed.includes(key.slice(4, 20)), `a key behind a letter went out whole: ${prefixed}`)
   // and the frame alone is never enough to make a word key-shaped
   assert.equal(arg("(" + "hello" + ")"), "(hello)")
+})
+
+test("a key cut by a space is masked in the CLI, whatever its shape", () => {
+  // arg()/scrub() join the pieces of a cut only when the value carries an ms-
+  // or sk- front; a UUID, a GitHub token or a digest cut by a space went out
+  // whole. Measured before this test: "123e4567-e89b-12d3-a45 6-426614174000"
+  // and "ghp_Abcd1234Efgh 5678Ijkl9012Mnop 3456Qrst" were printed as written.
+  const cases = [
+    ["123e4567-e89b-12d3-a45 6-426614174000", "123e…4000"],
+    ["123e4567-e89b-12d3-a456- 426614174000", "123e…4000"],
+    ["ghp_Abcd1234Efgh5678Ijkl9012Mnop345 6Qrst", "ghp_…Qrst"],
+    ["9f8e7d6c5b4a3928170 6f5e4d3c2b1a0", "9f8e…b1a0"],
+  ]
+  for (const [cut, want] of cases) {
+    assert.equal(arg(`no key ${cut} for provider`), `no key ${want} for provider`, `arg kept the cut: ${cut}`)
+    assert.equal(scrub(`no key ${cut} for provider`), `no key ${want} for provider`, `scrub kept the cut: ${cut}`)
+  }
+})
+
+test("an ordinary word after the front is not a key in the CLI either", () => {
+  // The card keeps "The ms-interviewing feature is unavailable"; the CLI masked
+  // it, because show()'s ms- shape has no guard for a body that does not read
+  // as key material.
+  for (const v of ["The ms-interviewing feature is unavailable", "ms-dos and ms-word", "ms-cli 2026.11.9"]) {
+    assert.equal(arg(v), v, `ordinary text was masked: ${arg(v)}`)
+  }
+})
+
+test("a list of model captions is not one key in the CLI", () => {
+  // The card keeps "Qwen3-Max · Qwen3-Coder"; the CLI collapsed the list into
+  // one mask and dropped the middles of it.
+  for (const v of ["Qwen3-Max · Qwen3-Coder", "Qwen3-Max · Qwen3-Coder · Qwen3-VL", "release · notes"]) {
+    assert.equal(arg(v), v, `a list was masked: ${arg(v)}`)
+  }
+})
+
+test("a vendor key in capitals cut by a middot is masked in the CLI too", () => {
+  // splitKey's piece test read an all-capitals piece as a word ("AKIAIOSF" is
+  // seven letters), so an AKIA key cut in two went out as written.
+  assert.equal(arg("no key AKIAIOSF · ODNN7EXAMPLE for provider"), "no key AKIA…MPLE for provider")
+  assert.equal(scrub("no key AKIAIOSF · ODNN7EXAMPLE for provider"), "no key AKIA…MPLE for provider")
+})
+
+test("a key the child wrapped at a line break is masked across the lines", () => {
+  // scrub split the child's output into lines and judged each one, so a key
+  // wrapped by the terminal was printed whole: each line held a piece under
+  // every word floor.
+  for (const [cut, want] of [
+    ["123e4567-e89b-12\nd3-a456-426614174000", "123e…4000"],
+    ["ghp_Abcd1234Efgh\n5678Ijkl9012Mnop3456Qrst", "ghp_…Qrst"],
+  ]) {
+    assert.equal(scrub(`no key ${cut} for provider`), `no key ${want} for provider`, `wrapped at a line break: ${cut}`)
+  }
+})
+
+test("two ms- keys side by side are each masked in the CLI", () => {
+  // splitKey joined the two bodies into one, and one mask hid both ends.
+  const t1 = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const t2 = "ms-zzzz9999-yyyy-8888-xxxx-777766665555"
+  assert.equal(arg(`${t1} ${t2}`), "ms-a…5555 ms-z…5555")
 })

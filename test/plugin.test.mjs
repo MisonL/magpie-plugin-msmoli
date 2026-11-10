@@ -10987,3 +10987,88 @@ test("a key followed by a short word keeps the word and the space in front of it
   // and a comma after the key kept the comma but lost the space behind it
   assert.equal(testables.maskAll(`no key ${key}, for provider`, true), "no key ghp_…Qrst, for provider")
 })
+
+test("a key cut by a space is masked whole on the card, whatever piece it breaks at", () => {
+  // The shape pass's first arm stopped at the first piece ("ms-vqmjh-75qa-651i")
+  // and masked only that; the rest of the key, on the other side of the space,
+  // went out as written — measured: "no key ms-v…651i -9x8x-2p4r-8t2n-qw7z for
+  // provider". The run the shape found is the key's, cut or not.
+  const own = "ms-zzzz0000zzzz0000zzzz0000"
+  const cases = [
+    ["ms-vqmjh-75qa-651i -9x8x-2p4r-8t2n-qw7z", "ms-v…qw7z"],
+    ["ms-4a7f1c2e-9b3d -4e5f-8a6b-1c2d3e4f5a6b", "ms-4…5a6b"],
+    ["ms-abcd1234efgh5678ijkl9012mnop3456", "ms-a…3456"],
+  ]
+  for (const [cut, want] of cases) {
+    const v = `no key ${cut} for provider`
+    for (const [tag, fn] of [
+      ["card (another account's token)", (x) => testables.cardText(x, own, 400)],
+      ["name (no token in hand)", (x) => testables.nameText(x, "", 400)],
+      ["host message", (x) => testables.hostText(x)],
+    ]) {
+      assert.equal(fn(v), `no key ${want} for provider`, `${tag}: ${JSON.stringify(fn(v))}`)
+    }
+  }
+  // and the same key wrapped at a line break, the way a terminal or a chat
+  // window breaks a long line
+  assert.equal(
+    testables.hostText("no key ms-vqmjh-75qa-651i\n-9x8x-2p4r-8t2n-qw7z for provider"),
+    "no key ms-v…qw7z for provider",
+  )
+})
+
+test("a key cut by a space keeps its first four on the card, not its first twelve", () => {
+  // maskSpaced began the run at the head word's last letters-and-digits
+  // ("e89b" of "123e4567-e89b"), so everything before it stayed: measured
+  // "no key 123e4567-e89b…4000 for provider", twelve characters of the key
+  // where the mask allows four.
+  const own = "ms-zzzz0000zzzz0000zzzz0000"
+  for (const [cut, want] of [
+    ["123e4567-e89b -12d3-a456-426614174000", "123e…4000"],
+    ["123e4567-e89b-12d3-a45 6-426614174000", "123e…4000"],
+    ["9f8e7d6c5b4a39281706-f5e4-d3c2-b1a0", "9f8e…b1a0"],
+  ]) {
+    for (const [tag, fn] of [
+      ["card", (x) => testables.cardText(x, own, 400)],
+      ["host message", (x) => testables.hostText(x)],
+    ]) {
+      const out = fn(`no key ${cut} for provider`)
+      assert.equal(out, `no key ${want} for provider`, `${tag}: ${JSON.stringify(out)}`)
+    }
+  }
+})
+
+test("a foreign key cut by a spaced middot is masked whole on the card", () => {
+  // The continuation arm read a bare middot but not the card's spaced one
+  // ("· " either side), so "ms-vqmjh-75qa- · 651i-…" masked the front and left
+  // seventeen positions of the rest on the card. Measured before the arm took
+  // the spaces too.
+  const own = "ms-zzzz0000zzzz0000zzzz0000"
+  const cases = [
+    ["ms-vqmjh-75qa- · 651i-9x8x-2p4r-8t2n-qw7z", "ms-v…qw7z"],
+    ["ms-4a7f1c2e-9b3d-4 · e5f-8a6b-1c2d3e4f5a6b", "ms-4…5a6b"],
+    ["ms-abcd1234efgh5678 · ijkl9012mnop3456", "ms-a…3456"],
+  ]
+  for (const [cut, want] of cases) {
+    for (const [tag, fn] of [
+      ["card", (x) => testables.cardText(x, own, 400)],
+      ["host message", (x) => testables.hostText(x)],
+    ]) {
+      assert.equal(fn(`no key ${cut} for provider`), `no key ${want} for provider`, `${tag}: ${cut}`)
+    }
+  }
+})
+
+test("two ms- keys side by side are masked each by its own ends", () => {
+  // The continuation arm read across the space into the second key and masked
+  // the pair as one ("ms-a…5555"), hiding the second key's own front and tail.
+  const t1 = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const t2 = "ms-zzzz9999-yyyy-8888-xxxx-777766665555"
+  const own = "ms-zzzz0000zzzz0000zzzz0000"
+  for (const [tag, fn] of [
+    ["card", (x) => testables.cardText(x, own, 400)],
+    ["host message", (x) => testables.hostText(x)],
+  ]) {
+    assert.equal(fn(`${t1} ${t2}`), "ms-a…5555 ms-z…5555", `${tag}`)
+  }
+})

@@ -534,9 +534,22 @@ function spacedKey(s) {
 }
 const keyish = (x) => isKey(x) || /^(?:ms-|sk-)/i.test(x)
 
+// msBody is whether what follows an ms- front reads as key material, the same
+// question the card's keyBody asks: an ordinary word after the front ("The
+// ms-interviewing feature is unavailable") is not a key, and the CLI masked it
+// while the card kept it. A ModelScope key is hex or base64 with a digit in it.
+const msBody = /(?:[0-9a-f]{11,}(?![0-9a-z])|(?=[\x21-\x7e]{11,})(?!\w)[\x21-\x7e]*\d)/
+// msKey is whether an ms- run is a key, and the two shapes that are one
+// whatever their body says: a run in capitals (a child that upper-cases its
+// output) and a value that is nothing but the run (a token pasted into a
+// provider id — "ms-abcdefghijklmnop" is a credential there, not a word).
+// Everything else is asked of its body, as the card asks.
+// a version's dotted groups are not key material ("ms-cli 2026.11.9" is a
+// program and its version, as the card reads it)
+const msKey = (m, whole) => whole || m === m.toUpperCase() || (!m.includes(".") && msBody.test(m))
 const show = (s) =>
   String(s ?? "")
-    .replace(tokenShaped, (m) => mask(m.replace(/[\p{Cc}\p{Cf}]/gu, "")))
+    .replace(tokenShaped, (m) => (msKey(m, String(s).trim() === m) ? mask(m.replace(/[\p{Cc}\p{Cf}]/gu, "")) : m))
     // an upper-cased vendor key is the same key, and its pieces are too short
     // for the per-word floors ("SK-ANT-API03-EYAI1PKJRF_KBWT")
     .replace(/[^\s]+/g, (w) => (isKey(w) && VENDOR.test(w) && w === w.toUpperCase()) || (w.startsWith("--") && w.includes("=") && isKey(w.slice(w.indexOf("=") + 1))) ? mask(w) : w)
@@ -758,6 +771,82 @@ const glued = (ws) => ws.map((w) => w[0]).join("")
 const startProse = (w) => /^[a-z]{4,}$/.test(w) && !VENDOR.test(w) && !/^ms-/.test(w)
 // a word of English written in capitals, three or more letters
 const WORDS = /^[A-Z]{3,}$/
+// splitKey is spacedKey's reading for the keys that carry no front: a UUID, a
+// ghp_ token, a digest, an ms- key cut where the front's own walk does not
+// reach. spacedKey begins at an ms-/sk- front and reads on from there; a value
+// with no such front was printed piece by piece, each under every floor on its
+// own — measured: "123e4567-e89b-12d3-a45 6-426614174000" and
+// "ghp_Abcd1234Efgh 5678Ijkl9012Mnop 3456Qrst" both went out as written.
+//
+// The reading is the same walk: pieces joined across a cut, and the moment the
+// join reads as a key the run has found it. A piece that is a word ends the
+// search, so a sentence's words are never glued into a key that is not there,
+// and the join is only taken when it carries a digit — a key does, and the
+// lists and prose a message carries do not.
+function splitKey(s) {
+  // a page of one- and two-character pieces is the worst case for a walk that
+  // starts at every piece, and no value a person types or a child prints this
+  // long is one key cut up: past this the other readings still run
+  if (s.length > 8 * 1024) return null
+  if (/(?:(?![\n\r])[\p{Cc}\p{Cf}])/u.test(s)) return null
+  const pieces = [...s.matchAll(PIECE)].map((m) => ({ text: m[0], at: m.index }))
+  if (pieces.length < 2) return null
+  // a piece the cut left: key characters, under the width a cut's piece has
+  // (a whole key is one piece, and spacedKey's business), and not a word
+  // a piece of capitals is key material, not a word ("AKIAIOSF · ODNN7EXAMPLE"
+  // is one key cut in two): the run reading exempts capitals for the same reason
+  const piece = (t) => t.length <= 48 && KEYCHARS.test(t) && !(PROSE.test(t) && !/^[A-Z]+$/.test(t))
+  // a frame's punctuation ("key=…", "(…)") is read by maskCut, whose head
+  // begins after it; joining from the piece's own first character would take
+  // the frame for key material ("key=AKIA…" masked from the "k")
+  const framed = (t) => !/^[A-Za-z0-9]/.test(t) || /[=:([{,"']/.test(t)
+  const MID = /[·•∙‧・]/
+  const GAP = /^[ \t\r\n 　·•∙‧・]{1,3}$/
+  for (let from = 0; from < pieces.length - 1; from += 1) {
+    if (!piece(pieces[from].text) || framed(pieces[from].text)) continue
+    // a middot before the piece is a cut the other readings own: their walk
+    // starts at the key's front, and starting a second one here took the
+    // front's pieces for the text ("key=g·hp_1·23·…" came out
+    // "key=g·hp_1…7890")
+    if (from > 0 && MID.test(s.slice(pieces[from - 1].at + pieces[from - 1].text.length, pieces[from].at))) continue
+    let joined = pieces[from].text
+    let best = -1
+    // a capitalised word either side of a middot is the card's own separator
+    // between two captions ("Qwen3-Max · Qwen3-Coder"), not one key's cut. A
+    // key's front is exempt ("Ghp_Abcd1234" is capitalised like a caption)
+    const caption = (t) => /^[A-Z][a-z]{2,}/.test(t) && !VENDOR.test(t)
+    for (let k = from + 1; k < pieces.length && k - from <= 48 && joined.length < 96; k += 1) {
+      const gapHere = s.slice(pieces[k - 1].at + pieces[k - 1].text.length, pieces[k].at)
+      if (!GAP.test(gapHere)) break
+      if (MID.test(gapHere) && !VENDOR.test(pieces[from].text) && caption(pieces[k - 1].text) && caption(pieces[k].text)) break
+      // a piece that opens its own front is a second key, not the first one's body:
+      // joining them hid both ends behind one mask ("ms-a…5555")
+      if (/^(?:ms-|sk-)/i.test(pieces[k].text)) break
+      if (!piece(pieces[k].text)) {
+        // a display cuts a key one piece at a time, and its last piece can be a
+        // short word of capitals ("Ghp_…·Qrst", "…·789·0"): once the join reads
+        // as a key, a piece of at most four letters behind a middot is its end.
+        // A space is the text's ("no key ms-… for provider").
+        if (best === k - 1 && MID.test(gapHere) && pieces[k].text.length <= 4 && /^[A-Za-z]+$/.test(pieces[k].text)) best = k
+        break
+      }
+      // a long numeral after the key is a count or a year, not the key's own
+      if (VERNUM.test(pieces[k].text) && !/\d/.test(joined)) break
+      joined += pieces[k].text
+      if (joined.length < 12) continue
+      if (/\d/.test(joined) && isKey(joined)) best = k
+    }
+    // the run's longest reading is the key: a key cut into three pieces reads
+    // as one at the second of them too, and masking there left the last piece
+    // to the per-word pass ("ghp_…9012·IjKl…7890")
+    if (best > 0) {
+      const last = pieces[best]
+      return { pre: s.slice(0, pieces[from].at), body: pieces.slice(from, best + 1).map((p) => p.text).join(""), post: s.slice(last.at + last.text.length) }
+    }
+  }
+  return null
+}
+
 // a run of capitals and digits is a key written without its spaces
 // ("AKIAIOSF", "AKIAIOSFODNN7EXA")
 const capsPiece = (w) => /^[A-Z0-9]{4,}$/.test(w) && /[A-Z]/.test(w)
@@ -787,7 +876,12 @@ const maskCut = (s) => {
   const wordLike = (w) => /^[A-Za-z]+$/.test(w) && /[a-z]/.test(w) && /[aeiouy]/i.test(w)
   // (the join's own reading is asked once a body of key length is on the
   // table: asking it at every middot re-read the run to its square)
-  const middotGap = (k, w0, i) => MIDDOT_GAP.test(gap(k)) && (w0.length <= 2 || VENDOR.test(w0) || /^ms-/i.test(w0) || frontSplit(i) || !wordLike(words[i][0]) || !wordLike(words[k][0]) || (end(k) - at(i) >= 20 && isKey(run(i, k - 1))))
+  // a capitalised word is a caption, not a piece of a key, and two of them
+  // either side of a middot are a list the card keeps ("Qwen3-Max ·
+  // Qwen3-Coder"). A key's own front is exempt: "Ghp_Abcd1234" is capitalised
+  // like a caption and is still the key's first piece
+  const caption = (w) => /^[A-Z][a-z]{2,}/.test(w)
+  const middotGap = (k, w0, i) => MIDDOT_GAP.test(gap(k)) && !(caption(words[i][0]) && caption(words[k][0]) && !VENDOR.test(words[i][0]) && !VENDOR.test(words[k][0])) && (w0.length <= 2 || VENDOR.test(w0) || /^ms-/i.test(w0) || frontSplit(i) || !wordLike(words[i][0]) || !wordLike(words[k][0]) || (end(k) - at(i) >= 20 && isKey(run(i, k - 1))))
   // a character cut: every piece one character ("A· K· I· A· …"), or a
   // vendor front cut in two and then one character at a time ("G· H· P· _· 1· 2· …")
   // — a shape the run below cannot read, because its prose test ends a run at
@@ -954,7 +1048,7 @@ const maskCut = (s) => {
       // (the head's own material counts: "abcd1234efgh 5678ijkl9012 mnop3456"
       // read its first piece as prose and ended the run there, and the key
       // stayed on the terminal whole)
-      if (prose && !(/^ms-/i.test(w0) && tokenShaped1.test(body)) && !(keyAt(x) && sawHard)) continue
+      if (prose && !(/^ms-/i.test(w0) && tokenShaped1.test(body) && msKey(body, false)) && !(keyAt(x) && sawHard)) continue
       // the body of a key cut by spaces: 20+, a key-shaped run in the head —
       // the front, or the word after it ("ghp_ 1234 AbCd…"; "sk-a nt-a pi03…"
       // is a vendor key whose body is all its pieces, and the head's run is
@@ -1000,7 +1094,7 @@ const maskCut = (s) => {
           // middots and the hyphens a UUID is drawn with — are left out
           (mid && isKey(body.replace(/[·•∙‧・]/g, ""))) ||
           (mid && isKey(body.replace(/[·•∙‧・-]/g, ""))) ||
-          (msHead && tokenShaped1.test(body) && !pieces.some((w) => /^[A-Za-z]{2,}$/.test(w) && !VENDOR.test(w) && w !== w0)) ||
+          (msHead && tokenShaped1.test(body) && msKey(body, false) && !pieces.some((w) => /^[A-Za-z]{2,}$/.test(w) && !VENDOR.test(w) && w !== w0)) ||
           (bareFront && !plain && (pieces[0] + pieces[1]).match(/[A-Za-z0-9]+/g) ? (pieces[0] + pieces[1]).match(/[A-Za-z0-9]+/g).some((r) => keyRun(r) || r.length >= 4 || keyedBody(body)) : false) ||
           (capsy && (capMixed || capFront) && !pieces.some((w) => /^[A-Z][a-z]{3,}$/.test(w))) ||
           (shortFront && !pieces.some((w) => /^[A-Z][a-z]{3,}$/.test(w)))) &&
@@ -1145,7 +1239,13 @@ export function arg(v) {
   // characters themselves, and mask() keeps its first and last four — a
   // three-character last piece ("… nop3 456") otherwise shows the gap in the
   // mask ("ms-a… 456")
-  if (cut) return argRun(cut.pre) + mask(cut.body.replace(/\s+/g, "")) + argRun(cut.post)
+  // (the join is only a key when the body reads as one: "ms-cli 2026.11.9"
+  // is a program and its version, and the card keeps it)
+  if (cut && msKey(cut.body, false)) return argRun(cut.pre) + mask(cut.body.replace(/\s+/g, "")) + argRun(cut.post)
+  // a key with no ms-/sk- front, cut the same way: the pieces are joined and
+  // asked whether they read as one key (splitKey)
+  const split = splitKey(orig.replace(GLUE, ""))
+  if (split) return argRun(split.pre) + mask(split.body.replace(/\s+/g, "")) + arg(split.post)
   // full-width pieces fold to a key; an ellipsis folds to three dots and would
   // read as key material ("ms-a…5555" → "ms-a...5555"), so a value that
   // already carries a mask is not asked again
@@ -1230,7 +1330,7 @@ const argWords = (x) =>
     // is what the user typed anyway. A key already masked ("ms-a…5555") is left
     // as it is: it is a short string of letters now, and the token shape no
     // longer matches it — but its mask is not a word to be judged again.
-    if (out === w && (marks(f) !== f || f.match(tokenShaped)) && !w.includes("…")) return mask(w)
+    if (out === w && (marks(f) !== f || (f.match(tokenShaped) ?? []).some((m) => msKey(m, x.trim() === w))) && !w.includes("…")) return mask(w)
     return out
   })
 
@@ -1553,7 +1653,7 @@ function maskEchoes(s, secret) {
 // escape sequence in the child's output cannot reach the terminal either.
 // scrub() alone, with only the known secrets, was the leak the failing path
 // had.
-function scrub(out, ...secrets) {
+export function scrub(out, ...secrets) {
   // the known secrets first: maskEchoes finds a piece of one whatever cut it
   // into and prints it as that key's own mask ("ms-a…5555"), which says more
   // than the shape pass can. Run the other way round, a key echo cut by
@@ -1569,6 +1669,17 @@ function scrub(out, ...secrets) {
   // pretty-printed error), which a line at a time cannot see. Then per line,
   // as before: the control-character pass turns "\n" into a space, and both
   // callers split on the line breaks to echo (or quote) the child's answer.
+  // a key the child wrapped is one key across the line break: the join is
+  // read over the whole text here, before the lines are split. Measured: a UUID
+  // cut at a line break went out whole, because each line held a piece under
+  // every floor.
+  for (const join of [spacedKey, splitKey]) {
+    const cut = join(s)
+    if (cut && msKey(cut.body, false)) {
+      s = cut.pre + mask(cut.body.replace(/\s+/g, "")) + cut.post
+      break
+    }
+  }
   return s.replace(/\r\n?/g, "\n").split("\n").map(arg).join("\n")
 }
 

@@ -920,9 +920,22 @@ const GLUE = new RegExp(String.raw`(?<=[A-Za-z0-9+\/=_.-])${INV}(?=[A-Za-z0-9+\/
 // 11+ that are all hex, or 11+ that carry a digit, and the body's last
 // character joined to a letter or digit is a cut, not the end of a key
 // ("ms-abc12345678abc" is one body, not "…5678" and "abc").
+//
+// A key cut by a space or a line break is still one key, and the two arms
+// above each stopped at the first piece: "ms-vqmjh-75qa-651i -9x8x-2p4r-8t2n-
+// qw7z" was masked to "ms-v…651i" with the rest of the key printed after it,
+// and a key wrapped at a line break ("ms-vqmjh-75qa\n-651i-…") was not seen at
+// all. The third arm reads on past a cut — a run of whitespace (a line break
+// included) or a middot, then a piece that carries a digit — because the pieces
+// of a cut are short and a key's own carry digits. It stops at a word of the
+// text's ("… for provider"), at a version's dotted group ("ms-cli 2026.11.9",
+// "ms-office 2016"), and at anything else that is not a piece. What is masked
+// is still the run maskShaped was handed: the arm widens the shape, and keyBody
+// decides, so text that does not read as a key is returned as written.
 const keyChar = String.raw`(?:${INV}*[\x21-\x7e])`
 const tokenShaped = new RegExp(
-  String.raw`m${INV}*s${INV}*-(?:${keyChar}{11,}|${keyChar}{6,}[^\S\n\r]+${keyChar}{5,})`,
+  String.raw`m${INV}*s${INV}*-(?:${keyChar}{11,}|${keyChar}{0,}\s+(?=[\x21-\x7e]*\d)(?![\x21-\x7e]*\.)${keyChar}{5,})` +
+    String.raw`(?:(?:\s*[·•∙‧・⋅]\s*|\s+)(?!(?:m${INV}*s${INV}*-))(?![\x21-\x7e]*\.)(?=[\x21-\x7e]{5,})(?=[\x21-\x7e]*\d)[\x21-\x7e]+)*`,
   "gu",
 )
 const keyBody = new RegExp(String.raw`(?:[0-9a-f]{11,}(?![0-9a-z])|(?=[\x21-\x7e]{11,})(?!\w)[\x21-\x7e]*\d)`)
@@ -1339,8 +1352,15 @@ function maskSpaced(s, letters) {
     const frameCut = Math.max(0, ...'=:([{,"\''.split("").map((c) => hp.lastIndexOf(c) + 1))
     const framed = hp.slice(frameCut)
     const frameWord = /[A-Za-z0-9]{2,}/.test(hp.slice(0, frameCut))
+    // a piece of a hex key cut by whitespace — "123e4567-e89b", "9f8e7d6c5b4a3928"
+    // — is the key's from its own first character, not from its last
+    // letters-and-digits: reading it as a tail began the run at "e89b" and left
+    // "123e4567-" on the card (measured: twelve characters of a UUID where the
+    // mask allows four). The hex letters are what tells the piece from a date
+    // ("2026-11-10" has digits and hyphens but no a–f) and from a word.
+    const hexPiece = /^[0-9a-f]+(?:-[0-9a-f]+)*$/i.test(hp) && /\d/.test(hp) && /[a-f]/i.test(hp) && hp.length >= 8
     const ht =
-      frameCut === 0 && keyAt(hp, letters)
+      frameCut === 0 && (keyAt(hp, letters) || hexPiece)
         ? hp
         : hp.match(FRONT_IN)?.[0] ?? (frameCut > 0 && !frameWord && keyAt(framed, letters) ? framed : tailOf(hp) || hp)
     const hf = hp.slice(0, hp.length - ht.length)
@@ -3408,6 +3428,6 @@ export async function MsmoliPlugin(input) {
 // exporting them as functions: magpie's loader treats every exported function
 // as a plugin entry (see windowOf above), but an object it skips. The tests
 // are the only reader.
-export const testables = { windowOf, streakOf, CN, INTL, sites, maskAll, awaitsSignIn, gate }
+export const testables = { windowOf, streakOf, CN, INTL, sites, maskAll, cardText, nameText, hostText, awaitsSignIn, gate }
 
 export default MsmoliPlugin
