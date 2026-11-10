@@ -1182,6 +1182,23 @@ function argRun(text) {
   return s
 }
 
+// frameSpan is the key's own span of a word a frame was written round:
+// "(ghp_…)" is the key and two brackets, not a key of the brackets' making.
+// The mask spends four characters at each end on the key's own characters, so
+// the frame has to stay outside it. Only punctuation is a frame here: a word
+// in front of the bracket ("x(ghp_…") is the text's, and its own reading
+// already masks the key it carries. A path is no frame either.
+const frameSpan = (w) => {
+  if (/[\\/]/.test(w)) return null
+  let a = 0
+  while (a < w.length && !/[A-Za-z0-9]/.test(w[a])) a += 1
+  let b = w.length
+  while (b > a && !/[A-Za-z0-9]/.test(w[b - 1])) b -= 1
+  if (a === 0 && b === w.length) return null
+  const body = w.slice(a, b)
+  return body ? { lead: w.slice(0, a), body, tail: w.slice(b) } : null
+}
+
 // argWords is the per-word judgement: one word key-shaped is masked whole,
 // and inside a word that is not, its key-like runs and UUIDs are masked. The
 // word in the other spellings a key is printed in — full-width characters,
@@ -1193,11 +1210,16 @@ const argWords = (x) =>
     // word that is already all capitals is judged whole by isKey (its slashed
     // arm), and upper-casing a lower-case word to ask the question would read
     // every long provider id with a date in it as a key (modelscope20261031)
-    if (isKey(w) || isKey(f)) return mask(w)
+    // (what is masked is the key's own span: a word quoted in a frame —
+    // "(ghp_…)", "[ghp_…]", '"ghp_…"' — is judged whole, and masking the whole
+    // word gave the frame's punctuation the two characters the mask spends on
+    // the key's own ends: "(ghp_…Qrst)" printed "(ghp…rst)")
+    const inFrame = frameSpan(w)
+    if (isKey(w) || isKey(f)) return inFrame ? inFrame.lead + mask(inFrame.body) + inFrame.tail : mask(w)
     // a value behind a flag or a frame ("--bad=SK-ANT-…", "NickName=[ghp_…")
     // is judged by what the frame encloses
     const kAt = w.search(/[A-Za-z]/)
-    if (kAt > 0 && !/[\\/]/.test(w.slice(0, kAt)) && isKey(w.slice(kAt))) return mask(w)
+    if (kAt > 0 && !/[\\/]/.test(w.slice(0, kAt)) && isKey(w.slice(kAt))) return inFrame ? inFrame.lead + mask(inFrame.body) + inFrame.tail : mask(w)
     const marks = (y) => y.replace(RUN, (r) => (keyRun(r) ? mask(r) : r)).replace(UUID_ANY, (m) => mask(m))
     const out = marks(w)
     // the folded copy can be key-shaped where the original is not — a token

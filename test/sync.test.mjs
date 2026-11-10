@@ -5389,5 +5389,23 @@ test("a key followed by a short word of the text's keeps the word", () => {
   assert.ok(!withComma.includes("tfor"), `the short word went into the mask: ${withComma}`)
   assert.ok(withComma.includes("for provider"), `the frame word was lost: ${withComma}`)
   // the key's own trailing punctuation stays outside the mask
-  assert.equal(arg(`${key}.`), "ghp_…rst.")
+  assert.equal(arg(`${key}.`), "ghp_…Qrst.")
+})
+
+test("a key quoted in a frame shows its own four characters, not the frame's", () => {
+  // The word is judged whole (isKey sees the key's run inside it), so the mask
+  // took the frame's punctuation for the first and last characters of the
+  // four: "(ghp_…Qrst)" printed "(ghp…rst)".
+  const key = "ghp_Abcd1234Efgh5678Ijkl9012Mnop3456Qrst"
+  for (const [open, close] of [["(", ")"], ["[", "]"], ["{", "}"], ['"', '"']]) {
+    const shown = arg(open + key + close)
+    assert.equal(shown, open + "ghp_…Qrst" + close, `${open}${close} frame: ${shown}`)
+  }
+  // a letter in front of the bracket is the text's: the word's own reading
+  // masks the key it carries, and the mask spends its four on the word's own
+  // ends there (the word is the frame then, not the key)
+  const prefixed = arg("x(" + key + ")")
+  assert.ok(prefixed.includes("…") && !prefixed.includes(key.slice(4, 20)), `a key behind a letter went out whole: ${prefixed}`)
+  // and the frame alone is never enough to make a word key-shaped
+  assert.equal(arg("(" + "hello" + ")"), "(hello)")
 })
