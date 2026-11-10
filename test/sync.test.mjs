@@ -5299,7 +5299,7 @@ test("a middot-cut key behind a frame's punctuation is masked in arg() too", () 
     const lead = v.match(/^[^A-Za-z0-9]*[A-Za-z]+=[^A-Za-z0-9]*|^[^A-Za-z0-9]+/)[0]
     assert.ok(out.startsWith(lead), `the frame is kept: ${JSON.stringify(lead)} → ${out}`)
   }
-  // and the frames' words stay
+  // and the frames' words stay, as before
   assert.equal(arg("key=AKIAIOS·FODNN7E·XAMPLE."), "key=AKIA…PLE.")
 })
 
@@ -5316,4 +5316,78 @@ test("the CLI's 32 KiB worst case stays fast", () => {
   }
   // and a real cut of the same sizes is still read
   assert.ok(arg("9f8e7d6c5b4a39281706f5e4d3c2b1a0".split("").join(" ")).includes("9f8e…b1a0"))
+})
+
+test("a middot cut keeps only the mask's four characters at each end", () => {
+  // The review's CLI repros: a cut key showed "ghp_1234…7890" (eight of the
+  // front's characters) and a UUID cut into pieces came out "123e123e…4000"
+  // — the frame kept a copy of the band the mask had read. Both are the mask's
+  // own four at each end plus the frame as printed, now.
+  assert.equal(arg("ghp_12·34AbCd·5678Ef·Gh9012·IjKl34·56MnOp·7890"), "ghp_…7890")
+  assert.equal(arg("123e4567-e89·b-12d3-a456-·426614174000"), "123e…4000")
+  const key = "ghp_1234AbCd5678EfGh9012IjKl3456MnOp7890"
+  for (const w of [1, 2, 4, 6, 9, 12]) {
+    const cut = key.match(new RegExp(`.{1,${w}}`, "g")).join("·")
+    assert.equal(arg(cut), "ghp_…7890", `cut ${w}: the mask showed more than its four characters`)
+    assert.equal(arg(`key=${cut}`), "key=ghp_…7890", `cut ${w} behind a frame: the mask showed more`)
+    assert.equal(arg(`(${cut} )`), "(ghp_…7890)", `cut ${w} in brackets: the frame's punctuation went inside the mask`)
+  }
+})
+
+// ── The closeout review's findings (2026-11-10) ──
+test("a bare front with a repeated four-letter piece is still masked", () => {
+  assert.equal(arg("ghp_1·abcd·2345·efgh·6789"), "ghp_…6789")
+})
+
+// ── The third review's CLI side (2026-11-10) ──
+test("a middot cut after a key's own front is the key's from its front", () => {
+  // The mask started at the first piece that read as a key ("Ghp_Abcd"), and
+  // the cut's remaining pieces were read as text.
+  assert.equal(arg("Ghp_Abcd1234·Efgh5678·Ijkl9012·Mnop3456·Qrst"), "Ghp_…Qrst")
+  // and an ordinary list of words with numerals is not a key
+  for (const t of ["file1 · file2 · file3 · file4", "NickName=[" + Array(16).fill(1).join(", ") + "]"]) {
+    assert.equal(arg(t), t, `ordinary text was masked: ${arg(t)}`)
+  }
+})
+
+// ── The leak probe's CLI side (2026-11-10) ──
+test("a lower-case key cut by spaces is masked, and ordinary text beside it is not", () => {
+  // no head reading took an all-lower-case piece ("abcd1234efgh"), so every
+  // word of the run was the per-word pass's and the key stayed whole
+  const key = "abcd1234efgh5678ijkl9012mnop3456"
+  const pieces = [key.slice(0, 12), key.slice(12, 24), key.slice(24)]
+  for (const sep of [" ", "  ", " · ", " ", "　"]) {
+    const cut = pieces.join(sep)
+    assert.equal(arg(cut), "abcd…3456", `cut by ${JSON.stringify(sep)}: ${arg(cut)}`)
+    assert.equal(arg(`no key ${cut} for provider`), "no key abcd…3456 for provider", `cut by ${JSON.stringify(sep)} behind a frame: ${arg(`no key ${cut} for provider`)}`)
+  }
+  // the pieces of a sentence are not a key however they are joined
+  for (const t of ["the log said", "hello world 2026", "release notes 2026-11-10", "build 1234 done 5678"]) {
+    assert.equal(arg(t), t, `ordinary text was masked: ${arg(t)}`)
+  }
+})
+
+test("an ms key cut by the card's own separator is masked from its front", () => {
+  // "ms-abcd1234e · fgh5678ijkl9 · 012mnop3456" is one key cut by the
+  // separator a display draws with spaces around it — three characters, wider
+  // than the bare cut — and spacedKey's walk stopped at the gap.
+  const key = "ms-abcd1234efgh5678ijkl9012mnop3456"
+  for (const sep of [" · ", " • "]) {
+    const cut = [key.slice(0, 12), key.slice(12, 24), key.slice(24)].join(sep)
+    assert.equal(arg(cut), "ms-a…3456", `cut by ${JSON.stringify(sep)}: ${arg(cut)}`)
+  }
+})
+
+test("a key followed by a short word of the text's keeps the word", () => {
+  // "for" is three letters: the run read it in and the mask ended "Qrst for"
+  // ("ghp_…tfor provider"). The key's own trailing comma stays outside the
+  // mask, and the space behind it stays with the frame word (the gap was
+  // dropped: "ghp_…,for provider")
+  const key = "ghp_Abcd1234Efgh5678Ijkl9012Mnop3456Qrst"
+  assert.equal(arg(`no key ${key} for provider`), "no key ghp_…Qrst for provider")
+  const withComma = arg(`no key ${key}, for provider`)
+  assert.ok(!withComma.includes("tfor"), `the short word went into the mask: ${withComma}`)
+  assert.ok(withComma.includes("for provider"), `the frame word was lost: ${withComma}`)
+  // the key's own trailing punctuation stays outside the mask
+  assert.equal(arg(`${key}.`), "ghp_…rst.")
 })

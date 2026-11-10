@@ -494,16 +494,18 @@ function spacedKey(s) {
   let bare = false
   let strong = false
   for (let guard = 0; guard < 512 && idx < pieces.length - 1; guard += 1) {
-    // the gap before the next piece: one cut joins, a run of three or more
-    // cuts is a frame; any other character ("--ms-", "#ms-", "/tmp/ms-", a
-    // path segment) is the same filler, once the body reads as a key
-    // a gap of three or more joins only after the body reads as a key, and
-    // then only the two-cut spelling ("a··b"): three or more ("a···b") is the
-    // frame a display draws instead of a hidden piece, and the pieces after
-    // it are printed as written
+    // the gap before the next piece: one cut joins, a short run of cuts joins
+    // too (the card's own separator is a middot with a space either side,
+    // " · ", three characters, and a key cut by one is still one key), and a
+    // long run is a frame; any other character ("--ms-", "#ms-", "/tmp/ms-",
+    // a path segment) is the same filler, once the body reads as a key
+    // a gap longer than three joins only after the body reads as a key, and
+    // then only a middot's spelling ("a····b"): a run of cuts that is no
+    // separator ("a---b") is the frame a display draws instead of a hidden
+    // piece, and the pieces after it are printed as written
     const gap = CUT_ONE.exec(s.slice(end))
     if (!gap) break
-    if (gap[0].length > 2 && (!strong || gap[0].length > 5)) break
+    if (gap[0].length > 3 && (!strong || gap[0].length > 5)) break
     idx += 1
     const piece = pieces[idx].text
     if (VERNUM.test(piece) && !/\d/.test(bodyFrom(end))) break
@@ -783,7 +785,9 @@ const maskCut = (s) => {
   const frontSplit = (i) => i + 1 < words.length && /^[A-Za-z]+$/.test(words[i][0]) && words[i][0].length <= 5 && VENDOR.test(words[i][0] + words[i + 1][0])
   const MIDDOT_GAP = /^(?:[ \t\u00a0\u3000]?[·•∙‧・]){1,2}[ \t\u00a0\u3000]?$/
   const wordLike = (w) => /^[A-Za-z]+$/.test(w) && /[a-z]/.test(w) && /[aeiouy]/i.test(w)
-  const middotGap = (k, w0, i) => MIDDOT_GAP.test(gap(k)) && (w0.length <= 2 || VENDOR.test(w0) || /^ms-/i.test(w0) || frontSplit(i) || !wordLike(words[i][0]) || !wordLike(words[k][0]) || isKey(run(i, k - 1)))
+  // (the join's own reading is asked once a body of key length is on the
+  // table: asking it at every middot re-read the run to its square)
+  const middotGap = (k, w0, i) => MIDDOT_GAP.test(gap(k)) && (w0.length <= 2 || VENDOR.test(w0) || /^ms-/i.test(w0) || frontSplit(i) || !wordLike(words[i][0]) || !wordLike(words[k][0]) || (end(k) - at(i) >= 20 && isKey(run(i, k - 1))))
   // a character cut: every piece one character ("A· K· I· A· …"), or a
   // vendor front cut in two and then one character at a time ("G· H· P· _· 1· 2· …")
   // — a shape the run below cannot read, because its prose test ends a run at
@@ -800,7 +804,11 @@ const maskCut = (s) => {
     const sep = Math.max(...'=:([{,"\''.split("").map((c) => lead.lastIndexOf(c)))
     const tail = sep >= 0 ? lead.slice(sep + 1) : lead
     // a piece of a digest is hex and its hyphens ("…=[123e4567-")
-    return { mat: VENDOR.test(tail) || /^ms-/i.test(tail) || /^[0-9a-f-]+$/i.test(tail) ? tail : (tail.match(/[A-Za-z0-9]+$/)?.[0] ?? "") }
+    // (a word with a middot in it is the cut's: its material is the word, so
+    // the frame keeps no copy of key text — "123e4567-e89·b-" used to leave
+    // "123e4567" in the frame and again in the mask)
+    const cutMid = /[·•∙‧・]/.test(tail)
+    return { mat: VENDOR.test(tail) || /^ms-/i.test(tail) || /^[0-9a-f-]+$/i.test(tail) || cutMid ? tail : (tail.match(/[A-Za-z0-9]+$/)?.[0] ?? "") }
   }
   // a piece's own spelling may carry the text's punctuation ("0.", "1,")
   // a single hyphen a key was cut at ("… 7·-·e …") is a piece too
@@ -854,6 +862,12 @@ const maskCut = (s) => {
     // pieces carry. The card reads the same run
     const digestPiece = (w) => /[0-9]/.test(w) && /^[0-9a-f-]+$/i.test(w) && !/^-+$/.test(w)
     const hexHead = digestPiece(w0)
+    // a key written in one lower-case alphabet ("abcd1234efgh 5678ijkl9012
+    // mnop3456"): the card takes the same run, and no head reading above does
+    // — a piece of it is no vendor front, carries no capital, is no digest and
+    // is longer than a front's. The run still has to read as one key joined
+    // below, so a page of words with numerals is not taken
+    const lcHead = w0.length >= 4 && /^[a-z0-9]+$/.test(w0) && /[0-9]/.test(w0) && /[a-z]/.test(w0)
     // a head behind a frame's punctuation ("key=AK IA…", a JSON quote, a
     // bracket): the key material is what follows the frame, and the frame
     // itself is kept as printed. Two characters of it at least — a single
@@ -864,10 +878,20 @@ const maskCut = (s) => {
     // ms-aaaa…"): its part that reads as a digest. A path is not read that
     // way ("/tmp/ms-ZZZZ…" is masked as the token it is, by the per-word pass)
     const band = /[\\/]/.test(w0) ? undefined : (w0.match(/[A-Za-z0-9]+/g) ?? []).find((b) => b.length >= 2 && digestPiece(b))
-    const t0 = mat !== w0 && mat.length >= 2 ? mat : band && band.length >= 2 ? band : w0
+    // (a word that opens with a vendor front is the key's from its first
+    // character: a digest band inside it — the "12" of "ghp_12" — is not a
+    // frame, and the four characters the mask shows would be that band)
+    const t0 = mat !== w0 && mat.length >= 2 ? mat : band && band.length >= 2 && !VENDOR.test(w0) && !/^ms-/i.test(w0) ? band : w0
     // the head's key material with its frame kept outside the mask
     const tailHead = t0 !== w0
-    if (!VENDOR.test(w0) && !capsPiece(w0) && !msHead && !tiny && !mixedHead && !frontish && !hexHead && !tailHead) continue
+    // (a frame whose material is one character is no head's: "NickName=[1,"
+    // read the name into the key and masked a list of ones. The word's own
+    // shape can still start a run — a whole key-shaped word is the key
+    // whatever stands in front of it — but being a mixed-case word behind a
+    // frame is not enough)
+    const framedOne = mat !== w0 && mat.length < 2
+    if (!VENDOR.test(w0) && !capsPiece(w0) && !msHead && !tiny && !mixedHead && !frontish && !hexHead && !tailHead && !lcHead) continue
+    if (framedOne && !VENDOR.test(w0) && !capsPiece(w0) && !msHead && !frontish && !hexHead && !lcHead) continue
     // two key-shaped words are two keys: one mask for both would hide the
     // second's front ("ms-aaaa… ms-zzzz…" is not one key)
     const pairOfKeys = i + 1 < words.length && /^[ \t\u00a0\u3000]+$/.test(gap(i + 1)) && keyAt(words[i][0]) && keyAt(words[i + 1][0])
@@ -880,8 +904,25 @@ const maskCut = (s) => {
     let last = i
     let sawKey = false
     let body = t0
+    let sawHard = /[A-Z]/.test(t0) || /\d/.test(t0)
+    // the pieces read so far, kept as they are read: slicing them out of the
+    // word list at every piece is what made a page of tiny words take seconds
+    const pieces = [t0]
+    // the questions below asked of the pieces, kept as they are read (asking
+    // each of them again at every piece read a page of tiny words to the square)
+    let allAlphabet = /^[A-Za-z0-9+/=_.-]*$/.test(t0)
+    let anyDigit = /[0-9]/.test(t0)
+    let anyCap = /[A-Z]/.test(t0)
     for (let k = i + 1; !pairOfKeys && k < words.length && k - i <= 48 && (/^[ \t\u00a0\u3000\r\n]+$/.test(gap(k)) || middotGap(k, w0, i)); k += 1) {
       const x = words[k][0]
+      // a short word of the text's ends the run once a cut has been read
+      // ("no key abcd… mnop3456 for provider" keeps its "for"): the pieces of
+      // a key that are one to three letters are read before the cut is found
+      // (the "a" of "sk-a nt-a pi03"), and a word after it is the text's.
+      // (a run whose body already reads as a key is complete: the word after
+      // it is the frame's — "ghp_…Qrst, for provider" read "for" into the
+      // mask, and the mask ended ",for")
+      if (/^[a-z]{1,3}$/.test(x) && !VENDOR.test(x) && (j > i || isKey(body))) break
       last = k
       if (/[0-9]/.test(x) || VENDOR.test(x)) sawKey = true
       // every piece is short enough or a vendor front; a word of a sentence in
@@ -897,7 +938,11 @@ const maskCut = (s) => {
       // are short, and none is a capitalised word ("Release", "Notes")
       const capsy = i + 1 < words.length && /^-?[0-9]/.test(words[i + 1][0]) && x.length <= 16 && /[A-Z0-9]/.test(x)
       body += x
-      const pieces = [t0, ...words.slice(i + 1, k + 1).map((w) => w[0])]
+      pieces.push(x)
+      if (allAlphabet && !/^[A-Za-z0-9+/=_.-]*$/.test(x)) allAlphabet = false
+      if (!sawHard && (/[A-Z]/.test(x) || /\d/.test(x))) sawHard = true
+      if (!anyDigit && /[0-9]/.test(x)) anyDigit = true
+      if (!anyCap && /[A-Z]/.test(x)) anyCap = true
       // the head is not a word of the run's own: "xoxb -123 4567 …" begins at
       // a front cut in two, and reading the front as prose ended the run
       // a piece joined by a middot or a bullet is key material whether or not
@@ -906,7 +951,10 @@ const maskCut = (s) => {
       // front can still be checked against the key below
       const mid = MIDDOT_GAP.test(gap(k))
       const prose = !mid && pieces.slice(1).some((w) => w.length >= 4 && /^[a-z]{4,}$/.test(w) && !VENDOR.test(w))
-      if (prose && !(/^ms-/i.test(w0) && tokenShaped1.test(body)) && !(keyAt(x) && pieces.some((w) => /[A-Z]/.test(w) || /\d/.test(w)))) continue
+      // (the head's own material counts: "abcd1234efgh 5678ijkl9012 mnop3456"
+      // read its first piece as prose and ended the run there, and the key
+      // stayed on the terminal whole)
+      if (prose && !(/^ms-/i.test(w0) && tokenShaped1.test(body)) && !(keyAt(x) && sawHard)) continue
       // the body of a key cut by spaces: 20+, a key-shaped run in the head —
       // the front, or the word after it ("ghp_ 1234 AbCd…"; "sk-a nt-a pi03…"
       // is a vendor key whose body is all its pieces, and the head's run is
@@ -919,13 +967,10 @@ const maskCut = (s) => {
       // ("sk-preset-20261031 is a provider id")
       // ("sk-a" is not a vendor front, and the vendor front of "sk-preset" is
       // the whole word; either way the words after the first piece are prose)
-      // a piece of exactly four lower-case letters is a piece while the run is
-      // on the key's own alphabet from its front
-      const allKey = pieces.slice(1).every((w) => /^[A-Za-z0-9+/=_.-]*$/.test(w)) || pieces.length >= 3
       // a lower-case run of four or more letters after the head is prose, or
       // a path's word ("/tmp/ms-ZZZZ…"): a key's pieces carry capitals or
       // digits
-      const plain = pieces.slice(1).some((w) => w.length >= 4 && /^[a-z]{4,}$/.test(w) && (w.length > 4 || !allKey || !/[A-Z0-9]/.test(body.replace(w0, "").replace(w, ""))))
+      const plain = x.length > 4 && /^[a-z]{4,}$/.test(x) && !VENDOR.test(x)
       // a bare front (ghp_, sk-, xoxb-) is a word no key floor keeps, and the
       // pieces after it are the key; a vendor-like word that carries more than
       // the front ("sk-preset-20261031") is a provider id, and its run only
@@ -934,22 +979,29 @@ const maskCut = (s) => {
       // a front cut in two leaves a shorter body than the floor reads: the
       // front itself is half of it ("xoxb-12345678901" is 16 characters), and
       // the front's own evidence stands in for the missing four
-      const capMixed = pieces.slice(1).some((w) => /[0-9]/.test(w)) && pieces.slice(1).some((w) => /[A-Z]/.test(w))
+      const capMixed = anyDigit && anyCap
       const capFront = /^[a-z]{1,5}$/.test(pieces[0]) && /[0-9]/.test(pieces[1]) && /[A-Za-z]/.test(pieces[1])
-      const shortFront = frontish && pieces.length >= 3 && pieces.slice(1).some((w) => /[0-9]/.test(w))
+      const shortFront = frontish && pieces.length >= 3 && anyDigit
       const cut =
         /\d/.test(body) &&
         body.length >= (frontish ? 16 : 20) &&
         !body.includes(MASKED) &&
         // a middot or a bullet is a cut's spelling too, and the key it writes
         // is the characters joined without them
-        (isKey(body) ||
+        // (a body of nothing but digits is no key's, and some of the readings
+        // below re-read it at every piece: asked once, at the floor)
+        (anyCap || !/^\d+$/.test(body)) &&
+        !/^\d+$/.test(body.replace(/[^A-Za-z0-9]/g, "")) &&
+        // (a body whose letters are one word — "NickName=[1, 1, …]" — is a
+        // frame, not a key's front: a key carries other marks with its letters)
+        (/[\d]/.test(body.replace(/[^A-Za-z0-9]/g, "").replace(/^[A-Za-z]+/, "")) || !isKey(body.replace(/[^A-Za-z]/g, ""))) &&
+          (isKey(body) ||
           // the key the pieces write when the card's own separators — the
           // middots and the hyphens a UUID is drawn with — are left out
           (mid && isKey(body.replace(/[·•∙‧・]/g, ""))) ||
           (mid && isKey(body.replace(/[·•∙‧・-]/g, ""))) ||
           (msHead && tokenShaped1.test(body) && !pieces.some((w) => /^[A-Za-z]{2,}$/.test(w) && !VENDOR.test(w) && w !== w0)) ||
-          (bareFront && !plain && (pieces.slice(0, 2).join("").match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r) || r.length >= 4 || keyedBody(body))) ||
+          (bareFront && !plain && (pieces[0] + pieces[1]).match(/[A-Za-z0-9]+/g) ? (pieces[0] + pieces[1]).match(/[A-Za-z0-9]+/g).some((r) => keyRun(r) || r.length >= 4 || keyedBody(body)) : false) ||
           (capsy && (capMixed || capFront) && !pieces.some((w) => /^[A-Z][a-z]{3,}$/.test(w))) ||
           (shortFront && !pieces.some((w) => /^[A-Z][a-z]{3,}$/.test(w)))) &&
         (k - i >= 2 || !bareFront)
@@ -962,9 +1014,17 @@ const maskCut = (s) => {
     }
     // the head's frame is kept as printed and only its key material goes into
     // the mask ("key=AK IA…", "no key ms-aaaa…" loses none of its "no key")
-    const keep = w0.length - t0.length
-    const keyText = [t0, ...words.slice(i + 1, j + 1).map((w) => w[0])].join("").replace(MASKED, "")
-    out.push(s.slice(from, at(i) + keep), mask(keyText.replaceAll(MASKED, "")))
+    // a word read whole starts its key material where its material does: the
+    // frame in front of it ("(ghp_…") is kept, and the four characters the
+    // mask shows are the key's, not the frame's leftovers
+    const keep = s.slice(at(i), at(i) + w0.length).indexOf(t0)
+    const parts = [t0, ...words.slice(i + 1, j + 1).map((w) => w[0])]
+    // a word of nothing but punctuation is the frame's ("(… )"), not the
+    // key's: the mask's last four characters are the key's own
+    let tailP = ""
+    if (parts.length > 1 && !/[A-Za-z0-9]/.test(parts[parts.length - 1])) tailP = parts.pop().replace(/^[A-Za-z0-9]+/, "")
+    const keyText = parts.join("").replace(MASKED, "")
+    out.push(s.slice(from, at(i) + keep), mask(keyText.replaceAll(MASKED, "")), tailP)
     from = end(j)
     i = j
   }
@@ -1472,10 +1532,16 @@ function maskEchoes(s, secret) {
 // scrub() alone, with only the known secrets, was the leak the failing path
 // had.
 function scrub(out, ...secrets) {
-  let s = out.length > 32 * 1024 ? out : maskCut(out)
+  // the known secrets first: maskEchoes finds a piece of one whatever cut it
+  // into and prints it as that key's own mask ("ms-a…5555"), which says more
+  // than the shape pass can. Run the other way round, a key echo cut by
+  // spaces was already masked as an anonymous run ("aaaa…5555") and the
+  // better reading never saw it.
+  let s = out
   for (const secret of secrets) {
     if (secret) s = maskEchoes(s.split(secret).join(mask(secret)), secret)
   }
+  if (s.length <= 32 * 1024) s = maskCut(s)
   // arg() over the whole text first: its run reading covers a key cut by a
   // line break or by spaces across the child's lines (a wrapped page, a
   // pretty-printed error), which a line at a time cannot see. Then per line,

@@ -10726,10 +10726,20 @@ test("a 401 behind a frame's punctuation, a proxy's 403, and a key behind a colo
   assert.ok(plain.startsWith("余额查询失败："), `the frame is kept: ${plain}`)
   const token = "ms-shape401-0000-0000-0000-000000000017"
   testables.sites.clear()
-  // an empty body is not evidence either way and does not sign the account
-  // out (both requests answered with no body, as Codex's repro had them)
+  // a bodyless 401 is a proxy's challenge, not the site's refusal
   const empty = await withFetch({ [BALANCE_PATH]: { status: 401, raw: "" } }, () => auth.usage(async () => ({ type: "api", key: token })))
   assert.equal(empty.signIn, "", `an empty 401 signed the account out: ${JSON.stringify(empty)}`)
+  // and the site's own refusal is read in either casing and either language:
+  // the login layer answers in Pascal case, some messages are Chinese
+  for (const body of [{ Code: 401, Success: false, Message: "Unauthorized" }, { Code: 401, Success: false, Message: "登录状态已失效" }, { success: false, code: 10010101001, message: "请先登录" }]) {
+    testables.sites.clear()
+    const u = await withFetch({ [BALANCE_PATH]: { status: 401, body } }, () => auth.usage(async () => ({ type: "api", key: token })))
+    assert.equal(u.signIn, "expired", `a site's own 401 was not read as one: ${JSON.stringify(body)} → ${JSON.stringify(u)}`)
+  }
+  // a proxy that says "re-authenticate" is still the path
+  testables.sites.clear()
+  const reauth = await withFetch({ [BALANCE_PATH]: { status: 401, body: { error: "session expired, please re-authenticate" } } }, () => auth.usage(async () => ({ type: "api", key: token })))
+  assert.equal(reauth.signIn, "", `a proxy's re-authenticate expired the sign-in: ${JSON.stringify(reauth)}`)
   testables.sites.clear()
   const proxied = await withFetch({ [BALANCE_PATH]: { status: 403, body: { error: "proxy authentication required" } } }, () => auth.usage(async () => ({ type: "api", key: token })))
   assert.equal(proxied.signIn, "", "a proxy's 403 is not risk control")
@@ -10742,15 +10752,20 @@ test("a 401 behind a frame's punctuation, a proxy's 403, and a key behind a colo
 
 test("the middot matrix: a key cut by any middot, in any frame, is masked whole", () => {
   // The matrix CONTRIBUTING names: four frames × widths one to twelve × six
-  // key shapes × eight separators, card and CLI. Measured 2026-11-10: zero
-  // leaks. Before this round every width leaked in every frame.
+  // key shapes × eight separators, card and CLI. What is measured is the
+  // compact key absent from the output, not the mask's own width: the second
+  // review found masks that left "ghp_1234" of the front beside them, and that
+  // reading — no more than four characters of the key at each end — is pinned
+  // in "a 401 reads the path's own field names…" below.
+  // (all of the twelve widths leak nothing of the whole key as of 2026-11-10;
+  // before this round every width leaked in every frame)
   const keys = ["AKIAIOSFODNN7EXAMPLE", "9f8e7d6c5b4a39281706f5e4d3c2b1a0", "ms-foreign-0123456789abcdef0123456789abcdef", "ghp_1234AbCd5678EfGh9012IjKl3456MnOp7890", "sk-ant-api03-Eyai1pkJrF_Kbwt", "123e4567-e89b-12d3-a456-426614174000"]
   const seps = ["·", "•", "∙", "‧", "・", "··", "· ", " · "]
   const frames = ["%", "NickName=[%]", "(% )", "key=%."]
   const flat = (x) => String(x).normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "")
   for (const key of keys) {
     for (const sep of seps) {
-      for (const w of [1, 2, 4, 9, 12]) {
+      for (const w of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) {
         const cut = key.match(new RegExp(`.{1,${w}}`, "g")).join(sep)
         for (const fr of frames) {
           const v = fr.replace("%", cut)
@@ -10761,4 +10776,214 @@ test("the middot matrix: a key cut by any middot, in any frame, is masked whole"
       }
     }
   }
+})
+
+test("a separated key in a sentence is masked up to its own end, and the sentence stays", () => {
+  // The review's regression: the head word was cut at its last letters-and-
+  // digits, so a UUID, an ms- key or a slashed secret left most of itself in
+  // the frame ("ledger entry 123e4567-e89b-…" → "123e4567-e89b-12d3-a456-4266…").
+  // And the other way: the word after a key, or a list of model captions, was
+  // swallowed into the mask ("see AKIA… here" → "see AKIA…here").
+  const masked = [
+    ["ledger entry 123e4567-e89b-12d3-a456-426614174000 not found", /^ledger entry 123e…4000 not found$/],
+    ["trace wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY done", /^trace wJal…EKEY done$/],
+    ["see ms-foreign-0123456789abcdef0123456789abcdef here", /^see ms-f…cdef here$/],
+    ["key=123e4567-e89b-12d3-a456-426614174000", /^key=…4000$/],
+  ]
+  for (const [v, want] of masked) {
+    const out = testables.maskAll(v, true)
+    assert.match(out, want, `masked at the wrong place: ${v} → ${out}`)
+  }
+  assert.equal(testables.maskAll("see AKIAIOSFODNN7EXAMPLE here", true), "see AKIA…MPLE here")
+  const kept = ["Qwen3-Max · Qwen3-Coder · Qwen2.5-72B", "Claude-Sonnet-4 · Claude-Opus-4", "release · notes"]
+  for (const v of kept) assert.equal(testables.maskAll(v, true), v, `ordinary text was masked: ${v} → ${testables.maskAll(v, true)}`)
+  // the list's captions used to read as one key once a caption carried a digit
+  assert.equal(testables.maskAll("AKIAIOSFODNN7EXAMPLE · 4 次", true), "AKIA…MPLE · 4 次")
+})
+
+test("a 401 reads the path's own field names, and a middot mask keeps four characters of key", () => {
+  // The second review's findings, each a regression this round's changes made:
+  // a proxy 401 that names itself only in a field name ({"proxy":"upstream"})
+  // was read as the site refusing the token, and a key cut by middots every 4
+  // characters showed "ghp_1234" of its front where the mask's own form allows
+  // four characters of the whole key ("ghp_…7890").
+  assert.equal(testables.awaitsSignIn({ message: "unauthorized", proxy: "upstream" }), false)
+  assert.equal(testables.awaitsSignIn({ error: "invalid token", gateway: "edge" }), false)
+  // an upstream's own words are not a path naming itself: the site reads the
+  // body above it, and what a proxy puts there is the proxy's words
+  assert.equal(testables.awaitsSignIn({ message: "Upstream returned status 401" }), true)
+  // ModelScope's Pascal-case login envelope is the site's
+  assert.equal(testables.awaitsSignIn({ Code: 401, Success: false, Message: "请先登录" }), true)
+  // the mask's own form is four characters at each end; the review's repro
+  // showed "ghp_1234AbC·d5678EfGh90·12IjKl3456M·nOp7890" as
+  // "(ghp_1234AbC·d567…890)" — fourteen of the key's characters on the card
+  assert.equal(testables.maskAll("(ghp_1234AbC·d5678EfGh90·12IjKl3456M·nOp7890)", true), "(ghp_…7890)")
+  for (const w of [2, 4, 9, 12]) {
+    const cut = "ghp_1234AbCd5678EfGh9012IjKl3456MnOp7890".match(new RegExp(`.{1,${w}}`, "g")).join("·")
+    assert.equal(testables.maskAll(`(${cut})`, true), "(ghp_…7890)", `cut ${w}: the mask showed more than its four characters`)
+  }
+})
+
+test("a 403 is ModelScope's only when the body is its own envelope", () => {
+  // The review's second round: a proxy's {"code":"proxy_denied"} and its
+  // {"success":false,"message":"proxy authentication required"} were reported
+  // as ModelScope's risk control, while the login layer's own Pascal envelope
+  // ({"Code":403,"Success":false,"Message":"RiskControl"}) read as "not
+  // ModelScope's". The envelope is the site's in either case; a body that
+  // names a path is the path's.
+  const say = (body, status = 403) => {
+    try {
+      testables.gate(testables.CN, { status }, body, typeof body === "object", "ms-test", "余额查询失败")
+      return "no error"
+    } catch (e) {
+      return e.message
+    }
+  }
+  const risk = "被魔搭风控拒绝（HTTP 403）"
+  for (const body of [{ Code: 403, Success: false, Message: "RiskControl" }, { success: false, message: "forbidden" }, { data: null, code: 403 }]) {
+    assert.equal(say(body), risk, `ModelScope's own envelope is risk control: ${JSON.stringify(body)}`)
+  }
+  for (const body of [{ code: "proxy_denied" }, { success: false, message: "proxy authentication required" }, { error: "gateway refused" }]) {
+    assert.notEqual(say(body), risk, `a path's refusal is not ModelScope's risk control: ${JSON.stringify(body)}`)
+  }
+})
+
+// ── The closeout review's four regressions (2026-11-10) ──
+test("a two-character middot cut of a UUID before prose is masked whole", () => {
+  // Masking through the read pieces trimmed a short piece the key needed
+  // ("\u00b700"), and the mask's head then covered only the first piece. The
+  // trim is the card's own " \u00b7 " separator's; a bare middot is a cut's.
+  const cut = "123e4567-e89b-12d3-a456-426614174000".match(/.{1,2}/g).join("\u00b7")
+  assert.equal(testables.maskAll(`${cut} not found`, true), "123e\u20264000 not found")
+  assert.equal(testables.maskAll(cut, true), "123e\u20264000")
+  // and the card's own separator still ends the mask before the text
+  assert.equal(testables.maskAll("AKIAIOSFODNN7EXAMPLE \u00b7 4 \u6b21", true), "AKIA\u2026MPLE \u00b7 4 \u6b21")
+})
+
+test("a proxy code 401 is the path, not the token", () => {
+  // A proxy's own 401 carries a code; the code is not evidence about who
+  // answered, and a body naming the path is the path's before it is read.
+  assert.equal(testables.awaitsSignIn({ code: 401, message: "proxy authentication required" }), false)
+  assert.equal(testables.awaitsSignIn({ code: 401, gateway: "edge" }), false)
+  // a code of 401 with nothing naming a path is still the site's
+  assert.equal(testables.awaitsSignIn({ code: 401 }), true)
+})
+
+test("a Pascal envelope naming a proxy is not ModelScope risk control", () => {
+  // The envelope check accepted Pascal case and then let it outrank the
+  // path's own words; a body naming a path is the path's whatever its shape.
+  let err = ""
+  try {
+    testables.gate(testables.CN, { status: 403 }, { Success: false, Code: 403, Message: "proxy denied" }, true, "ms-test", "\u4f59\u989d\u67e5\u8be2\u5931\u8d25")
+  } catch (e) {
+    err = e.message
+  }
+  assert.equal(err, "\u4f59\u989d\u67e5\u8be2\u5931\u8d25\uff1a\u54cd\u5e94\u4e0d\u662f\u9b54\u642d\u7684\uff08HTTP 403\uff09")
+})
+
+// ── The third review's findings (2026-11-10): rules without a failing case ──
+const PLAIN_MSG = "余额查询失败：接口暂时不可用，请稍后再试。"
+const shownOf = async (body) =>
+  (await withFetch({ [BALANCE_PATH]: { status: 500, body } }, () => auth.usage(async () => ({ type: "api", key: "ms-review3-0000-0000-0000-000000000042" })))).error
+
+test("a middot-cut key before a full stop and prose keeps its own frame", async () => {
+  // The card read a "·"-cut key's trailer as prose ("42 · prose" is a caption
+  // and a sentence), and a key cut that way before the end of a sentence ended
+  // up cut from the first character. These are the same sentence's trailer,
+  // not prose: the key is framed "…", the first four and last four stay.
+  const u = "1f2a3b4c-5d6e-7f80-9a0b-1c2d3e4f5061"
+  const forms = [u.match(/.{1,2}/g).join("·"), u]
+  for (const t of forms) {
+    const body = `${t} not found`
+    const shown = String(await shownOf({ success: false, message: body }))
+    assert.ok(shown.includes("1f2a…5061"), `the key's ends were lost: ${JSON.stringify(body)} → ${JSON.stringify(shown)}`)
+    assert.ok(!t.replace(/[^A-Za-z0-9]/g, "").includes(shown.replace(/[^A-Za-z0-9]/g, "")) || shown === PLAIN_MSG + "（HTTP 500）", shown)
+    const trail = String(await shownOf({ success: false, message: `${t} not found` }))
+    assert.ok(trail.includes("1f2a…5061"), `a middot key before prose was not masked from its own start: ${JSON.stringify(trail)}`)
+  }
+})
+test("a middot cut whose pieces look like names is still masked whole", async () => {
+  // Each piece was read as prose (a capitalised word, two letters and lower
+  // case: a caption or a sentence) and the key between them was left whole.
+  const t = "Ghp_Abcd1234\u00b7Efgh5678\u00b7Ijkl9012\u00b7Mnop3456\u00b7Qrst"
+  const shown = String(await shownOf({ success: false, message: `${t} not found` }))
+  assert.ok(shown.includes("Ghp_\u2026Qrst"), `a cut key with name-like pieces leaked: ${JSON.stringify(shown)}`)
+  assert.ok(!shown.includes("Abcd"), JSON.stringify(shown))
+})
+
+test("a middot cut of one- and two-character pieces before prose keeps its own start", () => {
+  // A numeric code, a hex key and a nickname were all read piecewise: the
+  // pieces are short enough not to be prose, and one containing a digit was a
+  // cut's, never the end of the key. The first piece a mask may start at is
+  // the key's own first character.
+  const cases = [
+    ['ms-0123abcd\u00b7ef0\u00b7ef1\u00b7ef2\u00b7ef3\u00b7ef4\u00b7ef5\u00b7ef6\u00b7ef7\u00b7ef8\u00b7ef9 not found', "ms-0\u20268ef9", "abcd"],
+  ]
+  for (const [t, want, leak] of cases) {
+    const shown = testables.maskAll(t, true)
+    assert.ok(shown.includes(want), `${t.slice(0, 20)}: ${shown}`)
+    assert.ok(!shown.includes(leak), shown)
+  }
+  // a ModelScope key cut one piece at a time before prose keeps its own start
+  const a = testables.maskAll("ms-1a2b3c4d\u00b7e5f6\u00b7g7h8\u00b7i9j0\u00b7k1l2\u00b7m3n4\u00b7o5p6 whatever text", true)
+  assert.ok(a.startsWith("ms-1\u2026o5p6"), a)
+  assert.ok(!a.includes("e5f6"), a)
+  // a long mixed-case key cut behind its own body before the text
+  const b = testables.maskAll("ms-foReiGn01aBcDeF\u00b7gH01\u00b7iJ02\u00b7kL03\u00b7mN04\u00b7oP05\u00b7qR06 not found", true)
+  assert.ok(!/gH01|iJ02/.test(b), b)
+  assert.ok(b.endsWith("not found"), b)
+})
+
+test("an ordinary list joined by the card's separator is not a key", async () => {
+  // Four file names are joined by the same " · " a cut uses; they are one
+  // word with a numeral, not a key. A repeated model name joined by commas
+  // and a nickname that is a list of ones are ordinary text too.
+  for (const t of ["file1 \u00b7 file2 \u00b7 file3 \u00b7 file4", "qwen3-max, qwen3-max, qwen3-max, qwen3-max", "NickName=[" + Array(32).fill(1).join(", ") + "]"]) {
+    const shown = String(await shownOf({ success: false, message: t }))
+    assert.ok(shown.includes(t), `ordinary text was masked: ${JSON.stringify(t)} \u2192 ${JSON.stringify(shown)}`)
+  }
+})
+
+test("a key cut before prose is extended to its end, not past it", () => {
+  // The mask's prose rule kept its head; a key cut mid-way under a run cut at the
+  // 20th character, before the pieces were read as the key's own.
+  const t = "ms-1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d blahblahblah blahblahblah blahblahblah"
+  assert.equal(testables.maskAll(t, true), "ms-1\u20265c6d blahblahblah blahblahblah blahblahblah")
+})
+
+test("a mixed-case key written without a digit is a key, not a name", () => {
+  // keyRun's case-mix arms floor at 16 characters; a shorter one of the same
+  // shape is the shape a credential has, and a name of that shape cannot be
+  // told from a key of it — so the name is refused rather than the key stored.
+  for (const t of ["AbCdEfGhIjKlMnOp", "JkLmNoPqRsTuVwXy"]) {
+    const shown = testables.maskAll(t, true)
+    assert.ok(shown.includes(t.slice(0, 4)) && shown.includes(t.slice(-4)) && shown.includes("\u2026") && !shown.includes(t.slice(4, -4)), `${t} was not masked: ${shown}`)
+  }
+  // prose in capitals with short words stays
+  assert.equal(testables.maskAll("THIS IS A SENTENCE IN CAPS", true), "THIS IS A SENTENCE IN CAPS")
+})
+
+test("a key cut after a frame is read past the frame's own capital", () => {
+  // The head "NickName=[ghp_…" begins with a capital and a lower-case run like
+  // a caption's; the run was ended there and the front and its first piece
+  // stayed on the card. Without the front exception this line prints
+  // "NickName=[ghp_Abcd1234·Efgh…Qrst]".
+  const key = "ghp_Abcd1234Efgh5678Ijkl9012Mnop3456Qrst"
+  const cut = [key.slice(0, 12), key.slice(12, 24), key.slice(24)].join("·")
+  for (const frame of ["NickName=[", "Qqqqqqq="]) {
+    const shown = testables.maskAll(frame + cut + "]", true)
+    assert.ok(!shown.includes(key.slice(0, 12)), `${frame}: the key's front stayed: ${shown}`)
+    assert.equal(shown, `${frame}ghp_…Qrst]`)
+  }
+  // and two captions either side of the card's separator are still a list
+  assert.equal(testables.maskAll("Qwen3-Max · Qwen3-Coder", true), "Qwen3-Max · Qwen3-Coder")
+})
+
+test("a key followed by a short word keeps the word and the space in front of it", () => {
+  // "for" is three letters, a short word of the text's: the run read it in and
+  // the mask came out "ghp_…tfor"
+  const key = "ghp_Abcd1234Efgh5678Ijkl9012Mnop3456Qrst"
+  assert.equal(testables.maskAll(`no key ${key} for provider`, true), "no key ghp_…Qrst for provider")
+  // and a comma after the key kept the comma but lost the space behind it
+  assert.equal(testables.maskAll(`no key ${key}, for provider`, true), "no key ghp_…Qrst, for provider")
 })

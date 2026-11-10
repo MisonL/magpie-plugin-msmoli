@@ -644,8 +644,9 @@ The terms and risks are in
   lost.
 - **What a 401 or a 403 says.** A 401 signs the account out only when it
   reads as the site refusing the token — "unauthorized", an invalid or expired
-  token, an empty body, or a bare status — and never when it names the path
-  instead ("proxy authentication required", a gateway's page). A 403 is
+  token, a refusal in Chinese ("请先登录", "登录状态已失效"), an empty JSON
+  object, or a code of 401 — and never when it names the path instead ("proxy
+  authentication required", a gateway's page, a bodyless 401). A 403 is
   reported as ModelScope's risk control only when it carries ModelScope's
   shape; a proxy's 403 page is reported as an ordinary refusal. A sign-in
   that was refused after the day's credits landed reports the expiry but
