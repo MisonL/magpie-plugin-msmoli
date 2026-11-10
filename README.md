@@ -600,6 +600,10 @@ masking every string that shares six characters would eat ordinary words. The
 same floor is what keeps a nickname a person actually picked ("Mison 2026")
 from being refused as an echo.
 
+A key quoted in a frame keeps the frame: `(ghp_…Qrst)`, `[ghp_…]`, `"ghp_…"`.
+The mask spends four characters at each end on the key's own, so the brackets
+are printed as written rather than eaten by it.
+
 The plugin writes two things, both onto the sign-in it already has and through
 the host's own `client.auth.set`: the nickname, as `accountId` (so the card
 reads "Mison" instead of "API key …a1b2"), and, for an international account,
