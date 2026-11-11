@@ -1804,7 +1804,16 @@ const runnable = (bin, os, exists) =>
 // a launcher whose target we cannot name"; a caller that needs to tell the two
 // apart asks isWrapper as well. A chain is followed hop by hop while each
 // target is itself a script, bounded and cycle-checked: eight is well past any
-// launcher chain a real install builds.
+// launcher chain a real install builds. The bound is what the result depends
+// on — a cycle also ends on it, so removing the cycle check changes nothing a
+// caller can see (pinned by the chain test; the check is here to keep a
+// longer bound from walking one file forever). Two shapes are deliberately
+// left unresolved rather than guessed: a target preceded by a flag
+// (`exec -a name /path`), and a target that is not a literal path
+// (`exec "$(command -v magpie)"`). A line that only looks like an exec — a
+// usage string, a heredoc body — is followed as if it were one; the guard
+// still refuses a mismatch and the read-back still says a wrapper was
+// involved, so the mistake lands on the side of asking.
 const wrapperTarget = (bin) => {
   let path = bin
   const seen = new Set()

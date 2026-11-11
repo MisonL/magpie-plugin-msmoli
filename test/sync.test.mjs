@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { basename, join, sep } from "node:path"
+import { basename, dirname, join, sep } from "node:path"
 import { test } from "node:test"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import {
@@ -2384,6 +2384,102 @@ test("a launcher whose exec target's own folder is the one named runs, and one i
     rmSync(real, { recursive: true, force: true })
     rmSync(shim, { recursive: true, force: true })
   }
+})
+
+test("a launcher chain that does not bottom out is not followed, and says so", async () => {
+  // The hop bound and the cycle check keep a pathological chain from being
+  // walked forever — and an unresolvable chain is exactly the case the
+  // read-back wrapper note exists for. Neither had a test: deleting the cycle
+  // check left the whole suite green. Pinned: a two-shim ring, a shim that
+  // execs itself, and a chain one hop past the bound all stay unresolvable
+  // (the guard falls back to the script's own folder, the run goes ahead, and
+  // a failed read-back says a wrapper was involved), while a chain inside the
+  // bound still resolves.
+  const shimOf = (dir, line) => {
+    mkdirSync(join(dir, "data"), { recursive: true })
+    writeFileSync(join(dir, ".portable"), "")
+    writeFileSync(join(dir, "data", "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "data", "plugin-auth.json"), JSON.stringify({}))
+    writeFileSync(join(dir, "magpie"), line, { mode: 0o755 })
+    return join(dir, "magpie")
+  }
+  const dirs = []
+  const T = (n) => `msmoli-chain-${n}-`
+  const ringA = mkdtempSync(join(tmpdir(), T("ra")))
+  const ringB = mkdtempSync(join(tmpdir(), T("rb")))
+  const selfRing = mkdtempSync(join(tmpdir(), T("self")))
+  dirs.push(ringA, ringB, selfRing)
+  shimOf(ringA, `#!/bin/sh\nexec ${join(ringB, "magpie")} "$@"\n`)
+  shimOf(ringB, `#!/bin/sh\nexec ${join(ringA, "magpie")} "$@"\n`)
+  shimOf(selfRing, `#!/bin/sh\nexec ${join(selfRing, "magpie")} "$@"\n`)
+
+  // eight files each execing the next, the last naming a target that exists
+  // too — the bound stops the walk one file before it could answer "the
+  // bottom of this chain"
+  const chainDirs = []
+  for (let i = 0; i < 8; i++) {
+    const dir = mkdtempSync(join(tmpdir(), T(`h${i}`)))
+    chainDirs.push(dir)
+    dirs.push(dir)
+    shimOf(dir, "") // placeholder, real line written below
+  }
+  for (let i = 0; i < 7; i++) {
+    writeFileSync(join(chainDirs[i], "magpie"), `#!/bin/sh\nexec ${join(chainDirs[i + 1], "magpie")} "$@"\n`, { mode: 0o755 })
+  }
+  writeFileSync(join(chainDirs[7], "magpie"), `#!/bin/sh\nexec ${join(chainDirs[7], "next")} "$@"\n`, { mode: 0o755 })
+  writeFileSync(join(chainDirs[7], "next"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+
+  // seven shims and a plain bottom: eight reads, the most the bound allows,
+  // so a chain that fits inside it still resolves (one hop fewer and the
+  // bound itself would be untested — the walk would stop before the bottom)
+  const shortDirs = []
+  for (let i = 0; i < 8; i++) {
+    const dir = mkdtempSync(join(tmpdir(), T(`s${i}`)))
+    shortDirs.push(dir)
+    dirs.push(dir)
+    shimOf(dir, "")
+  }
+  for (let i = 0; i < 7; i++) {
+    writeFileSync(join(shortDirs[i], "magpie"), `#!/bin/sh\nexec ${join(shortDirs[i + 1], "magpie")} "$@"\n`, { mode: 0o755 })
+  }
+  writeFileSync(join(shortDirs[7], "magpie"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+
+  for (const [tag, bin] of [
+    ["ring", join(ringA, "magpie")],
+    ["self", join(selfRing, "magpie")],
+    ["eight", join(chainDirs[0], "magpie")],
+  ]) {
+    const out = []
+    const code = await main({
+      argv: ["--dir", join(dirname(bin), "data"), "--to-plugin", "--force", "--magpie", bin],
+      env: {},
+      home: dirname(bin),
+      log: (s) => out.push(s),
+      spawn: () => ({ status: 0, stdout: "✓ signed in", stderr: "" }),
+    })
+    assert.equal(code, 1, `${tag}: the read-back fails because nothing was written`)
+    assert.match(out.join("\n"), /包装脚本/, `${tag}: the failure names the wrapper`)
+  }
+
+  // a chain inside the bound still resolves to the bottom, so the run goes
+  // ahead and the read-back finds the token the mock wrote
+  const bottom = join(shortDirs[7], "data", "plugin-auth.json")
+  const out = []
+  const code = await main({
+    argv: ["--dir", join(shortDirs[7], "data"), "--to-plugin", "--force", "--magpie", join(shortDirs[0], "magpie")],
+    env: {},
+    home: shortDirs[7],
+    log: (s) => out.push(s),
+    spawn: (_cmd, argv) => {
+      writeFileSync(bottom, JSON.stringify({ msmoli: { type: "api", key: A } }))
+      return { status: 0, stdout: argv.includes("logout") ? "✓ signed out" : "✓ signed in", stderr: "" }
+    },
+  })
+  assert.equal(code, 0, out.join("\n"))
+  assert.doesNotMatch(out.join("\n"), /包装脚本/, "a resolved chain needs no wrapper note")
+  try {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true })
+  } catch {}
 })
 
 test("two different folders are still two, and a missing one is not another's", () => {
