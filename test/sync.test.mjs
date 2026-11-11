@@ -5533,3 +5533,18 @@ test("--to-preset refuses the international token end to end, and writes nothing
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("--to-preset tells an unreadable entry from a missing login", () => {
+  // The reverse direction answered "插件主账号（msmoli）没有登录" for an entry
+  // that is there but cannot be read, and sent the user to `--to-plugin`, which
+  // refuses the very same file. The forward direction has the right wording;
+  // this one had none.
+  const p = planToPreset({ preset: presetOf(A), accounts: [{ name: "msmoli", token: "" }], force: true })
+  const text = p.lines.join("\n")
+  assert.equal(p.action, "refuse")
+  assert.ok(/读不出令牌/.test(text), `the plan calls it a missing login:\n${text}`)
+  assert.ok(!/没有登录/.test(text), `the plan still says signed out:\n${text}`)
+  // and a real missing login still reads as one
+  const none = planToPreset({ preset: presetOf(A), accounts: [], force: true })
+  assert.ok(/没有登录/.test(none.lines.join("\n")), none.lines.join("\n"))
+})

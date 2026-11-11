@@ -1453,6 +1453,16 @@ export function planToPlugin({ preset, accounts, force }) {
 export function planToPreset({ preset, accounts, force }) {
   const lines = []
   const main = accounts.find((a) => a.name === ID)
+  // An entry that is there but carries no token the plugin would read (a
+  // msmoli entry of the wrong type, or a key that is not a string) is not a
+  // missing login: telling the user to log in sends them nowhere, and the
+  // `--to-plugin` advice the message below carries refuses the same file. The
+  // forward direction already says it this way.
+  if (main && !main.token) {
+    lines.push(`✗ 插件里 ${arg(main.name)} 的条目读不出令牌（type 不是 api，或 key 不是字符串）。`)
+    lines.push(`  magpie 也不会把它算作登录。请先删掉这个条目或重新登录（magpie plugin login ${ID}），再重跑。`)
+    return { action: "refuse", lines, cmds: [] }
+  }
   if (!main?.token) {
     // A second account holding the token the preset already has is the state
     // a forced replace leaves behind (or a re-login after a nickname write).
