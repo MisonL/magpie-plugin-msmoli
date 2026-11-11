@@ -88,6 +88,11 @@ function parseArgs(argv) {
   // second silently winning dropped the first, and `--magpie A --magpie B`
   // wrote through B with nothing said. `--dir=x` is read as `--dir x`.
   const VALUE = { "--dir": "dir", "--magpie": "magpie", "--from": "from" }
+  // hasOwn, not `VALUE[a]`: a plain object literal answers for "constructor",
+  // "toString", "__proto__" and the rest of Object's own names, so those were
+  // taken as value flags and silently accepted while every other unknown
+  // argument was refused.
+  const isValue = (k) => Object.hasOwn(VALUE, k)
   const seen = new Set()
   const set = (flag, v) => {
     if (seen.has(flag)) throw new Error(`${flag} 只能给一次`)
@@ -98,11 +103,11 @@ function parseArgs(argv) {
     const a = argv[i]
     const eq = a.indexOf("=")
     const flag = eq > 0 ? a.slice(0, eq) : ""
-    if (flag && VALUE[flag]) {
+    if (flag && isValue(flag)) {
       const v = a.slice(eq + 1)
       if (v.trim() === "" || v.startsWith("-")) throw new Error(`缺少值：${flag}= 后面要跟一个参数`)
       set(flag, v)
-    } else if (VALUE[a]) set(a, take(++i, a))
+    } else if (isValue(a)) set(a, take(++i, a))
     else if (a === "--to-plugin" || a === "--to-preset") {
       // When both directions are given, the later one silently wins and the
       // earlier is quietly dropped: saying so is better than picking one
@@ -375,7 +380,19 @@ export function presetCandidates(providers, from = "", keyed = true) {
   // newline is the same token, and every comparison and every stdin below
   // must see that one — the check-in plugin trims it too (tokenOf), so the
   // two halves of the tool otherwise disagree about the same credential
-  const out = (ps) => ps.map((p) => ({ ...p, key: typeof p.key === "string" ? p.key.trim() : "" }))
+  // keyRaw keeps the type as written. key is the string the rest of the tool
+  // compares with, but normalizing a non-string to "" here made every
+  // downstream type check read "an empty slot with nothing to lose" — the
+  // refusal in planToPreset could not be reached from the command line, and
+  // --to-plugin's own check was skipped too.
+  const out = (ps) =>
+    ps.map((p) => ({
+      ...p,
+      key: typeof p.key === "string" ? p.key.trim() : "",
+      // only a key of another type carries its raw value: a string's own
+      // spelling is `key`, trimmed
+      ...(typeof p.key === "string" ? {} : { keyRaw: p.key }),
+    }))
   // An entry that is not an object (a null in the list, a string) is not a
   // provider: it is dropped before anything reads p.id, and dropping it
   // filters it here the way keyedOf does for --to-plugin, rather than leaving
@@ -1389,6 +1406,18 @@ export function pluginAccounts(auth) {
 // { action: "noop" | "run" | "refuse", lines: string[], cmds: [{ argv, stdin? }] }
 export function planToPlugin({ preset, accounts, force }) {
   const lines = []
+  // A key field of the wrong type is a source this tool cannot read, not an
+  // empty one: SENDABLE.test() would coerce 12345 to "12345" and plan a login
+  // with it. Refused here for the same reason planToPreset refuses it.
+  // keyRaw is what presetCandidates kept for a non-string field; a caller
+  // that hands the raw entry over directly has none, and its `key` still
+  // holds the original value.
+  const rawKey = "keyRaw" in preset ? preset.keyRaw : preset.key
+  if (rawKey !== undefined && typeof rawKey !== "string") {
+    lines.push(`✗ 内置预设 ${arg(preset.id)} 的 key 不是字符串（${rawKey === null ? "null" : typeof rawKey}），读不出它现在是什么。`)
+    lines.push(`  先修好 providers.json 里那一项（或删掉它），再重跑：magpie provider key ${arg(preset.id)} <key>。`)
+    return { action: "refuse", lines, cmds: [] }
+  }
   // The SENDABLE guard runs before the "already the same" check: two files
   // holding the same key with a space in it are "the same" and unusable, and
   // reporting noop would tell the user everything is fine while every
@@ -1500,8 +1529,9 @@ export function planToPreset({ preset, accounts, force }) {
   // 替换". Either way the user's replacement decision was skipped or unreadable.
   // Absent and "" are the two spellings of a slot with nothing to lose, and
   // both have a type of "string" (or undefined): the test is the type alone.
-  if (preset.key !== undefined && typeof preset.key !== "string") {
-    lines.push(`✗ 内置预设 ${arg(preset.id)} 的 key 不是字符串（${preset.key === null ? "null" : typeof preset.key}），读不出它现在是什么。`)
+  const rawKey = "keyRaw" in preset ? preset.keyRaw : preset.key
+  if (rawKey !== undefined && typeof rawKey !== "string") {
+    lines.push(`✗ 内置预设 ${arg(preset.id)} 的 key 不是字符串（${rawKey === null ? "null" : typeof rawKey}），读不出它现在是什么。`)
     lines.push(`  请先修好 providers.json 里那一项（或删掉它），再重跑：magpie provider key ${arg(preset.id)} <key>。`)
     return { action: "refuse", lines, cmds: [] }
   }

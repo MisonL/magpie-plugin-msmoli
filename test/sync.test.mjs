@@ -5865,3 +5865,53 @@ test("--status says it did not execute on a noop or refuse plan too", async () =
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("an argument named after something on Object is still an unknown argument", () => {
+  // The value flags live in a plain object literal, and `VALUE[a]` reads the
+  // prototype chain: `constructor`, `toString`, `valueOf`, `__proto__` and
+  // friends were all truthy, so they were taken as value flags and silently
+  // accepted — the opposite of every other unknown argument. `hasOwn` asks
+  // about the table itself.
+  for (const bad of ["constructor=value", "constructor", "toString=value", "toString", "__proto__=value", "valueOf=value", "hasOwnProperty=x"]) {
+    const r = run(["--status", bad])
+    assert.equal(r.status, 1, `${bad} must be refused: ${r.stdout}`)
+    assert.match(r.stderr, /不认识的参数/, `${bad}: ${r.stderr}`)
+  }
+  // the real value flags still work, in both spellings
+  for (const ok of [["--dir=/tmp", "--status"], ["--dir", "/tmp", "--status"]]) {
+    const r = run(ok)
+    assert.doesNotMatch(r.stdout + r.stderr, /不认识的参数/, ok.join(" "))
+  }
+})
+
+test("a preset key that is not a string is refused by main, not only by the planner", async () => {
+  // planToPreset refuses {"key": 12345} — the key is there but its type is not
+  // one this tool can read, so "no key to lose" is the wrong answer. But
+  // presetCandidates handed it on as "", and main's every check downstream
+  // reads that (keyedOf, `!preset.key`, `preset.key !== undefined`) — so the
+  // refusal was unreachable from the command line: a forced write went ahead
+  // over a key nobody had looked at. The type is kept as it was written now.
+  for (const key of [12345, null, [A], { v: A }, true]) {
+    const dir = mkdtempSync(join(tmpdir(), "msmoli-nonstr-"))
+    try {
+      writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "modelscope", preset: "modelscope", key }] }))
+      writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+      const out = []
+      let spawned = false
+      const code = await main({
+        argv: ["--dir", dir, "--to-preset", "--force", "--magpie", "/nonexistent"],
+        log: (s) => out.push(s),
+        spawn: () => {
+          spawned = true
+          return { status: 0, stdout: "", stderr: "" }
+        },
+      })
+      const text = out.join("\n")
+      assert.equal(code, 1, `${JSON.stringify(key)}: ${text}`)
+      assert.equal(spawned, false, `${JSON.stringify(key)}: nothing may be written over a key nobody read`)
+      assert.match(text, /不是字符串/, JSON.stringify(key))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})

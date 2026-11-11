@@ -332,8 +332,9 @@ async function json(site, token, path, deadline = Infinity) {
     ctl.signal.addEventListener("abort", () => reject(ctl.signal.reason), { once: true })
   })
   aborted.catch(() => {})
+  let res
   try {
-    const res = await Promise.race([
+    res = await Promise.race([
       aborted,
       fetch(site + path, {
         // every redirect is refused, the site's own included: one that left
@@ -361,6 +362,21 @@ async function json(site, token, path, deadline = Infinity) {
     // (parsed, an object) signed the account out over a middlebox's refusal
     return { res, body, parsed: body !== null && (text !== "" || res.status === 200) }
   } catch (e) {
+    // An answer we stopped reading is still live: a declared length over the
+    // cap is refused before a byte is read, and the socket keeps streaming
+    // into a body nobody consumes once the timer is cleared — the plugin has
+    // no hold on the transport at all. Cancel the unconsumed body and abort
+    // the request, so it ends with this call.
+    // The abort does NOT carry e: saidFailure reads "e is the abort reason" as
+    // a timeout, and aborting with "响应过大" would relabel the refusal.
+    if (res) {
+      try {
+        await res.body?.cancel?.()
+      } catch {}
+      try {
+        ctl.abort(new Error("read abandoned"))
+      } catch {}
+    }
     throw saidFailure(e, ctl, budget)
   } finally {
     // the answer is here: the timer has nothing left to guard, and one left
@@ -2350,8 +2366,14 @@ const gate = (profile, res, body, parsed, token, what, risk = RISK) => {
   // success:false is the site's too (a login layer's {"Success":false,
   // "Message":"RiskControl"}); a plain refusal with words in it and none of
   // those fields is any gateway's error page
-  const envelope = parsed && (("success" in body) || ("Success" in body))
-  const msLogin = parsed && (("Code" in body) || ("code" in body) || ("data" in body) || ("Data" in body))
+  // `in` needs a value with fields: a JSON body of 17, true or "busy" parses
+  // fine, and asking it for "success" threw the engine's own English sentence
+  // ("Cannot use 'in' operator to search for 'success' in 17") at the hook,
+  // with the request's name and the HTTP status lost. A non-object body is a
+  // reply this plugin does not understand, and says so below.
+  const shaped = parsed && body !== null && typeof body === "object"
+  const envelope = shaped && !Array.isArray(body) && (("success" in body) || ("Success" in body))
+  const msLogin = shaped && !Array.isArray(body) && (("Code" in body) || ("code" in body) || ("data" in body) || ("Data" in body))
   const pathSaid = PATH_MARK.test(JSON.stringify(body))
   if (res.status === 403 && !pathSaid && (envelope || msLogin)) throw new Error(risk)
   if (res.status === 403) throw new Error(`${what}：响应不是魔搭的（HTTP 403）`)

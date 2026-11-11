@@ -11149,3 +11149,55 @@ test("a late 401 does not delete the site a concurrent read just confirmed", asy
     testables.sites.clear()
   }
 })
+
+test("a JSON body that is not an object is a refusal with the status, not a runtime error", () => {
+  // `"success" in 17` throws: a 500 whose body parses to a bare number reached
+  // the hook as "Cannot use 'in' operator to search for 'success' in 17" — an
+  // English sentence about the engine, with the HTTP status lost. A body that
+  // is not an object is a reply this plugin does not understand, and that is
+  // what it says, with the request's name and the status.
+  const say = (body, status) => {
+    try {
+      testables.gate(testables.CN, { status }, body, true, "ms-test", "余额查询失败")
+      return "no error"
+    } catch (e) {
+      return e.message
+    }
+  }
+  for (const body of [17, true, "busy", null, [1, 2]]) {
+    for (const status of [403, 500]) {
+      const said = say(body, status)
+      assert.doesNotMatch(said, /Cannot use|TypeError|undefined/, `${JSON.stringify(body)} @${status}: ${said}`)
+      assert.match(said, /余额查询失败/, `${JSON.stringify(body)} @${status} names the request: ${said}`)
+    }
+  }
+  assert.match(say(17, 500), /500/, "the status is kept")
+})
+
+test("an oversized answer is cancelled, not just refused", async () => {
+  // The declared length broke the cap before a byte was read, and the reply
+  // stayed live: the socket kept streaming into a body nobody consumed, with
+  // the timer cleared — the plugin had no hold on the transport at all. The
+  // request is aborted and the body cancelled, so it ends with the call.
+  let cancelled = false
+  let aborted = false
+  const real = globalThis.fetch
+  const stream = new ReadableStream({
+    cancel() {
+      cancelled = true
+    },
+  })
+  globalThis.fetch = async (url, opt) => {
+    opt.signal.addEventListener("abort", () => (aborted = true), { once: true })
+    return new Response(stream, { status: 200, headers: { "content-length": String(256 * 1024 + 1) } })
+  }
+  try {
+    const r = await auth.usage(async () => ({ type: "api", key: "ms-big-0000-0000-0000-000000000027" }))
+    assert.ok(r.error, JSON.stringify(r))
+    assert.match(r.error, /响应过大/)
+    assert.equal(cancelled, true, "the unconsumed body must be cancelled")
+    assert.equal(aborted, true, "the request must be aborted")
+  } finally {
+    globalThis.fetch = real
+  }
+})
