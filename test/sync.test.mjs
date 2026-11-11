@@ -5921,6 +5921,59 @@ test("a preset key that is not a string is refused by main, not only by the plan
   }
 })
 
+test("a launcher whose target is another interpreter, or that prints usage first, is followed", async () => {
+  // Two shapes the text read used to give up on. A shebang that names another
+  // program (#!/usr/bin/env node) is the bottom of the chain, and its source is
+  // that program's — a shift in it ("1 << 16") is not a here-document, and
+  // reading it as one refused a launcher that resolves perfectly well. And a
+  // script that prints usage from a here-document before it starts is an
+  // ordinary shape: the body is text, the exec line after it is the target.
+  const shim = mkdtempSync(join(tmpdir(), "msmoli-interp-"))
+  const real = mkdtempSync(join(tmpdir(), "msmoli-interp-real-"))
+  try {
+    for (const folder of [shim, real]) {
+      mkdirSync(join(folder, "data"), { recursive: true })
+      writeFileSync(join(folder, ".portable"), "")
+    }
+    writeFileSync(join(real, "magpie"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+    // the target is a node entry point whose source carries a shift
+    const app = join(real, "magpie.js")
+    writeFileSync(app, "#!/usr/bin/env node\nconst P = 1 << 16\n", { mode: 0o755 })
+    writeFileSync(join(real, "data", "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(real, "data", "plugin-auth.json"), JSON.stringify({}))
+    // a usage here-document in front of the real exec
+    const usage = join(shim, "usage")
+    writeFileSync(usage, `#!/bin/sh\ncat <<EOF\nmagpie - the agent runner.\nRun: exec magpie <command>\nEOF\nexec ${join(real, "magpie")} "$@"\n`, { mode: 0o755 })
+    // ...and one that execs the node entry point through that launcher
+    const viaNode = join(shim, "via-node")
+    writeFileSync(viaNode, `#!/bin/sh\nexec ${join(real, "magpie")} "$@"\n`, { mode: 0o755 })
+    for (const bin of [usage, viaNode]) {
+      // each launcher is judged on its own: the first one signs in, and the
+      // second would find nothing to do
+      writeFileSync(join(real, "data", "plugin-auth.json"), JSON.stringify({}))
+      const out = []
+      let spawned = false
+      await main({
+        argv: ["--dir", join(real, "data"), "--to-plugin", "--force", "--magpie", bin],
+        env: {},
+        home: shim,
+        log: (s) => out.push(s),
+        spawn: () => {
+          spawned = true
+          writeFileSync(join(real, "data", "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+          return { status: 0, stdout: "", stderr: "" }
+        },
+      })
+      const text = out.join("\n")
+      assert.equal(spawned, true, `${bin}: the launcher resolves, so the sync runs:\n${text}`)
+      assert.doesNotMatch(text, /包装脚本/, `${bin}: a followable launcher needs no wrapper note:\n${text}`)
+    }
+  } finally {
+    rmSync(shim, { recursive: true, force: true })
+    rmSync(real, { recursive: true, force: true })
+  }
+})
+
 test("a launcher whose target the text cannot settle is refused, not guessed", async () => {
   // Three shapes a text read cannot decide: a relative exec (the shell
   // resolves it against the working folder, not the script's), two different
@@ -5999,6 +6052,29 @@ test("a lowercase word with no vowels is a key to the CLI too", () => {
   }
 })
 
+test("a numeral read as a word is not a key, and the word after a key is not eaten", () => {
+  // The vowel-less arm (for keys like 5gli9zadx8zg9jez) was asked of every
+  // joined run, and a run of plain numerals reads as one: "no 42 20261031"
+  // went out as "no42…1031" with the "no" inside the mask. The run arm reads
+  // each piece as it was written; a join is masked only when one of its pieces
+  // is a key on its own.
+  for (const [s, want] of [
+    ["no 42 20261031", "no 42 20261031"],
+    ["ok 42 1234 2026", "ok 42 1234 2026"],
+    ["v202610310001", "v202610310001"],
+    ["abc123def456ghi789 now", "abc123def456ghi789 now"],
+    // a letter lead and then digits is a build number, even between a word
+    // and its number: the join is asked without the vowel-less arm either
+    ["build v20261111 grpc", "build v20261111 grpc"],
+  ]) {
+    assert.equal(arg(s), want, s)
+  }
+  // and the key an invisible character was cut out of is still masked whole:
+  // neither half is a key on its own, and the piece that reads as one
+  // ("5gli" is not; "123456789012" is a numeral, not) is judged by the run arm
+  assert.equal(arg("5gli9zadx8zg9​jez for provider"), "5gli…9jez for provider")
+})
+
 test("a full-width vendor key is masked as typed, not printed whole", () => {
   // The CLI folds to NFKC + lower case before judging a word, and the fold
   // took the capitals out of a key that is defined by them: a full-width
@@ -6013,6 +6089,71 @@ test("a full-width vendor key is masked as typed, not printed whole", () => {
   // and one word of it, uncut
   const whole = arg(fw)
   assert.doesNotMatch(whole, /ＯＤＮＮ７ＥＸＡＭＰＬＥ/, `the key printed whole: ${whole}`)
+})
+
+test("a short vendor key with its tail cut off is masked, alone and behind a name", () => {
+  // Every run floor is 16 characters, and a token copied with its tail missing
+  // sits under all of them: "ghp_Abcd1234Ef" went out whole, and so did the
+  // half of a longer key that a frame or a space left on the terminal
+  // ("(ghp_Abcd1234Ef gh56…Qrst)"). A vendor front names the vendor — no word
+  // of prose carries one — so a front whose body mixes case and holds a digit
+  // is a key, and the part after "=" or ":" is judged the same way.
+  for (const [s, want] of [
+    ["ghp_Abcd1234Ef", "ghp_…34Ef"],
+    ["token=ghp_Abcd1234Ef", "token=ghp_…34Ef"],
+    ["Authorization: ghp_Abcd1234Ef", "Authorization: ghp_…34Ef"],
+    ["(ghp_Abcd1234Ef gh5678Ijkl9012Mnop3456Qrst)", "(ghp_…34Ef gh56…Qrst)"],
+  ]) assert.equal(arg(s), want, s)
+  // a provider id behind the same front keeps its name: its pieces are a word
+  // and a number, and neither mixes case
+  for (const s of ["sk-preset-20261031 is a provider id", "token=abc", "Authorization: Bearer xyz", "retry=true", "time=12:30:45"]) {
+    assert.equal(arg(s), s, `ordinary text was masked: ${JSON.stringify(s)} -> ${JSON.stringify(arg(s))}`)
+  }
+})
+
+test("a page of full-width words is not folded into one mask", () => {
+  // The fold reading was bounded by the whole value: every word of a page
+  // written in full width folds, they joined into one span, and the page was
+  // handed back as a single mask — the text unreadable, and the reading
+  // quadratic in the page (measured: 25 KB took seconds). A span is bounded
+  // like a key is, so the page keeps its shape.
+  const page = "字ＡＢＣ12 ".repeat(2750)
+  const out = arg(page)
+  assert.ok(out.trim().split(/\s+/).length > 100, `the page collapsed into ${out.trim().split(/\s+/).length} mask(s)`)
+})
+
+test("a key cut by a space with a frame in the cut is still one key", () => {
+  // The walk judged its first gap before the body had been read as a key, so
+  // every reading that steps over a frame was skipped on that first step: a
+  // key whose two halves sit either side of a bracket or a comma
+  // ("…KbwtX9( ZqLmNeR2vTuH") kept its second half on the terminal. The body is
+  // asked before the gap is judged now.
+  const head = "sk-ant-api03-Eyai1pkJrF_KbwtX9"
+  const tail = "ZqLmNeR2vTuH"
+  for (const glue of ["( ", " (", ", ", "; ", "[ ", " ["]) {
+    const out = arg(head + glue + tail + ")")
+    assert.doesNotMatch(out, /ZqLmNeR2vTuH/, `the second half printed: ${glue} -> ${out}`)
+    assert.doesNotMatch(out, /KbwtX9/, `the first half printed: ${glue} -> ${out}`)
+  }
+  // and a sentence's bracket is not a cut: the words around it are kept
+  for (const s of ["see (the manual) for details", "两个（括号）里的话", "value = (1 + 2) * 3"]) {
+    assert.equal(arg(s), s, `ordinary text was masked: ${JSON.stringify(s)} -> ${JSON.stringify(arg(s))}`)
+  }
+})
+
+test("a full-width key inside a sentence is masked, and the words around it are not", () => {
+  // The whole-value NFKC reading masked the value it was handed: "Key
+  // ＡＫＩＡ…ＰＬＥ is invalid, please retry." went out as "KeyＡ…try.", the
+  // sentence folded into the mask. What the tool read has to stay readable
+  // around what it hid, so only the words that fold are read and only the span
+  // they form is masked.
+  const fw = "ＡＫＩＡＩＯＳＦＯＤＮＮ７ＥＸＡＭＰＬＥ"
+  for (const gap of [" ", "\u3000"]) {
+    const out = arg(`Key ${fw.slice(0, 8)}${gap}${fw.slice(8)} is invalid, please retry.`)
+    assert.doesNotMatch(out, /ＯＤＮＮ７ＥＸＡＭＰＬＥ/, `the key printed whole: ${out}`)
+    assert.match(out, /^Key Ａ/, `the word before the key is the text's: ${out}`)
+    assert.match(out, / is invalid, please retry\.$/, `the words after it are the text's: ${out}`)
+  }
 })
 
 test("a launcher that cannot be followed is refused even without --dir, and one bad branch spoils the launcher", async () => {

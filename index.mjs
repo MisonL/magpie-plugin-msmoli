@@ -2391,18 +2391,19 @@ const gate = (profile, res, body, parsed, token, what, risk = RISK) => {
 // The day is read at each call, on purpose: a check-in that crosses midnight
 // between its reads reports what its touch granted on the new day, which is
 // true, where diffing both reads against the old day would answer inactive.
-async function todayEarn(token, deadline) {
+async function todayEarn(token, deadline, opts = {}) {
   const { profile, res, body, parsed } = await siteRead(token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
   gate(profile, res, body, parsed, token, "账单查询失败")
   const day = todayCN()
   const first = recordsOf(body)
-  const { all, pages, complete, last, seenPages, seenRows, total } = await dayRows(profile, token, day, first, deadline, body)
+  const { all, pages, complete, scanComplete, last, seenPages, seenRows, total } = await dayRows(profile, token, day, first, deadline, body, opts)
   return {
     profile,
     day,
     all,
     pages,
     complete,
+    scanComplete,
     last,
     seenPages,
     seenRows,
@@ -2466,7 +2467,7 @@ const rowKey = (r) => stable(r)
 const idOf = (r) =>
   r?.id !== undefined && r?.id !== null && r.id !== "" ? `id:${String(r.id)}` : ""
 
-async function dayRows(profile, token, day, first, deadline, body) {
+async function dayRows(profile, token, day, first, deadline, body, { expiry = true } = {}) {
   const all = [...first]
   let rows = first
   let pages = 1
@@ -2499,6 +2500,11 @@ async function dayRows(profile, token, day, first, deadline, body) {
   const dayOf = (r) => String(r?.gmt_created ?? "").slice(0, 10)
   const yesterday = new Date(Date.parse(`${day}T00:00:00Z`) - 86400e3).toISOString().slice(0, 10)
   let dayDone = false
+  // whether the countdown's scan reached the point where no running grant can
+  // follow (a page holding nothing from yesterday or today). The numbers can
+  // be proven whole while this is still open: the card then shows the
+  // earliest expiry it saw and says the scan was cut short.
+  let scanDone = false
   // the walk ended on a page that reached back past the day: the only ending
   // where another page can still hold a running grant
   let endedByOlder = false
@@ -2522,8 +2528,11 @@ async function dayRows(profile, token, day, first, deadline, body) {
     // it. It used to be called complete here, and a day with 300 rows answered
     // 250 with no "未读完" on the card and no failed on the check-in. Proving
     // the end needs a page older than the day, a page with room to spare, or a
-    // total the rows account for.
-    if (total === null && rows.length >= PAGE_SIZE && (pages > DAY_PAGES || deadline <= Date.now())) break
+    // total the rows account for. Once proven, a cut costs only the scan.
+    if (total === null && rows.length >= PAGE_SIZE && (pages > DAY_PAGES || deadline <= Date.now())) {
+      complete = dayDone
+      break
+    }
     // a page with room to spare is the end — unless `total` still promises
     // rows, in which case the server is contradicting itself and the rest may
     // be on the next page anyway (bounded by DAY_PAGES below)
@@ -2538,20 +2547,31 @@ async function dayRows(profile, token, day, first, deadline, body) {
       // than it: the numbers' own endings (a total the rows account for, a
       // page with room to spare) mean the ledger was read to its end already
       // and cost no second read.
-      const couldRun = endedByOlder && !rows.some((r) => {
+      const reached = endedByOlder && !rows.some((r) => {
         const s = dayOf(r)
         return isDay(s) && s < yesterday
       })
-      if (!couldRun || pages > DAY_PAGES || deadline <= Date.now()) {
+      if (!expiry || !reached || pages > DAY_PAGES || deadline <= Date.now()) {
         complete = true
+        scanDone = !expiry || !reached
         break
       }
-    } else if (pages > DAY_PAGES || deadline <= Date.now()) break
+    } else if (pages > DAY_PAGES || deadline <= Date.now()) {
+      // the page cap cut a walk whose numbers were already proven: the day is
+      // complete (an older page or a total said so), and only the countdown's
+      // scan is cut short — the check-in must not read this as a book it could
+      // not finish
+      if (dayDone) complete = true
+      break
+    }
     let got
     try {
       got = await json(profile.site, token, `${TXNS}?page=${pages + 1}&page_size=${PAGE_SIZE}`, deadline)
     } catch {
-      if (dayDone) complete = true
+      if (dayDone) {
+        complete = true
+        scanDone = true
+      }
       break
     }
     const { res } = got
@@ -2567,12 +2587,16 @@ async function dayRows(profile, token, day, first, deadline, body) {
       // did when the walk stopped before this page at all
       if (dayDone) {
         complete = true
+        scanDone = true
         break
       }
       throw deadToken(profile.where)
     }
     if (!got.parsed || res.status !== 200 || !okOf(got.body)) {
-      if (dayDone) complete = true
+      if (dayDone) {
+        complete = true
+        scanDone = true
+      }
       break
     }
     // a page whose shape this walk cannot read — no data, records not a list —
@@ -2590,11 +2614,17 @@ async function dayRows(profile, token, day, first, deadline, body) {
       // and cannot end the walk on that number.
       pageTotal = totalOf(got.body, raw)
     } catch {
-      if (dayDone) complete = true
+      if (dayDone) {
+        complete = true
+        scanDone = true
+      }
       break
     }
     if (pageTotal.contradicted) {
-      if (dayDone) complete = true
+      if (dayDone) {
+        complete = true
+        scanDone = true
+      }
       break
     }
     // the page's own `total` is the ledger's count as the server sees it now;
@@ -2622,6 +2652,9 @@ async function dayRows(profile, token, day, first, deadline, body) {
     const stamp = stable(raw)
     if (!raw.length || seenPages.has(stamp)) {
       complete = dayDone || (!raw.length && total === null ? true : total !== null && all.length >= total)
+      // an empty or repeated page is the end of the ledger: no running grant
+      // can follow it either
+      scanDone = true
       break
     }
     seenPages.add(stamp)
@@ -2654,8 +2687,11 @@ async function dayRows(profile, token, day, first, deadline, body) {
     // joins it for the pages after
     for (const k of added) seenRows.add(k)
     if (!fresh.length && !changed) {
-      // every row on this page was already counted: the window moved, not the
-      // ledger
+      // every row on this page was already counted: the rows are not growing,
+      // and reading on would not change the numbers. That is a fact about the
+      // numbers, not about the window: another page can still hold a running
+      // grant, so the countdown's scan is cut here unless it was asked not to
+      // scan at all (a cut scan is a floor, and the card says so)
       complete = dayDone || (total !== null && all.length >= total)
       break
     }
@@ -2675,6 +2711,9 @@ async function dayRows(profile, token, day, first, deadline, body) {
     all,
     pages,
     complete,
+    // whether the countdown's own scan reached its end (see scanDone above);
+    // a walk that was not asked to scan at all never started one
+    scanComplete: !expiry || scanDone,
     total,
     last: complete || !rows.length ? null : rows,
     seenPages,
@@ -3036,7 +3075,7 @@ export async function MsmoliPlugin(input) {
         const marks = { expired: false }
         const answer = await (async () => {
         try {
-          let before = await todayEarn(token, deadline)
+          let before = await todayEarn(token, deadline, { expiry: false })
           let rolls = 0
           for (;;) {
           const profile = before.profile
@@ -3179,7 +3218,7 @@ export async function MsmoliPlugin(input) {
           if (todayCN() !== before.day && rolls < 2) {
             rolls += 1
             const wasDay = before.day
-            before = await todayEarn(token, deadline)
+            before = await todayEarn(token, deadline, { expiry: false })
             probe = before.profile
             // The touch was this run's, and the day changed under it: the
             // baseline is yesterday's, and `gained` reads an empty one for a
@@ -3253,7 +3292,7 @@ export async function MsmoliPlugin(input) {
             }, streak, marks)
           }
 
-          const fresh = await todayEarn(token, deadline)
+          const fresh = await todayEarn(token, deadline, { expiry: false })
           probe = fresh.profile
           const daily = gained(fresh.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)), fresh.day)
           if (daily) return await claimedNow(fresh, daily)
@@ -3268,7 +3307,7 @@ export async function MsmoliPlugin(input) {
           // by checkinSureHour). From noon the host settles the day, so in the
           // afternoon the plugin asks for one more ask half an hour later itself,
           // via until.
-          const again = await todayEarn(token, deadline)
+          const again = await todayEarn(token, deadline, { expiry: false })
           probe = again.profile
           const later = gained(again.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)), again.day)
           if (later) return await claimedNow(again, later)
@@ -3490,7 +3529,11 @@ export async function MsmoliPlugin(input) {
           // A walk that could not finish leaves the two numbers a floor: the
           // ledger contradicted itself, or a page failed. Said on the card, so
           // they are not read as the day's whole truth.
-          const part = walked.complete ? "" : " · 账单未读完，数字偏低"
+          // the countdown's own scan can be cut short while the numbers are
+          // whole (the page cap, the budget): then the earliest expiry seen is
+          // a floor, not the answer, and the card says so rather than naming a
+          // later time as if it were settled
+          const part = (walked.complete ? "" : " · 账单未读完，数字偏低") + (walked.scanComplete || !earliest ? "" : " · 到期时间可能更早")
 
           // last, and awaited: the card must not be answered ahead of the
           // write (a poll answered before it would race the very retry this

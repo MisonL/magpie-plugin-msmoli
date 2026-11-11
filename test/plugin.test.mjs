@@ -11304,3 +11304,37 @@ test("a courtesy page that refuses the token does not undo the claim", async () 
     globalThis.fetch = real
   }
 })
+
+test("the page cap on a scan whose numbers are proven does not fail the check-in", async () => {
+  // The countdown scan keeps reading past a day that is already whole. When
+  // the page cap cut that scan, `complete` was left false and the check-in
+  // answered failed — for a day an older page had already proven. Only the
+  // scan may be cut short there, and the card says the expiry it shows is a
+  // floor rather than a later time presented as settled.
+  const fill = (i) => ({ gmt_created: today, type: "EARN", rule_key: `fill_${i}`, title: `t${i}`, total_amount: 1, count: 1 })
+  const first = [day(), ...Array.from({ length: 48 }, (_, i) => fill(i)), spend(0, 1, daysBack(1))]
+  const later = Array.from({ length: 50 }, (_, i) => spend(0, 1, daysBack(1)))
+  const pages = []
+  const r = await withFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 1 } } },
+      [TX_PATH]: { body: { success: true, data: { records: first } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: later } } },
+      "/openapi/v1/magicubes/transactions?page=3&page_size=50": { body: { success: true, data: { records: later } } },
+      "/openapi/v1/magicubes/transactions?page=4&page_size=50": { body: { success: true, data: { records: later } } },
+      "/openapi/v1/magicubes/transactions?page=5&page_size=50": { body: { success: true, data: { records: later } } },
+    },
+    async () => {
+      const seen = globalThis.fetch
+      globalThis.fetch = async (url, init) => {
+        if (new URL(url).pathname.endsWith("/transactions")) pages.push(Number(new URL(url).searchParams.get("page") ?? 1))
+        return seen(url, init)
+      }
+      return auth.usage(async () => ({ type: "api", key: "ms-cap-0000-0000-0000-000000000031" }))
+    },
+  )
+  assert.ok(!r.error, r.error)
+  assert.ok(pages.length >= 2, `the scan did read on: ${pages}`)
+  assert.ok(pages.length <= 5, `the page cap holds: ${pages}`)
+  assert.match(r.windows[0].display, /到期时间可能更早/, `a cut scan is a floor, not the answer: ${r.windows[0].display}`)
+})
