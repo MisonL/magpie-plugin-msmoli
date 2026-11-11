@@ -30,6 +30,8 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 const ID = "msmoli"
 const PRESET = "modelscope"
 const HOST = "api-inference.modelscope.cn"
+// the only site the built-in preset and the vendors this tool recognises serve
+const CN_SITE = "https://modelscope.cn"
 
 // VERSION is what --version answers. Read from the package's own manifest so
 // the two can never drift — a published tarball carries package.json beside
@@ -1369,11 +1371,19 @@ const keyedOf = (p) => typeof p?.key === "string" && Boolean(p.key.trim())
 // nothing needs doing, while the plugin cannot read the token and the card
 // always shows signed out: a silent wrong state is harder to notice than an
 // error.
+// site is the origin the plugin recorded for the account after its own probe
+// ("https://modelscope.ai" for an international one, cleared for a domestic
+// one). It is empty when the account has never been probed, and an empty site
+// is not evidence of either.
 export function pluginAccounts(auth) {
   const obj = auth && typeof auth === "object" && !Array.isArray(auth) ? auth : {}
   return Object.entries(obj)
     .filter(([k]) => k === ID || k.startsWith(`${ID}#`))
-    .map(([name, v]) => ({ name, token: v?.type === "api" && typeof v.key === "string" ? v.key.trim() : "" }))
+    .map(([name, v]) => ({
+      name,
+      token: v?.type === "api" && typeof v.key === "string" ? v.key.trim() : "",
+      site: typeof v?.site === "string" ? v.site : "",
+    }))
 }
 
 // { action: "noop" | "run" | "refuse", lines: string[], cmds: [{ argv, stdin? }] }
@@ -1480,6 +1490,17 @@ export function planToPreset({ preset, accounts, force }) {
   if (!SENDABLE.test(main.token)) {
     lines.push(`✗ 插件里那把令牌含空格、换行或非 ASCII 字符，发不出去，不写进内置预设。`)
     lines.push(`  先修好插件那边的登录（magpie plugin login ${ID}）。`)
+    return { action: "refuse", lines, cmds: [] }
+  }
+  // An ms- token answers 401 on the site it did not come from, and the plugin
+  // records which site an account belongs to after its own probe. The preset
+  // this direction writes into chats with api-inference.modelscope.cn only, so
+  // an international token there would 401 on every request while this tool
+  // said ✓. Measured before the check: `--to-preset --force` wrote it and
+  // answered rc=0.
+  if (main.site && main.site !== CN_SITE) {
+    lines.push(`✗ 插件主账号是国际站（${arg(main.site)}）的令牌，内置预设只对国内站有效，写进去聊天会 401。`)
+    lines.push(`  国际站账号请在 magpie 里单独加一个 provider（chat 指向 api-inference.modelscope.ai）。`)
     return { action: "refuse", lines, cmds: [] }
   }
   if (preset.key === main.token) {

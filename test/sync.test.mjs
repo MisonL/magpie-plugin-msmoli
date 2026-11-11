@@ -3064,8 +3064,8 @@ test("a providers list with a null entry is read past, not tripped over", async 
   assert.deepEqual(presetCandidates([null, presetOf(A)]), [presetOf(A)])
   assert.deepEqual(presetCandidates([null, presetOf(A)], "modelscope"), [presetOf(A)])
   assert.deepEqual(pluginAccounts({ msmoli: null, "msmoli#x": { type: "api", key: B } }), [
-    { name: "msmoli", token: "" },
-    { name: "msmoli#x", token: B },
+    { name: "msmoli", token: "", site: "" },
+    { name: "msmoli#x", token: B, site: "" },
   ])
 
   // and through main: a provider of ours that has no key, next to a null row
@@ -4026,10 +4026,13 @@ test("a plugin account is one the plugin could actually read: type api, key a st
     "msmoli#oauth": { type: "oauth", key: B },
     "msmoli#nostr": { type: "api", key: 12345 },
   }
+  // site is the origin the plugin recorded after its own probe; an account
+  // that never had one carries "" (the site check below reads only a filled
+  // one)
   assert.deepEqual(pluginAccounts(auth), [
-    { name: "msmoli", token: A },
-    { name: "msmoli#oauth", token: "" },
-    { name: "msmoli#nostr", token: "" },
+    { name: "msmoli", token: A, site: "" },
+    { name: "msmoli#oauth", token: "", site: "" },
+    { name: "msmoli#nostr", token: "", site: "" },
   ])
 })
 
@@ -5469,4 +5472,64 @@ test("two ms- keys side by side are each masked in the CLI", () => {
   const t1 = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
   const t2 = "ms-zzzz9999-yyyy-8888-xxxx-777766665555"
   assert.equal(arg(`${t1} ${t2}`), "ms-a…5555 ms-z…5555")
+})
+
+test("--to-preset refuses an international-site token", () => {
+  // The plugin records an international account's site in its sign-in
+  // ("https://modelscope.ai"), and an ms- token authenticates only on the site
+  // it came from. The built-in preset points at api-inference.modelscope.cn,
+  // so writing such a token there breaks chat requests while the tool reports
+  // success. Measured: planToPreset planned `provider key` and main() answered
+  // ✓ with rc=0.
+  const intl = { name: "msmoli", token: B, site: "https://modelscope.ai" }
+  for (const force of [false, true]) {
+    const p = planToPreset({ preset: presetOf(A), accounts: [intl], force })
+    assert.equal(p.action, "refuse", `force=${force}: ${p.action}`)
+    assert.equal(p.cmds.length, 0, `force=${force}: a write was still planned`)
+    assert.ok(p.lines.join("\n").includes("国际站"), `force=${force}: the plan does not name the site`)
+  }
+  // a domestic account is unaffected, and a site left off is not evidence of
+  // the international one: only a probe-confirmed .ai account refuses
+  const cn = { name: "msmoli", token: B, site: "https://modelscope.cn" }
+  assert.equal(planToPreset({ preset: presetOf(A), accounts: [cn], force: true }).action, "run")
+  assert.equal(planToPreset({ preset: presetOf(A), accounts: [{ name: "msmoli", token: B }], force: true }).action, "run")
+})
+
+test("pluginAccounts reads the site the plugin recorded", () => {
+  // The reader dropped every field but the token, so the plan above had no way
+  // to know which site the account belongs to.
+  assert.deepEqual(
+    pluginAccounts({ msmoli: { type: "api", key: B, site: "https://modelscope.ai" } }),
+    [{ name: "msmoli", token: B, site: "https://modelscope.ai" }],
+  )
+  assert.equal(pluginAccounts({ msmoli: { type: "api", key: B } })[0].site, "")
+})
+
+test("--to-preset refuses the international token end to end, and writes nothing", async () => {
+  // The plan-level check has to hold through main() too: a refuse must exit 1
+  // and never spawn, whatever --force says. Measured before the check: rc=0,
+  // a `provider key` command, and providers.json rewritten with the .ai token.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-intl-site-"))
+  const before = JSON.stringify({ providers: [presetOf(A)] })
+  try {
+    writeFileSync(join(dir, "providers.json"), before)
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B, site: "https://modelscope.ai" } }))
+    for (const extra of [[], ["--force"]]) {
+      const out = []
+      const code = await main({
+        argv: ["--dir", dir, "--to-preset", ...extra, "--magpie", "/nonexistent"],
+        log: (s) => out.push(s),
+        spawn: () => {
+          throw new Error("a refused plan must not spawn")
+        },
+      })
+      const text = out.join("\n")
+      assert.equal(code, 1, `${extra.join(" ") || "no flag"}: rc ${code}\n${text}`)
+      assert.ok(text.includes("国际站"), `${extra.join(" ") || "no flag"}: the refusal does not name the site:\n${text}`)
+      assert.ok(!text.includes(B), `the international token is printed:\n${text}`)
+      assert.equal(readFileSync(join(dir, "providers.json"), "utf8"), before, "providers.json was rewritten")
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
