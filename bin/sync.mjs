@@ -1292,6 +1292,15 @@ export function arg(v) {
   // the mask keeps the value's first and last four: those are the key's own
   // characters, not the no-break or ideographic spaces it was cut with
   if (foldedRaw !== raw && !raw.includes("…") && joinedKey(foldedRaw)) return mask(raw.replace(/\s+/g, "").trim())
+  // a key written in full width: the readings above have no ASCII to work on
+  // (a full-width vendor key carries no path, no front, no lowercase run), so
+  // the NFKC copy — case kept, which is what the card judges — is read, and a
+  // copy the readings would mask means the value as typed is masked whole
+  const nfkc = orig.normalize("NFKC")
+  if (nfkc !== orig && !orig.includes("…")) {
+    const probed = argRun(nfkc)
+    if (probed !== nfkc) return mask(raw.replace(/\s+/g, "").trim())
+  }
   return argRun(raw)
 }
 
@@ -1353,6 +1362,9 @@ const argWords = (x) =>
     // word gave the frame's punctuation the two characters the mask spends on
     // the key's own ends: "(ghp_…Qrst)" printed "(ghp…rst)")
     const inFrame = frameSpan(w)
+    // the word as written and its lowercase fold; a full-width key with no
+    // ASCII at all is the whole-value NFKC reading's business (above), which
+    // sees it as one value rather than word by word
     if (isKey(w) || isKey(f)) return inFrame ? inFrame.lead + mask(inFrame.body) + inFrame.tail : mask(w)
     // a value behind a flag or a frame ("--bad=SK-ANT-…", "NickName=[ghp_…")
     // is judged by what the frame encloses

@@ -5998,3 +5998,19 @@ test("a lowercase word with no vowels is a key to the CLI too", () => {
     assert.equal(arg(`the list names ${word}`), `the list names ${word}`, `${word} is not a key`)
   }
 })
+
+test("a full-width vendor key is masked as typed, not printed whole", () => {
+  // The CLI folds to NFKC + lower case before judging a word, and the fold
+  // took the capitals out of a key that is defined by them: a full-width
+  // "ＡＫＩＡ…" had no ASCII run, no front and no lower-case shape, so every
+  // route declined and the key printed whole. The NFKC copy with its case kept
+  // — the one the card judges — is read now, and the value as typed is masked
+  // whole when that copy is a key.
+  const fw = "ＡＫＩＡＩＯＳＦＯＤＮＮ７ＥＸＡＭＰＬＥ"
+  const out = arg(`${fw.slice(0, 8)} ${fw.slice(8)}`)
+  assert.doesNotMatch(out, /ＡＫＩＡＩＯＳＦ/, `the key printed whole: ${out}`)
+  assert.match(out, /…/, `it is masked: ${out}`)
+  // and one word of it, uncut
+  const whole = arg(fw)
+  assert.doesNotMatch(whole, /ＯＤＮＮ７ＥＸＡＭＰＬＥ/, `the key printed whole: ${whole}`)
+})
