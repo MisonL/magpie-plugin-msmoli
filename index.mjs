@@ -2451,6 +2451,14 @@ const stable = (v, deep = 0) =>
             .join(",")}}`
         : JSON.stringify(v)
 const rowKey = (r) => stable(r)
+// idOf is the row's identity as the server names it: `id` when the row has
+// one, the whole-row key when it does not. The ledger may recount an
+// aggregate between two page reads — same id, new numbers — and the
+// whole-row key read that as a second row (12 credits of spend showed as 22).
+// Rows without an id are not merged: two rows that happen to share a tuple
+// are still two rows unless the server says they are one.
+const idOf = (r) =>
+  r?.id !== undefined && r?.id !== null && r.id !== "" ? `id:${String(r.id)}` : ""
 
 async function dayRows(profile, token, day, first, deadline, body) {
   const all = [...first]
@@ -2462,6 +2470,15 @@ async function dayRows(profile, token, day, first, deadline, body) {
   // reports it twice.
   const seenPages = new Set([stable(first)])
   const seenRows = new Set(first.map(rowKey))
+  // the aggregate behind each row already counted, and where it sits in `all`:
+  // a row that comes back with the same identity but new numbers replaces the
+  // one in hand (the later read is the newer read) instead of being summed
+  // beside it
+  const byId = new Map()
+  first.forEach((r, i) => {
+    const id = idOf(r)
+    if (id && !byId.has(id)) byId.set(id, i)
+  })
   let { total, contradicted } = totalOf(body, first)
   let complete = false
   for (;;) {
@@ -2559,15 +2576,43 @@ async function dayRows(profile, token, day, first, deadline, body) {
       break
     }
     seenPages.add(stamp)
-    const fresh = raw.filter((r) => !seenRows.has(rowKey(r)))
-    for (const r of fresh) seenRows.add(rowKey(r))
-    if (!fresh.length) {
+    // a row seen before is skipped; the same aggregate with new numbers is not
+    // "fresh" — it is the row in hand, updated
+    const fresh = []
+    const added = []
+    let changed = false
+    for (const r of raw) {
+      const k = rowKey(r)
+      if (seenRows.has(k)) continue
+      const id = idOf(r)
+      // the same id seen before is the same aggregate: the later read replaces
+      // it. Rows the server gives no id for are never merged — two rows that
+      // share a tuple are still two rows.
+      const at = id && byId.has(id) ? byId.get(id) : undefined
+      if (at !== undefined) {
+        all[at] = r
+        added.push(k)
+        changed = true
+        continue
+      }
+      if (id) byId.set(id, all.length + fresh.length)
+      fresh.push(r)
+      added.push(k)
+    }
+    // the set is updated after the page is read, as before: a page that
+    // repeats a row inside itself is summed as many times as it says (the old
+    // filter compared against a snapshot), and a replaced row's new spelling
+    // joins it for the pages after
+    for (const k of added) seenRows.add(k)
+    if (!fresh.length && !changed) {
       // every row on this page was already counted: the window moved, not the
       // ledger
       complete = total !== null && all.length >= total
       break
     }
-    rows = fresh
+    // the page's own rows still drive the page-end checks: a page that was
+    // full of repeats and updates says nothing about room to spare
+    rows = fresh.length ? fresh : raw
     all.push(...fresh)
   }
   // `last` is the page the walk stopped on, for a following page-reader to

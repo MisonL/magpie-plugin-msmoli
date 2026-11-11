@@ -11201,3 +11201,24 @@ test("an oversized answer is cancelled, not just refused", async () => {
     globalThis.fetch = real
   }
 })
+
+test("an aggregate row updated between pages is replaced, not counted twice", async () => {
+  // The ledger aggregates one row per (day, type, rule_key, model_tier), and
+  // the server may recount one between two page reads: same identity, new
+  // numbers. Identity was the whole row's JSON, so the two spellings counted
+  // as two rows and 12 credits of spend showed as 22.
+  const fill = (i) => ({ gmt_created: today, type: "EARN", rule_key: `fill_${i}`, title: `t${i}`, total_amount: 1, count: 1 })
+  const page1 = [{ id: "S", ...spend(10) }, ...Array.from({ length: 49 }, (_, i) => fill(i))]
+  const page2 = [{ id: "S", ...spend(12) }, ...Array.from({ length: 4 }, (_, i) => fill(100 + i))]
+  const r = await withFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 1 } } },
+      [TX_PATH]: { body: { success: true, data: { records: page1, total: 55 } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: page2 } } },
+    },
+    async () => auth.usage(async () => ({ type: "api", key: "ms-dup-0000-0000-0000-000000000028" })),
+  )
+  assert.ok(!r.error, r.error)
+  const shown = r.windows.map((w) => w.display).join(" ")
+  assert.match(shown, /今日用 12 /, `the later read wins: ${shown}`)
+})
