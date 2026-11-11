@@ -11222,3 +11222,36 @@ test("an aggregate row updated between pages is replaced, not counted twice", as
   const shown = r.windows.map((w) => w.display).join(" ")
   assert.match(shown, /今日用 12 /, `the later read wins: ${shown}`)
 })
+
+test("a parsed 429 or 5xx outranks the other site's transport error, in either order", async () => {
+  // siteRead keeps a parsed non-answer as its best "answer" because it is the
+  // site saying something, and the comment above it promises that beats a
+  // transport error from the other site ("risk control" is more useful than
+  // "check your proxy"). Only the 4xx arm did: a 429 or a 5xx that arrived
+  // after a dead link was dropped, and the card said the network was down.
+  const real = globalThis.fetch
+  const say = async (cn, intl) => {
+    globalThis.fetch = async (url) => {
+      const hit = new URL(url).host === new URL(CN_ORIGIN).host ? cn : intl
+      if (hit === "dead") throw new TypeError("fetch failed")
+      return reply(hit)
+    }
+    try {
+      const r = await auth.usage(async () => ({ type: "api", key: "ms-prio-0000-0000-0000-000000000029" }))
+      return r.error ?? ""
+    } finally {
+      globalThis.fetch = real
+    }
+  }
+  const dead = "dead"
+  const busy = { status: 500, body: { message: "system busy" } }
+  const slow = { status: 429, body: { message: "too many requests" } }
+  testables.sites.clear()
+  // dead link first, the site's own words second
+  assert.match(await say(dead, busy), /system busy/, "the 500's words are the useful ones")
+  assert.match(await say(dead, slow), /too many requests/, "the 429's words are the useful ones")
+  // and the same the other way round
+  assert.match(await say(busy, dead), /system busy/)
+  assert.match(await say(slow, dead), /too many requests/)
+  testables.sites.clear()
+})

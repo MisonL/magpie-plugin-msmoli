@@ -253,7 +253,13 @@ async function siteRead(token, path, deadline = Infinity) {
   // while the loop goes on: the site that gave it may not be the one holding
   // this token (a stale `site`, a re-keyed sign-in, a middlebox's 404).
   let answer
-  let first
+  // `said` is a parsed reply that is not an answer (429, 5xx, a 200 that says
+  // it failed); `down` is a transport error. They are kept apart so the
+  // promise above holds in both directions: whatever the site said beats the
+  // link failing, whichever order the two arrive in. `first` is then always a
+  // parsed reply (or nothing), and the dead link is the last thing reported.
+  let said
+  let down
   for (const profile of order) {
     let got
     try {
@@ -264,7 +270,9 @@ async function siteRead(token, path, deadline = Infinity) {
       // exists for. The second read is bounded by the hook's own deadline, so
       // a dead network costs at most the budget it would have spent anyway;
       // giving up here left an account on a wrong or unreachable site all day.
-      first ??= e instanceof Error ? { error: e } : { error: new Error("") }
+      // a parsed answer from the other site outranks this (see below): the
+      // link being down says nothing about the account
+      down ??= e instanceof Error ? { error: e } : { error: new Error("") }
       continue
     }
     if (got.res.status === 401 && got.parsed && awaitsSignIn(got.body)) {
@@ -296,7 +304,7 @@ async function siteRead(token, path, deadline = Infinity) {
         rememberSite(token, profile)
         return { profile, ...got }
       }
-      first ??= { answer: { profile, ...got } }
+      said ??= { answer: { profile, ...got } }
       continue
     }
     // A 4xx is the site answering — but a 404/405/451 from a middlebox, or a
@@ -308,13 +316,11 @@ async function siteRead(token, path, deadline = Infinity) {
       answer ??= { profile, ...got }
       continue
     }
-    first ??= { answer: { profile, ...got } }
+    said ??= { answer: { profile, ...got } }
   }
   if (answer) return answer
-  if (first) {
-    if ("error" in first) throw first.error
-    return first.answer
-  }
+  if (said) return said.answer
+  if (down) throw down.error
   throw deadToken("任一站点")
 }
 
