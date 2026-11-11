@@ -217,7 +217,7 @@ const pathWords = /proxy|gateway|www-authenticate|re-?authenticate|\bbasic\b/i
 // an upstream's "Upstream returned status 401" is not a path naming itself: a
 // site reads the body above it, and what a proxy puts there is its own words
 const PATH_MARK = /(?<![a-z])(?:proxy|gateway|re-?authenticate)(?![a-z])/i
-const signInWords = /unauthori[sz]ed|invalid (?:access )?token|token (?:is )?(?:invalid|expired|revoked)|invalid authentication|authorization header|not (?:logged|signed) in|unauthenticated|auth(?:entication)? (?:failed|required)|\b(?:expired|revoked)\b|401|登录|未登录|失效|过期|令牌|凭证|鉴权|认证/i
+const signInWords = /unauthori[sz]ed|invalid (?:access )?token|token (?:is )?(?:invalid|expired|revoked)|invalid authentication|authorization header|not (?:logged|signed) in|unauthenticated|auth(?:entication)? (?:failed|required)|\b(?:expired|revoked)\b|\b401\b|登录|未登录|失效|过期|令牌|凭证|鉴权|认证/i
 const awaitsSignIn = (body) => {
   if (body === null || typeof body !== "object") return false
   // an empty object is a refusal: a site that answers 401 with nothing in it
@@ -254,6 +254,13 @@ async function siteRead(token, path, deadline = Infinity) {
   // this token (a stale `site`, a re-keyed sign-in, a middlebox's 404).
   let answer
   let first
+  // the remembered site refused the token in its own words: the strongest
+  // evidence this walk collects. Every other answer is about a reply; this
+  // one is about the sign-in, so it is reported even when the other site gave
+  // a parsed 4xx (a middlebox's 404, a risk-control page) — an error of
+  // theirs says nothing about the login, and the host would retry the same
+  // dead token all day without ever saying so.
+  let refusedOwn
   for (const profile of order) {
     let got
     try {
@@ -276,11 +283,10 @@ async function siteRead(token, path, deadline = Infinity) {
       // Measured: a proxy that answered 401 with its own JSON had the card
       // tell the user the sign-in expired, and a re-login would not have
       // changed the answer.
-      if (!awaitsSignIn(got.body)) {
-        first ??= { answer: { profile, ...got } }
-        continue
+      if (profile === known) {
+        sites.delete(token)
+        refusedOwn ??= profile
       }
-      if (profile === known) sites.delete(token)
       continue
     }
     if (got.parsed && got.res.status === 200) {
@@ -302,6 +308,7 @@ async function siteRead(token, path, deadline = Infinity) {
     }
     first ??= { answer: { profile, ...got } }
   }
+  if (refusedOwn) throw deadToken(refusedOwn.where)
   if (answer) return answer
   if (first) {
     if ("error" in first) throw first.error

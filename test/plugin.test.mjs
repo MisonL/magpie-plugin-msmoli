@@ -11072,3 +11072,35 @@ test("two ms- keys side by side are masked each by its own ends", () => {
     assert.equal(fn(`${t1} ${t2}`), "ms-a…5555 ms-z…5555", `${tag}`)
   }
 })
+
+test("a number that merely contains 401 is not a refusal", () => {
+  // signInWords matched "401" as a substring: a proxy's
+  // {"message":"error code 1401"} answered a real 401 and was read as the
+  // token being dead — the user re-logged in and the answer stayed. The word
+  // "401" has edges; inside "1401" it has none.
+  assert.equal(testables.awaitsSignIn({ message: "error code 1401" }), false)
+  assert.equal(testables.awaitsSignIn({ message: "HTTP 401 from upstream" }), true)
+  assert.equal(testables.awaitsSignIn({ message: "1401" }), false)
+})
+
+test("the remembered site's own refusal is not drowned by the other site's blip", async () => {
+  // The token's site answered 401 in its own words; the other site then
+  // answered a parsed 404 (a middlebox's page, not ModelScope's). The walk
+  // kept the 404 as the best "answer" and reported it — an error that says
+  // nothing about the sign-in, where the refusal it walked past does. A
+  // refusal of the remembered site is the strongest evidence a walk collects:
+  // report the token as expired instead.
+  testables.sites.clear()
+  const token = "ms-drown-0000-0000-0000-000000000025"
+  testables.sites.set(token, testables.CN)
+  const r = await withUrlFetch(
+    {
+      [BALANCE_PATH]: bySite({ status: 401, body: {} }, { status: 404, body: { message: "not found" } }),
+      [TX_PATH]: bySite({ status: 401, body: {} }, { status: 404, body: { message: "not found" } }),
+    },
+    async () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.equal(r.signIn, "expired", JSON.stringify(r))
+  assert.equal(testables.sites.get(token), undefined, "the refused site was forgotten")
+  testables.sites.clear()
+})
