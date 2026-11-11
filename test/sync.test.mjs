@@ -2279,7 +2279,7 @@ test("a launcher chain is followed to the end, not just one hop", async () => {
     writeFileSync(join(real, "bin", ".portable"), "")
     writeFileSync(join(real, "bin", "magpie"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
     writeFileSync(join(shimA, ".portable"), "")
-    writeFileSync(join(shimA, "magpie"), `#!/bin/sh\nexec ../${basename(shimB)}/magpie "$@"\n`, { mode: 0o755 })
+    writeFileSync(join(shimA, "magpie"), `#!/bin/sh\nexec ${join(shimB, "magpie")} "$@"\n`, { mode: 0o755 })
     writeFileSync(join(shimB, ".portable"), "")
     writeFileSync(join(shimB, "magpie"), `#!/bin/sh\nexec ${join(real, "bin", "magpie")} "$@"\n`, { mode: 0o755 })
     for (const folder of [shimA, shimB, join(real, "bin")]) {
@@ -2366,20 +2366,25 @@ test("a launcher whose exec target's own folder is the one named runs, and one i
     assert.equal(code3, 0, out3.join("\n"))
     assert.match(out3.join("\n"), new RegExp(join(real, "bin", "data").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), out3.join("\n"))
 
-    // the untraceable one passes the guard on its own folder, but the mock
-    // write goes elsewhere (as the wrapped binary would), and the read-back
-    // names the wrapper as the likely reason
+    // the untraceable one is refused before anything runs: its exec names a
+    // target that exists nowhere, so where a write would land cannot be said —
+    // and a token written into a magpie the user did not name is the one thing
+    // the guard exists to prevent
     const out2 = []
+    let spawned2 = false
     const code2 = await main({
       argv: ["--dir", join(shim, "data"), "--to-plugin", "--force", "--magpie", join(shim, "lost")],
       env: {},
       home: shim,
       log: (s) => out2.push(s),
-      spawn: () => ({ status: 0, stdout: "✓ signed in", stderr: "" }),
+      spawn: () => {
+        spawned2 = true
+        return { status: 0, stdout: "✓ signed in", stderr: "" }
+      },
     })
     assert.equal(code2, 1)
+    assert.equal(spawned2, false, "an unfollowable launcher must not reach the write")
     assert.match(out2.join("\n"), /包装脚本/, out2.join("\n"))
-    assert.match(out2.join("\n"), /检查 magpie 是否正在正常运行/)
   } finally {
     rmSync(real, { recursive: true, force: true })
     rmSync(shim, { recursive: true, force: true })
@@ -5913,5 +5918,52 @@ test("a preset key that is not a string is refused by main, not only by the plan
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  }
+})
+
+test("a launcher whose target the text cannot settle is refused, not guessed", async () => {
+  // Three shapes a text read cannot decide: a relative exec (the shell
+  // resolves it against the working folder, not the script's), two different
+  // exec lines (an if/else, a fallback chain — which one runs is not in the
+  // text), and an exec that appears inside a here-document or echoed text.
+  // The guard used to fall back to the script's own folder and run anyway,
+  // which is a write aimed at a guess.
+  const shapes = [
+    ["relative", `#!/bin/sh\nexec ./target "$@"\n`],
+    ["two branches", `#!/bin/sh\nif false; then\n  exec __DIR__/one "$@"\nfi\nexec __DIR__/two "$@"\n`],
+    ["heredoc text", `#!/bin/sh\ncat <<EOF\nusage: exec /usr/bin/false\nEOF\nexit 1\n`],
+  ]
+  const dirs = []
+  try {
+    for (const [tag, script] of shapes) {
+      const dir = mkdtempSync(join(tmpdir(), `msmoli-settle-${tag.replace(/ /g, "-")}-`))
+      dirs.push(dir)
+      mkdirSync(join(dir, "data"), { recursive: true })
+      writeFileSync(join(dir, ".portable"), "")
+      writeFileSync(join(dir, "data", "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+      writeFileSync(join(dir, "data", "plugin-auth.json"), JSON.stringify({}))
+      // two real targets so the "two branches" shape is genuinely ambiguous
+      writeFileSync(join(dir, "target"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+      writeFileSync(join(dir, "one"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+      writeFileSync(join(dir, "two"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+      writeFileSync(join(dir, "magpie"), script.replaceAll("__DIR__", dir), { mode: 0o755 })
+      const out = []
+      let spawned = false
+      const code = await main({
+        argv: ["--dir", join(dir, "data"), "--to-plugin", "--force", "--magpie", join(dir, "magpie")],
+        env: {},
+        home: dir,
+        log: (s) => out.push(s),
+        spawn: () => {
+          spawned = true
+          return { status: 0, stdout: "", stderr: "" }
+        },
+      })
+      assert.equal(code, 1, `${tag}: ${out.join("\n")}`)
+      assert.equal(spawned, false, `${tag}: nothing may be written on a guess`)
+      assert.match(out.join("\n"), /包装脚本/, `${tag}: ${out.join("\n")}`)
+    }
+  } finally {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true })
   }
 })

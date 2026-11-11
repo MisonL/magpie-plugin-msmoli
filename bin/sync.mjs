@@ -1862,24 +1862,34 @@ const wrapperTarget = (bin) => {
       // The first one whose target exists is taken; a target that is not a
       // plain path ("$(command -v magpie)") never exists as one and is passed
       // over, which is what leaves a dynamic launcher unresolved.
+      // A here-document or a quoted block can contain the word "exec" as text
+      // (a usage line, an echoed command): following that is following a
+      // string, so a script that carries one is not read for targets at all.
+      if (/<</.test(text)) return ""
       let next = ""
       let sawExec = false
+      const targets = new Set()
       for (const line of text.split("\n")) {
         const m = /^\s*exec\s+(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(line)
         if (!m) continue
         sawExec = true
         const target = m[1] ?? m[2] ?? m[3] ?? ""
         if (!target || target.startsWith("-")) continue
-        const abs = isAbsolute(target) ? target : join(dirname(path), target)
-        if (existsSync(abs)) {
-          next = abs
-          break
-        }
+        // a relative target is resolved against the shell's working folder,
+        // not the script's: what lies beside the script is a guess, and this
+        // program has no business writing a credential into a guess
+        if (!isAbsolute(target)) continue
+        targets.add(target)
+        if (existsSync(target)) next = target
       }
+      // Two different exec lines are two possible targets — an if/else, a
+      // fallback chain — and which one runs is not something a text read can
+      // settle. Unresolved beats following the wrong branch.
+      if (targets.size > 1) return ""
       // no exec line at all: this file is the bottom of the chain, the binary
       // the chain finally runs. One that execs a target which exists nowhere
       // claims to run something we cannot find — that launcher stays
-      // unresolved, and the read-back says so.
+      // unresolved, and a write is refused rather than guessed.
       if (!next) return sawExec ? "" : path
       path = next
     } catch {
@@ -2126,6 +2136,17 @@ export async function main({
     // names none has no folder of its own either way, and the guard still asks
     // about the path as before.
     const wrapped = wrapperTarget(bin)
+    // A launcher whose target cannot be named may write anywhere: the folder
+    // this path implies is the script's, and the script is not what runs. The
+    // write is refused instead of aimed at a guess — a token would otherwise
+    // land in a magpie the user did not name, which is the one thing this
+    // guard exists to prevent.
+    if (isWrapper(bin) && !wrapped) {
+      log(`✗ --magpie 是包装脚本（${arg(bin)}），但看不出它最终启动哪个 magpie，写入会落在它自己的目录里——那可能不是这里读的目录。`)
+      log(`  读的是：${arg(args.dir)}`)
+      log(`  请把 --magpie 指到真正的 magpie 二进制（不是启动脚本），或去掉 --magpie 让它自动探测。`)
+      return 1
+    }
     const binDir = findConfigDir({ env, home, os, exists, binPath: wrapped || bin })
     // "" is a mismatch too: the binary has no magpie folder of ours to write
     // to, so it would make one — and that one is not the folder named. Compared
