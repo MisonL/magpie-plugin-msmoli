@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, sep } from "node:path"
+import { basename, join, sep } from "node:path"
 import { test } from "node:test"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import {
@@ -2216,6 +2216,173 @@ test("one folder is one folder, however the shell spelled it", async (t) => {
   } finally {
     rmSync(link, { force: true })
     rmSync(real, { recursive: true, force: true })
+  }
+})
+
+test("a launcher script is followed to the binary it execs, where the write will land", async () => {
+  // A shim with a data/ folder beside it passes a guard that reads the shim's
+  // own folder: the write goes to the exec target's config, and the read-back
+  // then blames "magpie 是否在正常运行". appdir.Resolve judges the process as
+  // it really is (the final binary after the exec chain), so the guard follows
+  // the exec lines — one hop or several — and refuses when the target's folder
+  // is not the one named.
+  const real = mkdtempSync(join(tmpdir(), "msmoli-shim-real-"))
+  const shim = mkdtempSync(join(tmpdir(), "msmoli-shim-own-"))
+  try {
+    // the portable install the shim finally runs: .portable makes its data/
+    // folder the config dir, whatever else is around
+    mkdirSync(join(real, "bin", "data"), { recursive: true })
+    writeFileSync(join(real, "bin", ".portable"), "")
+    writeFileSync(join(real, "bin", "magpie"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+    // the shim's own lookalike: a data/ folder with the same files, which is
+    // what made the old guard pass
+    writeFileSync(join(shim, ".portable"), "")
+    writeFileSync(join(shim, "magpie"), `#!/bin/sh\nexec ${join(real, "bin", "magpie")} "$@"\n`, { mode: 0o755 })
+    for (const folder of [join(shim), join(real, "bin")]) {
+      mkdirSync(join(folder, "data"), { recursive: true })
+      writeFileSync(join(folder, "data", "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+      writeFileSync(join(folder, "data", "plugin-auth.json"), JSON.stringify({}))
+    }
+    const out = []
+    let spawned = false
+    const code = await main({
+      argv: ["--dir", join(shim, "data"), "--to-plugin", "--magpie", join(shim, "magpie")],
+      env: {},
+      home: shim,
+      log: (s) => out.push(s),
+      spawn: () => {
+        spawned = true
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1)
+    assert.equal(spawned, false, "the write would land in the exec target's folder, not the one named")
+    const text = out.join("\n")
+    assert.match(text, /不同的配置目录/)
+    assert.match(text, new RegExp(real.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "the refusal names the folder the write would land in")
+  } finally {
+    rmSync(real, { recursive: true, force: true })
+    rmSync(shim, { recursive: true, force: true })
+  }
+})
+
+test("a launcher chain is followed to the end, not just one hop", async () => {
+  // shimA execs shimB (by a relative name, as a sibling shim is written),
+  // shimB execs the real binary. os.Executable() answers at the end of the
+  // chain, so the guard must too: stopping at the first hop would compare the
+  // write target against shimB's folder, which magpie never keeps files in.
+  const real = mkdtempSync(join(tmpdir(), "msmoli-chain-real-"))
+  const shimA = mkdtempSync(join(tmpdir(), "msmoli-chain-a-"))
+  const shimB = mkdtempSync(join(tmpdir(), "msmoli-chain-b-"))
+  try {
+    mkdirSync(join(real, "bin", "data"), { recursive: true })
+    writeFileSync(join(real, "bin", ".portable"), "")
+    writeFileSync(join(real, "bin", "magpie"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+    writeFileSync(join(shimA, ".portable"), "")
+    writeFileSync(join(shimA, "magpie"), `#!/bin/sh\nexec ../${basename(shimB)}/magpie "$@"\n`, { mode: 0o755 })
+    writeFileSync(join(shimB, ".portable"), "")
+    writeFileSync(join(shimB, "magpie"), `#!/bin/sh\nexec ${join(real, "bin", "magpie")} "$@"\n`, { mode: 0o755 })
+    for (const folder of [shimA, shimB, join(real, "bin")]) {
+      mkdirSync(join(folder, "data"), { recursive: true })
+      writeFileSync(join(folder, "data", "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+      writeFileSync(join(folder, "data", "plugin-auth.json"), JSON.stringify({}))
+    }
+    const out = []
+    let spawned = false
+    const code = await main({
+      argv: ["--dir", join(shimA, "data"), "--to-plugin", "--magpie", join(shimA, "magpie")],
+      env: {},
+      home: shimA,
+      log: (s) => out.push(s),
+      spawn: () => {
+        spawned = true
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(code, 1)
+    assert.equal(spawned, false)
+    assert.match(out.join("\n"), /不同的配置目录/)
+  } finally {
+    rmSync(real, { recursive: true, force: true })
+    rmSync(shimA, { recursive: true, force: true })
+    rmSync(shimB, { recursive: true, force: true })
+  }
+})
+
+test("a launcher whose exec target's own folder is the one named runs, and one it cannot follow says so", async () => {
+  // Following the chain must not over-refuse: when the exec target's config
+  // folder IS the one named, the write lands where the user pointed, and the
+  // run goes ahead. A launcher we cannot follow (its exec names a target that
+  // does not exist as a path) has no folder to confirm, so the guard falls
+  // back to the script's own folder — and if the read-back then finds no
+  // token, the failure says a wrapper was involved rather than blaming only
+  // "magpie 是否在正常运行".
+  const real = mkdtempSync(join(tmpdir(), "msmoli-shim-same-"))
+  const shim = mkdtempSync(join(tmpdir(), "msmoli-shim-lost-"))
+  try {
+    mkdirSync(join(real, "bin", "data"), { recursive: true })
+    writeFileSync(join(real, "bin", ".portable"), "")
+    writeFileSync(join(real, "bin", "magpie"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+    writeFileSync(join(shim, ".portable"), "")
+    // the followable one: target's folder is the --dir, so the run goes ahead
+    writeFileSync(join(shim, "magpie"), `#!/bin/sh\nexec ${join(real, "bin", "magpie")} "$@"\n`, { mode: 0o755 })
+    // the untraceable one: the named target is nowhere
+    writeFileSync(join(shim, "lost"), `#!/bin/sh\nexec ${join(shim, "nowhere")} "$@"\n`, { mode: 0o755 })
+    for (const folder of [shim, join(real, "bin")]) {
+      mkdirSync(join(folder, "data"), { recursive: true })
+      writeFileSync(join(folder, "data", "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+      writeFileSync(join(folder, "data", "plugin-auth.json"), JSON.stringify({}))
+    }
+    // the followable launcher writes where the user named: mock does the write
+    // the real login would, so the read-back finds the token
+    const out = []
+    const code = await main({
+      argv: ["--dir", join(real, "bin", "data"), "--to-plugin", "--force", "--magpie", join(shim, "magpie")],
+      env: {},
+      home: shim,
+      log: (s) => out.push(s),
+      spawn: (_cmd, argv) => {
+        writeFileSync(join(real, "bin", "data", "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+        return { status: 0, stdout: argv.includes("logout") ? "✓ signed out" : "✓ signed in", stderr: "" }
+      },
+    })
+    assert.equal(code, 0, out.join("\n"))
+    assert.doesNotMatch(out.join("\n"), /包装脚本/, "a followable launcher needs no wrapper note")
+
+    // without --dir the default folder is the exec target's, not the shim's:
+    // reading the shim's own folder would sync against a config magpie never
+    // writes to, and the write would land in the target's folder anyway
+    const out3 = []
+    const code3 = await main({
+      argv: ["--to-plugin", "--force", "--magpie", join(shim, "magpie")],
+      env: {},
+      home: shim,
+      log: (s) => out3.push(s),
+      spawn: (_cmd, argv) => {
+        writeFileSync(join(real, "bin", "data", "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+        return { status: 0, stdout: argv.includes("logout") ? "✓ signed out" : "✓ signed in", stderr: "" }
+      },
+    })
+    assert.equal(code3, 0, out3.join("\n"))
+    assert.match(out3.join("\n"), new RegExp(join(real, "bin", "data").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), out3.join("\n"))
+
+    // the untraceable one passes the guard on its own folder, but the mock
+    // write goes elsewhere (as the wrapped binary would), and the read-back
+    // names the wrapper as the likely reason
+    const out2 = []
+    const code2 = await main({
+      argv: ["--dir", join(shim, "data"), "--to-plugin", "--force", "--magpie", join(shim, "lost")],
+      env: {},
+      home: shim,
+      log: (s) => out2.push(s),
+      spawn: () => ({ status: 0, stdout: "✓ signed in", stderr: "" }),
+    })
+    assert.equal(code2, 1)
+    assert.match(out2.join("\n"), /包装脚本/, out2.join("\n"))
+    assert.match(out2.join("\n"), /检查 magpie 是否正在正常运行/)
+  } finally {
+    rmSync(real, { recursive: true, force: true })
+    rmSync(shim, { recursive: true, force: true })
   }
 })
 

@@ -22,7 +22,7 @@
 //   and only one account in the plugin.
 
 import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
+import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, statSync } from "node:fs"
 import { homedir, platform } from "node:os"
 import { dirname, isAbsolute, join, sep } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -1794,6 +1794,94 @@ function unreadableAfter(name, dir, want, log, where = "插件列表") {
 const runnable = (bin, os, exists) =>
   exists(bin) || (os === "win32" && !/\.[^\\/.]+$/.test(bin) && [".com", ".exe"].some((x) => exists(bin + x)))
 
+// wrapperTarget follows a launcher script to the binary it finally runs.
+// appdir.Resolve judges the executable as the process really is — what
+// os.Executable() answers after an exec chain is the final binary, not the
+// shim — so the folder magpie keeps its config in is the exec target's, and a
+// shim with a data/ folder beside it must not win the --dir guard: the guard
+// passed while the write landed in the wrapped binary's own config, and the
+// read-back then blamed "magpie 是否在正常运行". "" means "not a launcher, or
+// a launcher whose target we cannot name"; a caller that needs to tell the two
+// apart asks isWrapper as well. A chain is followed hop by hop while each
+// target is itself a script, bounded and cycle-checked: eight is well past any
+// launcher chain a real install builds.
+const wrapperTarget = (bin) => {
+  let path = bin
+  const seen = new Set()
+  for (let hop = 0; hop < 8; hop++) {
+    if (seen.has(path)) return ""
+    seen.add(path)
+    let fd
+    try {
+      fd = openSync(path, "r")
+      const head = Buffer.alloc(4096)
+      const n = readSync(fd, head, 0, head.length, 0)
+      const text = head.subarray(0, n).toString("utf8")
+      if (!text.startsWith("#!")) return hop === 0 ? "" : path
+      // an `exec` line a launcher writes: "exec /path/magpie \"$@\"", with an
+      // optional env assignment in front and an optional quote round the path.
+      // The first one whose target exists is taken; a target that is not a
+      // plain path ("$(command -v magpie)") never exists as one and is passed
+      // over, which is what leaves a dynamic launcher unresolved.
+      let next = ""
+      let sawExec = false
+      for (const line of text.split("\n")) {
+        const m = /^\s*exec\s+(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(line)
+        if (!m) continue
+        sawExec = true
+        const target = m[1] ?? m[2] ?? m[3] ?? ""
+        if (!target || target.startsWith("-")) continue
+        const abs = isAbsolute(target) ? target : join(dirname(path), target)
+        if (existsSync(abs)) {
+          next = abs
+          break
+        }
+      }
+      // no exec line at all: this file is the bottom of the chain, the binary
+      // the chain finally runs. One that execs a target which exists nowhere
+      // claims to run something we cannot find — that launcher stays
+      // unresolved, and the read-back says so.
+      if (!next) return sawExec ? "" : path
+      path = next
+    } catch {
+      return ""
+    } finally {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd)
+        } catch {}
+      }
+    }
+  }
+  return ""
+}
+
+// isWrapper is a path that is really a launcher — a file that begins with "#!".
+// Two bytes are enough, and a binary that cannot be read is not a wrapper.
+const isWrapper = (bin) => {
+  let fd
+  try {
+    fd = openSync(bin, "r")
+    const head = Buffer.alloc(2)
+    return readSync(fd, head, 0, 2, 0) === 2 && head[0] === 0x23 && head[1] === 0x21
+  } catch {
+    return false
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd)
+      } catch {}
+    }
+  }
+}
+
+// wrapperNote is the read-back suffix for a launcher we could not follow: the
+// guard asked about the script's own folder, so a write that went to the
+// wrapped binary's folder instead shows up exactly here, as a token that is
+// missing.
+const wrapperNote = (bin) =>
+  isWrapper(bin) && !wrapperTarget(bin) ? "；--magpie 是包装脚本，它最终启动的 magpie 定位不到，写入可能落在别的目录里" : ""
+
 // showPath is a file inside the folder the user typed. The folder goes through
 // arg() — a token pasted into --dir must not ride along inside the joined path
 // — and the file's own name is ours, printed as is.
@@ -1843,7 +1931,9 @@ export async function main({
     return 1
   }
   const bin = args.magpie || findMagpieBin({ env, os, exists, home })
-  const dir = args.dir || findConfigDir({ env, home, os, exists, binPath: bin })
+  // The folder is the one the binary that actually runs keeps its config in:
+  // for a launcher script that is the exec target, not the script's own folder.
+  const dir = args.dir || findConfigDir({ env, home, os, exists, binPath: wrapperTarget(bin) || bin })
   if (!dir) {
     log(`✗ 没找到 magpie 的配置目录。`)
     log(`  试过 $XDG_CONFIG_HOME/magpie 和 ~/.config/magpie。便携版请用 --dir 指定它的 data 目录。`)
@@ -1989,7 +2079,15 @@ export async function main({
   // itself there — a fixture's --dir was read while the real magpie wrote its
   // own folder.
   if (!args.dryRun && args.dir && bin && runnable(bin, os, exists)) {
-    const binDir = findConfigDir({ env, home, os, exists, binPath: bin })
+    // A launcher script writes wherever the binary it execs keeps its config,
+    // and that folder is not the one this path implies: a shim beside a data/
+    // folder passed this guard while the write landed in the wrapped binary's
+    // own config, and the read-back then blamed "magpie 是否在正常运行". The
+    // exec target is read out of the script when it names one; a script that
+    // names none has no folder of its own either way, and the guard still asks
+    // about the path as before.
+    const wrapped = wrapperTarget(bin)
+    const binDir = findConfigDir({ env, home, os, exists, binPath: wrapped || bin })
     // "" is a mismatch too: the binary has no magpie folder of ours to write
     // to, so it would make one — and that one is not the folder named. Compared
     // by folder identity, not by string: a shell completes a directory with a
@@ -2026,7 +2124,7 @@ export async function main({
       if (raw === null || !shaped(raw)) return unreadableAfter("providers.json", dir, want, log, "供应商列表")
       const after = presetCandidates(raw?.providers, preset.id)
       if (!after.some((p) => p.key === want)) {
-        log(`✗ 写入后回读没找到目标 key（${mask(want)}）——检查 magpie 是否在正常运行。`)
+        log(`✗ 写入后回读没找到目标 key（${mask(want)}）——检查 magpie 是否在正常运行${wrapperNote(bin)}。`)
         return 1
       }
     } else {
@@ -2044,7 +2142,7 @@ export async function main({
         return 1
       }
       if (!after.some((a) => a.token === want)) {
-        log(`✗ 写入后回读没找到目标令牌（${mask(want)}）——检查 magpie 是否在正常运行。`)
+        log(`✗ 写入后回读没找到目标令牌（${mask(want)}）——检查 magpie 是否正在正常运行${wrapperNote(bin)}。`)
         return 1
       }
     }
