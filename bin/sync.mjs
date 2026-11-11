@@ -495,8 +495,11 @@ function spacedKey(s) {
   // the key's own characters from the front; a digit is what separates a key
   // cut into pieces from a name with a version after it
   const bodyFrom = (i) => s.slice(start, i).replace(CUT_RUN, "")
-  if (!/^[A-Za-z0-9+/=_.-]+$/.test(joined.slice(frontAt + 3))) return null
-  if (joined.length - frontAt - 3 < 11 || !/\d/.test(joined.slice(frontAt + 3))) return null
+  // the key's own span, not the rest of the line: a bracket, a comma or a
+  // Chinese character abutting the key's end is the text's, and judging the
+  // whole remainder as key material refused a valid key ("(sk-ant-…vTuH)")
+  const headSpan = /^[A-Za-z0-9+/=_.-]*/.exec(joined.slice(frontAt + 3))[0]
+  if (headSpan.length < 11 || !/\d/.test(headSpan)) return null
   // walk forward: a piece is part of the key while it is key characters and
   // not prose; a gap joins them only when it is a cut (one or two characters).
   // The walk starts at the end of the piece the front's own characters sit in:
@@ -526,9 +529,11 @@ function spacedKey(s) {
     if (!gap) break
     if (gap[0].length > 3 && (!strong || gap[0].length > 5)) break
     idx += 1
-    const piece = pieces[idx].text
+    // the piece's own key span: what follows it inside the piece ("vTuH)" ,
+    // "abc," , "…无效") is the text's frame, not the key
+    const piece = /^[A-Za-z0-9+/=_.-]*/.exec(pieces[idx].text)[0]
+    if (!piece) break
     if (VERNUM.test(piece) && !/\d/.test(bodyFrom(end))) break
-    if (!KEYCHARS.test(piece)) break
     // a piece of three or more letters is prose and ends the run ("no key
     // ms-… for provider" keeps its frame), unless it is the piece a bare
     // front was cut into ("sk" then "ant" is a cut, not a word)
@@ -682,11 +687,25 @@ const alternates = (word) => (word.match(/[a-z][A-Z]/g) ?? []).length >= 2
 // so there is no whitespace in it and no value of nothing but spaces to answer
 // for. It was written for a whole value once, and a value with a trailing space
 // in it answered "not a key": that is the frame this round closed
+// a run with no vowels and plenty of digits is a generated key with no
+// separator at all ("5gli9zadx8zg9jez"): the card judges this shape and the
+// CLI did not. A word followed by its numeral ("file1file2file3") is a list,
+// the card's own exclusion.
+const VOWELS = /[aeiouy]/g
+const randomish = (r) => {
+  if (r.length < 12 || r.length > 40 || !/[a-z]/.test(r)) return false
+  if ((r.match(VOWELS) ?? []).length / r.length >= 0.2) return false
+  const digits = (r.match(/\d/g) ?? []).length
+  const transitions = (r.match(/[a-z][0-9]|[0-9][a-z]/g) ?? []).length
+  return transitions >= 2 || digits >= 4
+}
+const LISTY = /^(?:[A-Za-z]+\d+)+$/
 const isKey = (word) => {
   // an upper-cased vendor key is the same key, and its pieces are too short
   // for the run floors ("SK-ANT-API03-EYAI1PKJRF_KBWT"); the rhythm a key has
   // (a capital beside a digit) tells it from a sentence in capitals
   if (VENDOR.test(word) && word === word.toUpperCase() && /[0-9]/.test(word) && !/[A-Z]{6,}/.test(word.replace(/^[A-Z]+_[A-Z]+_/, ""))) return true
+  if (/^[a-z0-9]+$/.test(word) && !(LISTY.test(word) && /[A-Za-z]{3,}/.test(word)) && randomish(word)) return true
   if (!/[\\/]/.test(word)) {
     // no separator: the whole word is one key, and one key-like run in it is
     // enough (a generated key has no separator at all). PATHY's leading "." is

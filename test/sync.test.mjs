@@ -5967,3 +5967,34 @@ test("a launcher whose target the text cannot settle is refused, not guessed", a
     for (const d of dirs) rmSync(d, { recursive: true, force: true })
   }
 })
+
+test("a vendor key cut by a space is masked whole when a frame touches it", () => {
+  // spacedKey judged the rest of the *line* as key material, and the piece walk
+  // stopped at the first character that was not: a key with a bracket, a comma
+  // or a Chinese character abutting it read as "not a key" and only its first
+  // piece was masked — "sk-ant-api03-E" (14 characters of the body) went out
+  // beside the masked tail. The reading measures the key's own span now.
+  const body = "sk-ant-api03-Eyai1pkJrF_KbwtX9ZqLmNeR2vTuH"
+  const cut = `${body.slice(0, 14)} ${body.slice(14)}`
+  for (const [tag, s, want] of [
+    ["frame ()", `(${cut})`, "(sk-a…vTuH)"],
+    ["comma", `${cut},`, "sk-a…vTuH,"],
+    ["CJK", `${cut}无效`, "sk-a…vTuH无效"],
+  ]) {
+    const out = arg(s)
+    assert.equal(out, want, `${tag}: ${out}`)
+    assert.doesNotMatch(out, /sk-ant-api03-E/, `${tag} leaked the body's front`)
+  }
+})
+
+test("a lowercase word with no vowels is a key to the CLI too", () => {
+  // The card has an arm for a run with no vowels and plenty of digits ("a
+  // generated key with no separator at all"); the CLI's isKey did not, so such
+  // a key printed as a bare argument went out as written. A word followed by
+  // its numeral ("file1file2file3") is a list and stays — that exclusion is the
+  // card's own.
+  assert.equal(arg("no key 5gli9zadx8zg9jez for provider"), "no key 5gli…9jez for provider")
+  for (const word of ["ms-dos", "Qwen3-Max", "hello1234567890", "file1file2file3", "20261031"]) {
+    assert.equal(arg(`the list names ${word}`), `the list names ${word}`, `${word} is not a key`)
+  }
+})
