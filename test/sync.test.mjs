@@ -6014,3 +6014,64 @@ test("a full-width vendor key is masked as typed, not printed whole", () => {
   const whole = arg(fw)
   assert.doesNotMatch(whole, /ＯＤＮＮ７ＥＸＡＭＰＬＥ/, `the key printed whole: ${whole}`)
 })
+
+test("a launcher that cannot be followed is refused even without --dir, and one bad branch spoils the launcher", async () => {
+  // Two holes in the fail-safe: the refusal sat inside the `--dir` guard, so
+  // a run that let the folder be inferred never reached it; and the exec walk
+  // kept only absolute targets, so a script with one absolute exec and one
+  // relative dropped the relative one and looked settled.
+  const mk = (dir, line) => {
+    mkdirSync(join(dir, "data"), { recursive: true })
+    writeFileSync(join(dir, ".portable"), "")
+    writeFileSync(join(dir, "data", "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "data", "plugin-auth.json"), JSON.stringify({}))
+    writeFileSync(join(dir, "target"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+    writeFileSync(join(dir, "other"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+    writeFileSync(join(dir, "magpie"), line, { mode: 0o755 })
+    return join(dir, "magpie")
+  }
+  const noDir = mkdtempSync(join(tmpdir(), "msmoli-nodir-"))
+  const mixed = mkdtempSync(join(tmpdir(), "msmoli-mixed-"))
+  try {
+    // no --dir: the folder would be inferred from the script itself, and the
+    // script's target is unnameable — so nothing may be written at all
+    const binA = mk(noDir, `#!/bin/sh\nexec ./target "$@"\n`)
+    const outA = []
+    let spawnedA = false
+    const codeA = await main({
+      argv: ["--to-plugin", "--force", "--magpie", binA],
+      env: {},
+      home: noDir,
+      log: (s) => outA.push(s),
+      spawn: () => {
+        spawnedA = true
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(codeA, 1, outA.join("\n"))
+    assert.equal(spawnedA, false, "an unfollowable launcher must not write even when --dir is inferred")
+    assert.match(outA.join("\n"), /包装脚本/)
+
+    // one absolute branch and one relative: the launcher is not settled
+    // just because the absolute one happens to exist
+    const binB = mk(mixed, `#!/bin/sh\nif [ -x /nonexistent ]; then\n  exec ${join(mixed, "other")} "$@"\nfi\nexec ./target "$@"\n`)
+    const outB = []
+    let spawnedB = false
+    const codeB = await main({
+      argv: ["--dir", join(mixed, "data"), "--to-plugin", "--force", "--magpie", binB],
+      env: {},
+      home: mixed,
+      log: (s) => outB.push(s),
+      spawn: () => {
+        spawnedB = true
+        return { status: 0, stdout: "", stderr: "" }
+      },
+    })
+    assert.equal(codeB, 1, outB.join("\n"))
+    assert.equal(spawnedB, false, "a launcher with an unresolvable branch is not settled")
+    assert.match(outB.join("\n"), /包装脚本/)
+  } finally {
+    rmSync(noDir, { recursive: true, force: true })
+    rmSync(mixed, { recursive: true, force: true })
+  }
+})

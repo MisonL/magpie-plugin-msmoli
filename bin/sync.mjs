@@ -1899,6 +1899,7 @@ const wrapperTarget = (bin) => {
       if (/<</.test(text)) return ""
       let next = ""
       let sawExec = false
+      let unsettled = false
       const targets = new Set()
       for (const line of text.split("\n")) {
         const m = /^\s*exec\s+(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(line)
@@ -1908,11 +1909,19 @@ const wrapperTarget = (bin) => {
         if (!target || target.startsWith("-")) continue
         // a relative target is resolved against the shell's working folder,
         // not the script's: what lies beside the script is a guess, and this
-        // program has no business writing a credential into a guess
-        if (!isAbsolute(target)) continue
+        // program has no business writing a credential into a guess. It also
+        // spoils the whole launcher: a script with one absolute exec and one
+        // relative is two branches, and the branch that runs is not in the
+        // text — dropping the one we could not read and calling the rest
+        // settled was the same mistake as following the wrong branch.
+        if (!isAbsolute(target)) {
+          unsettled = true
+          continue
+        }
         targets.add(target)
         if (existsSync(target)) next = target
       }
+      if (unsettled) return ""
       // Two different exec lines are two possible targets — an if/else, a
       // fallback chain — and which one runs is not something a text read can
       // settle. Unresolved beats following the wrong branch.
@@ -2158,6 +2167,16 @@ export async function main({
   // the magpie.exe beside it, and a check gated on exists(bin) alone skipped
   // itself there — a fixture's --dir was read while the real magpie wrote its
   // own folder.
+  // The refusal comes first, outside the --dir guard: a run that lets the
+  // folder be inferred writes just the same, and an unnameable launcher may
+  // write anywhere — the folder it was inferred from is the script's, and the
+  // script is not what runs.
+  if (!args.dryRun && bin && runnable(bin, os, exists) && isWrapper(bin) && !wrapperTarget(bin)) {
+    log(`✗ --magpie 是包装脚本（${arg(bin)}），但看不出它最终启动哪个 magpie，写入会落在它自己的目录里——那可能不是这里读的目录。`)
+    log(`  读的是：${arg(dir)}`)
+    log(`  请把 --magpie 指到真正的 magpie 二进制（不是启动脚本），或去掉 --magpie 让它自动探测。`)
+    return 1
+  }
   if (!args.dryRun && args.dir && bin && runnable(bin, os, exists)) {
     // A launcher script writes wherever the binary it execs keeps its config,
     // and that folder is not the one this path implies: a shim beside a data/
@@ -2167,17 +2186,6 @@ export async function main({
     // names none has no folder of its own either way, and the guard still asks
     // about the path as before.
     const wrapped = wrapperTarget(bin)
-    // A launcher whose target cannot be named may write anywhere: the folder
-    // this path implies is the script's, and the script is not what runs. The
-    // write is refused instead of aimed at a guess — a token would otherwise
-    // land in a magpie the user did not name, which is the one thing this
-    // guard exists to prevent.
-    if (isWrapper(bin) && !wrapped) {
-      log(`✗ --magpie 是包装脚本（${arg(bin)}），但看不出它最终启动哪个 magpie，写入会落在它自己的目录里——那可能不是这里读的目录。`)
-      log(`  读的是：${arg(args.dir)}`)
-      log(`  请把 --magpie 指到真正的 magpie 二进制（不是启动脚本），或去掉 --magpie 让它自动探测。`)
-      return 1
-    }
     const binDir = findConfigDir({ env, home, os, exists, binPath: wrapped || bin })
     // "" is a mismatch too: the binary has no magpie folder of ours to write
     // to, so it would make one — and that one is not the folder named. Compared
