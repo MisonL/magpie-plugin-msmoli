@@ -462,6 +462,7 @@ test("a 200 that is not JSON is not remembered as the token's site", async () =>
   const real = globalThis.fetch
   let poisoned = true
   let first = true
+  let seen = 0
   globalThis.fetch = async (url) => {
     const u = new URL(url)
     // only the balance is poisoned: the site is learned on the first read,
@@ -495,6 +496,7 @@ test("a transient 500 from one site does not choose it either", async () => {
   const token = "ms-intl-0000-0000-0000-000000000028"
   const real = globalThis.fetch
   let first = true
+  let seen = 0
   globalThis.fetch = async (url) => {
     const u = new URL(url)
     if (first && u.origin === CN_ORIGIN && u.pathname === BALANCE_PATH) {
@@ -4605,6 +4607,7 @@ test("a request cut short by the hook's own deadline does not say 0 seconds", as
         const base = realNow()
         Date.now = () => base
         let first = true
+  let seen = 0
         const real = globalThis.fetch
         globalThis.fetch = async (url, init) => {
           if (first) {
@@ -11083,24 +11086,66 @@ test("a number that merely contains 401 is not a refusal", () => {
   assert.equal(testables.awaitsSignIn({ message: "1401" }), false)
 })
 
-test("the remembered site's own refusal is not drowned by the other site's blip", async () => {
-  // The token's site answered 401 in its own words; the other site then
-  // answered a parsed 404 (a middlebox's page, not ModelScope's). The walk
-  // kept the 404 as the best "answer" and reported it — an error that says
-  // nothing about the sign-in, where the refusal it walked past does. A
-  // refusal of the remembered site is the strongest evidence a walk collects:
-  // report the token as expired instead.
+test("a stale remembered site's 401 does not take a live sign-in down with it", async () => {
+  // Every token answers 401 on the site it does not belong to, so the
+  // remembered site refusing looks exactly like a re-keyed sign-in or a stale
+  // `site` value — an earlier round read it as proof the token was dead, and a
+  // token that was alive on the other site got reported expired (a re-login
+  // prompt for a working login). The refusal only forgets the site; expiry is
+  // said only when no site answers.
   testables.sites.clear()
-  const token = "ms-drown-0000-0000-0000-000000000025"
-  testables.sites.set(token, testables.CN)
+  const token = "ms-stale-0000-0000-0000-000000000025"
+  testables.sites.set(token, testables.INTL)
   const r = await withUrlFetch(
     {
-      [BALANCE_PATH]: bySite({ status: 401, body: {} }, { status: 404, body: { message: "not found" } }),
-      [TX_PATH]: bySite({ status: 401, body: {} }, { status: 404, body: { message: "not found" } }),
+      [BALANCE_PATH]: bySite({ status: 404, body: { message: "not found" } }, { status: 401, body: {} }),
+      [TX_PATH]: bySite({ status: 404, body: { message: "not found" } }, { status: 401, body: {} }),
     },
     async () => auth.usage(async () => ({ type: "api", key: token })),
   )
-  assert.equal(r.signIn, "expired", JSON.stringify(r))
-  assert.equal(testables.sites.get(token), undefined, "the refused site was forgotten")
+  assert.ok(r.error, JSON.stringify(r))
+  assert.notEqual(r.signIn, "expired", "the other site's refusal is not proof: the token may live on this one")
+  assert.equal(testables.sites.get(token), undefined, "the stale site was forgotten")
   testables.sites.clear()
+})
+
+test("a late 401 does not delete the site a concurrent read just confirmed", async () => {
+  // Two reads of one token can overlap (the host asks usage and checkin for
+  // the same account). Both capture the remembered site when they start; one
+  // finishes and confirms a different site; only then does the slow one's 401
+  // from the site it captured arrive. Deleting on arrival dropped the newer
+  // confirmation, and the token then read as unknown for a probe it had
+  // already paid for. The interleaving is simulated at the one point that
+  // matters — the cache changed while the request was in flight — because
+  // timing two real reads was not deterministic.
+  testables.sites.clear()
+  const token = "ms-race-0000-0000-0000-000000000026"
+  testables.sites.set(token, testables.INTL)
+  const real = globalThis.fetch
+  let release
+  const gate = new Promise((res) => (release = res))
+  const J = (o, status = 200) => reply({ status, body: o })
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.host === new URL(INTL_ORIGIN).host) {
+      await gate
+      return J({}, 401)
+    }
+    // the other site fails too: a 200 here would simply re-remember the site
+    // and hide whether the stale 401 deleted the sibling's confirmation
+    return J({ message: "busy" }, 500)
+  }
+  try {
+    const slow = auth.usage(async () => ({ type: "api", key: token }))
+    // let the slow read capture its order and issue its first request
+    await new Promise((r) => setTimeout(r, 0))
+    // the sibling read's confirmation, applied while the request is in flight
+    testables.sites.set(token, testables.CN)
+    release()
+    await slow
+    assert.equal(testables.sites.get(token)?.site, CN_ORIGIN, "the stale 401 must not delete the newer confirmation")
+  } finally {
+    globalThis.fetch = real
+    testables.sites.clear()
+  }
 })

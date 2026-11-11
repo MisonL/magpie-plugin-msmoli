@@ -254,13 +254,6 @@ async function siteRead(token, path, deadline = Infinity) {
   // this token (a stale `site`, a re-keyed sign-in, a middlebox's 404).
   let answer
   let first
-  // the remembered site refused the token in its own words: the strongest
-  // evidence this walk collects. Every other answer is about a reply; this
-  // one is about the sign-in, so it is reported even when the other site gave
-  // a parsed 4xx (a middlebox's 404, a risk-control page) — an error of
-  // theirs says nothing about the login, and the host would retry the same
-  // dead token all day without ever saying so.
-  let refusedOwn
   for (const profile of order) {
     let got
     try {
@@ -283,10 +276,19 @@ async function siteRead(token, path, deadline = Infinity) {
       // Measured: a proxy that answered 401 with its own JSON had the card
       // tell the user the sign-in expired, and a re-login would not have
       // changed the answer.
-      if (profile === known) {
-        sites.delete(token)
-        refusedOwn ??= profile
-      }
+      // A 401 is not evidence the token is dead by itself: every token answers
+      // 401 on the site it does not belong to, so a stale `site` value or a
+      // re-keyed sign-in looks exactly like a revoked token. The walk's own
+      // end says it (no site answered); this branch only forgets the site and
+      // lets the other one answer.
+      //
+      // A sibling read of the same token may have finished in between: this
+      // one captured its order before the other site was known, and its 401
+      // arrives after the sibling confirmed a site. Deleting then drops that
+      // confirmation — the token reads as unknown for a probe it already paid
+      // for, and an expiry decision can land on a live sign-in. The site is
+      // forgotten only while it is still the one in memory.
+      if (profile === known && sites.get(token) === profile) sites.delete(token)
       continue
     }
     if (got.parsed && got.res.status === 200) {
@@ -308,7 +310,6 @@ async function siteRead(token, path, deadline = Infinity) {
     }
     first ??= { answer: { profile, ...got } }
   }
-  if (refusedOwn) throw deadToken(refusedOwn.where)
   if (answer) return answer
   if (first) {
     if ("error" in first) throw first.error
