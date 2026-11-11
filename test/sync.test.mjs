@@ -6207,6 +6207,25 @@ test("a full-width key front with an ASCII body across a space is masked too", (
   assert.match(sentence, / is invalid, please retry\.$/, `the words after it are the text's: ${sentence}`)
 })
 
+test("a key with an ASCII front and a full-width body is masked too", () => {
+  // The mirror of the case above: a key front written in ASCII ("ms-a") with a
+  // body the copy left in full width. The front does not fold, so the fold-only
+  // span started at the body and left the front beside it — the span reads back
+  // over a vendor front as well as forward over an ASCII body.
+  const fw = (s) => Array.from(s, (c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join("")
+  const ms = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  for (const v of [`ms-a ${fw(ms.slice(4))}`, `ms-aa ${fw(ms.slice(5))}`, fw(ms)]) {
+    const out = arg(v)
+    assert.match(out, /…/, `the key printed whole: ${JSON.stringify(out)}`)
+    // the mask keeps the first and last four characters by design; the middle
+    // must not survive
+    assert.doesNotMatch(out, /１１１１－ｂｂｂｂ|1111-bbbb/, `the key's middle printed: ${JSON.stringify(out)}`)
+  }
+  // a following sentence word is not taken: "is" and "invalid" are lower case
+  const s = arg(`ms-a ${fw(ms.slice(4))} is invalid`)
+  assert.match(s, / is invalid$/, `the sentence after the key is the text's: ${s}`)
+})
+
 test("a launcher that cannot be followed is refused even without --dir, and one bad branch spoils the launcher", async () => {
   // Two holes in the fail-safe: the refusal sat inside the `--dir` guard, so
   // a run that let the folder be inferred never reached it; and the exec walk

@@ -1421,7 +1421,10 @@ const foldedSpans = (raw) => {
   // is the sentence's ("… ODNN7EXAMPLE is invalid"), not the key's, so a
   // sentence's words are never taken.
   const isCutGap = (g) => /^[ \t\r\n 　]+$/.test(g)
-  const keyMat = (t) => KEYCHARS.test(t) && !/^[a-z]/.test(t) && !(PROSE.test(t) && !/^[A-Z]+$/.test(t) && !keyedBody(t))
+  // a word that continues the key: key characters and carrying a digit or a
+  // capital. A word of lower-case letters is the sentence's ("… is invalid"),
+  // and "aaa1111-bbbb-…" (a body written in ASCII) carries digits, so it is.
+  const keyMat = (t) => KEYCHARS.test(t) && (/\d/.test(t) || /[A-Z]/.test(t)) && !(PROSE.test(t) && !/^[A-Z]+$/.test(t) && !keyedBody(t))
   const endAt = (w) => w.at + w.text.length
   let spans = 0
   for (let i = 0; i < words.length && spans < 128; i += 1) {
@@ -1439,7 +1442,18 @@ const foldedSpans = (raw) => {
       if (!isCutGap(raw.slice(endAt(words[k - 1]), words[k].at)) || !keyMat(words[k].text)) break
       if (keyishOf(k)) j = k
     }
-    const start = words[i].at
+    // the same reading backward: an ASCII key front ("ms-a") with a full-width
+    // body is one key too, and the front does not fold. A front of a vendor's
+    // shape ("ms-", "sk-") is key material whatever its length.
+    const keyFront = (t) => keyMat(t) || VENDOR.test(t) || /^ms-/i.test(t)
+    let s0 = i
+    for (let k = i - 1; k >= 0 && i - k <= 48 && endAt(words[j]) - words[k].at <= MAX_SPAN; k -= 1) {
+      if (!isCutGap(raw.slice(endAt(words[k]), words[k + 1].at)) || !keyFront(words[k].text)) break
+      const folded = raw.slice(words[k].at, endAt(words[j])).normalize("NFKC")
+      if (!(joinedKey(folded.toLowerCase()) || (folded.length >= 12 && /\d/.test(folded) && argRun(folded) !== folded))) break
+      s0 = k
+    }
+    const start = words[s0].at
     const stop = endAt(words[j])
     const text = raw.slice(start, stop)
     const folded = text.normalize("NFKC")
