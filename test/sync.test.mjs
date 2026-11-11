@@ -5735,6 +5735,39 @@ test("a key the child wrapped at a line break is masked across the lines", () =>
   }
 })
 
+test("a secret with slashes in it, cut by a space, is masked whole", () => {
+  // splitKey's PIECE splits on "/", and its GAP did not accept "/", so the
+  // walk broke at the first slash and the front of an AWS secret cut by a
+  // space reached the terminal: "wJalr…/K7MDENG/bPxRfi CYEXAMPLEKEY" kept its
+  // first 28 characters ("wJalrXUtnFEMI/K7MDENG/bPxRfi") verbatim. The slash
+  // is one of the key's own separators, and isKey already judges the whole.
+  const aws = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  const longest = (text) => {
+    let best = ""
+    for (let i = 0; i < aws.length; i++)
+      for (let j = i + 1; j <= aws.length; j++) {
+        const piece = aws.slice(i, j)
+        if (text.includes(piece) && piece.length > best.length) best = piece
+      }
+    return best
+  }
+  for (const cut of ["wJalrXUtnFEMI/K7MDENG/bPxRfi CYEXAMPLEKEY", "wJalrXUtnFEMI/K7MDENG bPxRfiCYEXAMPLEKEY", "wJalrXUtnFEMI K7MDENG/bPxRfiCYEXAMPLEKEY"]) {
+    for (const text of [arg(`--dir ${cut}`), scrub(`child said ${cut} done`)]) {
+      const kept = longest(text)
+      assert.ok(kept.length < 12, `切在空格处漏了 ${kept.length} 个字符 ${JSON.stringify(kept)}：${JSON.stringify(text)}`)
+    }
+  }
+})
+
+test("a path is not joined across its slashes into a secret", () => {
+  // The reverse of the fix above: adding "/" to splitKey's GAP must not glue a
+  // real path's words into a mask. A path's components are lowercase words with
+  // no digit, so isKey(joined) stays false and the walk does not take it.
+  for (const p of ["/Users/mison/Documents/NewProject", "Users/mison/Documents/work", "src/lib/utils/helpers"]) {
+    assert.equal(arg(`--dir ${p}`), `--dir ${p}`, `a path was masked: ${arg(`--dir ${p}`)}`)
+  }
+})
+
 test("two ms- keys side by side are each masked in the CLI", () => {
   // splitKey joined the two bodies into one, and one mask hid both ends.
   const t1 = "ms-aaaa1111-bbbb-2222-cccc-333344445555"

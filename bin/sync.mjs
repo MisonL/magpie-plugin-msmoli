@@ -873,13 +873,23 @@ function splitKey(s) {
   // (a whole key is one piece, and spacedKey's business), and not a word
   // a piece of capitals is key material, not a word ("AKIAIOSF · ODNN7EXAMPLE"
   // is one key cut in two): the run reading exempts capitals for the same reason
-  const piece = (t) => t.length <= 48 && KEYCHARS.test(t) && !(PROSE.test(t) && !/^[A-Z]+$/.test(t))
+  // a piece of letters that alternates case is key material too ("wJalrXUtnFEMI"
+  // is the front of an AWS secret cut by its slashes and a space): a word
+  // capitalises once ("McDonald"), and the run is only taken when the join
+  // reads as a key, so a sentence's words are still never glued
+  const piece = (t) => t.length <= 48 && KEYCHARS.test(t) && !(PROSE.test(t) && !/^[A-Z]+$/.test(t) && !keyedBody(t))
   // a frame's punctuation ("key=…", "(…)") is read by maskCut, whose head
   // begins after it; joining from the piece's own first character would take
   // the frame for key material ("key=AKIA…" masked from the "k")
   const framed = (t) => !/^[A-Za-z0-9]/.test(t) || /[=:([{,"']/.test(t)
   const MID = /[·•∙‧・]/
   const GAP = /^[ \t\r\n 　·•∙‧・]{1,3}$/
+  // the slash is a key's own separator (an AWS secret: wJalr…/K7MDENG/…), so a
+  // slash gap reads on like a space does — but only when the value does not
+  // start like a path. "/var/folders/hq/q19jry…/T/…" joins into one key-ish
+  // read (the segment carries digits and case), and a path must keep its shape.
+  const SLASH = /^\/{1,3}$/
+  const pathLed = PATHY.test(s) || /^[\\/]/.test(s)
   for (let from = 0; from < pieces.length - 1; from += 1) {
     if (!piece(pieces[from].text) || framed(pieces[from].text)) continue
     // a middot before the piece is a cut the other readings own: their walk
@@ -895,7 +905,7 @@ function splitKey(s) {
     const caption = (t) => /^[A-Z][a-z]{2,}/.test(t) && !VENDOR.test(t)
     for (let k = from + 1; k < pieces.length && k - from <= 48 && joined.length < 96; k += 1) {
       const gapHere = s.slice(pieces[k - 1].at + pieces[k - 1].text.length, pieces[k].at)
-      if (!GAP.test(gapHere)) break
+      if (!GAP.test(gapHere) && !(SLASH.test(gapHere) && !pathLed)) break
       if (MID.test(gapHere) && !VENDOR.test(pieces[from].text) && caption(pieces[k - 1].text) && caption(pieces[k].text)) break
       // a piece that opens its own front is a second key, not the first one's body:
       // joining them hid both ends behind one mask ("ms-a…5555")
