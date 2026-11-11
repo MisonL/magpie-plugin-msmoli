@@ -5569,3 +5569,36 @@ test("a preset key that is not a string is not an empty preset", () => {
     assert.equal(planToPreset({ preset, accounts: [{ name: "msmoli", token: B }], force: false }).action, "run", JSON.stringify(preset))
   }
 })
+
+test("--status says it did not execute on a noop or refuse plan too", async () => {
+  // --status promises "report only": the annotation is what makes that visible.
+  // It was printed only when the plan was going to run, so a noop ("✓ 无需操作")
+  // and a refuse ("✗ …") came back with no sign that --status had been honoured
+  // — and a reader scripting the output could not tell a report from a run.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-status-anno-"))
+  try {
+    // a noop: both sides hold the same key
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A)] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: A } }))
+    const noop = []
+    const codeNoop = await main({ argv: ["--dir", dir, "--status", "--magpie", "/nonexistent"], log: (s) => noop.push(s) })
+    assert.equal(codeNoop, 0)
+    assert.ok(noop.join("\n").includes("未执行"), `a noop under --status carries no annotation:\n${noop.join("\n")}`)
+    // and without --status there is no annotation to give: a bare run's noop is
+    // the answer itself, and printing "以上是计划" over it would say the user
+    // asked for a report they did not
+    const bare = []
+    const codeBare = await main({ argv: ["--dir", dir, "--magpie", "/nonexistent"], log: (s) => bare.push(s) })
+    assert.equal(codeBare, 0)
+    assert.ok(!bare.join("\n").includes("未执行"), `a noop without --status carries the annotation:\n${bare.join("\n")}`)
+
+    // a refuse: the two sides differ and --force is not given
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({ msmoli: { type: "api", key: B } }))
+    const refuse = []
+    const codeRefuse = await main({ argv: ["--dir", dir, "--status", "--to-preset", "--magpie", "/nonexistent"], log: (s) => refuse.push(s) })
+    assert.equal(codeRefuse, 1, "a refusal still exits 1")
+    assert.ok(refuse.join("\n").includes("未执行"), `a refusal under --status carries no annotation:\n${refuse.join("\n")}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

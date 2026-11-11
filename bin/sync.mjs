@@ -1947,7 +1947,14 @@ export async function main({
 
   const plan = args.to === "preset" ? planToPreset({ preset, accounts, force: args.force }) : planToPlugin({ preset, accounts, force: args.force })
   for (const line of plan.lines) log(line)
-  if (plan.action !== "run") return plan.action === "noop" ? 0 : 1
+  // --status promises "report only", and the annotation is what says so. It has
+  // to cover the noop and refuse answers too: they are conclusions, not plans,
+  // and a reader scripting the output could not otherwise tell a report from a
+  // run that had happened. The exit code still carries the verdict.
+  if (plan.action !== "run") {
+    if (args.status) log(`(--status：以上是计划，未执行)`)
+    return plan.action === "noop" ? 0 : 1
+  }
 
   // --status means "report only", and it comes before the direction check: with
   // only --status it should say "this is the plan", not tell the user to pick
