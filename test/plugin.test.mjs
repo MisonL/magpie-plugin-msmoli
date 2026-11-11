@@ -11305,6 +11305,134 @@ test("a courtesy page that refuses the token does not undo the claim", async () 
   }
 })
 
+test("a courtesy page that fails leaves the countdown a floor, not the answer", async () => {
+  // The numbers are proven on page 1, so page 2 is read for the countdown
+  // alone. That page failing does not touch the numbers — but it also does not
+  // finish the scan, and the five failure branches answered `scanDone` true:
+  // the card then named a later expiry as if the scan had reached its end,
+  // while a grant that expires sooner could sit on the page that failed.
+  const first = [day(), ...Array.from({ length: 48 }, (_, i) => ({ gmt_created: today, type: "EARN", rule_key: `fill_${i}`, title: `t${i}`, total_amount: 1, count: 1 })), spend(0, 1, daysBack(1))]
+  const shapes = {
+    "500": () => ({ status: 500, body: { success: false } }),
+    "body that is not the ledger": () => ({ status: 200, body: { success: true, data: { records: "nope" } } }),
+    "total that contradicts its rows": () => ({ status: 200, body: { success: true, data: { records: [spend(0, 1, daysBack(1))], total: 1 } } }),
+  }
+  const base = {
+    [BALANCE_PATH]: { body: { success: true, data: { available_balance: 1 } } },
+    [TX_PATH]: { body: { success: true, data: { records: first } } },
+  }
+  const run = (responses) => withFetch(responses, async () => auth.usage(async () => ({ type: "api", key: "ms-courtesy-miss-0000-0000-0000000045" })))
+  for (const [tag, second] of Object.entries(shapes)) {
+    const r = await run({ ...base, "/openapi/v1/magicubes/transactions?page=2&page_size=50": second() })
+    assert.ok(!r.error, `${tag}: ${r.error}`)
+    assert.match(r.windows[0].display, /到期时间可能更早/, `${tag}: a page that failed is not a scan that ended: ${r.windows[0].display}`)
+  }
+  // a transport failure is the fetch itself rejecting for that page, not a
+  // response the plugin can read: the other shapes cannot express it
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 1 } } })
+    if (u.searchParams.get("page") === "2") throw new Error("socket hang up")
+    return reply({ body: { success: true, data: { records: first } } })
+  }
+  try {
+    const r = await auth.usage(async () => ({ type: "api", key: "ms-courtesy-miss-0000-0000-0000000045" }))
+    assert.ok(!r.error, `transport error: ${r.error}`)
+    assert.match(r.windows[0].display, /到期时间可能更早/, `transport error: a page that failed is not a scan that ended: ${r.windows[0].display}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a token refused on a courtesy page is reported expired", async () => {
+  // The courtesy page's 401 is not thrown (the numbers stand) — and it was
+  // then swallowed whole: the card kept the account looking signed in, and
+  // only the next poll said expired. The refusal is the token being refused.
+  const first = [day(), ...Array.from({ length: 48 }, (_, i) => ({ gmt_created: today, type: "EARN", rule_key: `fill_${i}`, title: `t${i}`, total_amount: 1, count: 1 })), spend(0, 1, daysBack(1))]
+  const r = await withFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 1 } } },
+      [TX_PATH]: { body: { success: true, data: { records: first } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { status: 401, body: { error: "invalid access token" } },
+    },
+    async () => auth.usage(async () => ({ type: "api", key: "ms-courtesy-401-0000-000-000000000046" })),
+  )
+  assert.ok(!r.error, r.error)
+  assert.equal(r.signIn, "expired", "the refusal on the courtesy page is the token's own")
+  // and the numbers the page was read for still stand
+  // the day's grant (200) and the 48 one-credit fills beside it
+  assert.match(r.windows[0].display, /领 248/, `the claim's numbers were kept: ${r.windows[0].display}`)
+})
+
+test("a page cap on a page that already holds an older row is a finished scan", async () => {
+  // The countdown needs a row older than yesterday to prove no running grant
+  // can follow. A page that carries one is that proof, but the page-cap branch
+  // never asked: it cut the scan with `scanDone` false and the card printed
+  // "到期时间可能更早" for a window the page in hand had already closed.
+  const fill = (i) => ({ gmt_created: today, type: "EARN", rule_key: `fill_${i}`, title: `t${i}`, total_amount: 1, count: 1 })
+  const old = spend(1, 1, daysBack(3))
+  // pages 1-4 hold only today's rows (no window closed yet); page 5 is full
+  // and carries the older row, and the cap is what stops the walk on it
+  const rows = (n) => Array.from({ length: 50 }, (_, i) => fill(n * 100 + i))
+  // today's grant is on page 1, so the card has an expiry to count down to
+  const routes = { [BALANCE_PATH]: { body: { success: true, data: { available_balance: 1 } } }, [TX_PATH]: { body: { success: true, data: { records: [day(), ...rows(1).slice(1)] } } } }
+  for (let n = 2; n <= 4; n += 1) routes[`/openapi/v1/magicubes/transactions?page=${n}&page_size=50`] = { body: { success: true, data: { records: rows(n) } } }
+  routes["/openapi/v1/magicubes/transactions?page=5&page_size=50"] = { body: { success: true, data: { records: [...Array.from({ length: 49 }, (_, i) => fill(500 + i)), old] } } }
+  const r = await withFetch(routes, async () => auth.usage(async () => ({ type: "api", key: "ms-cap-0000-0000-0000-000000000043" })))
+  assert.ok(!r.error, r.error)
+  assert.doesNotMatch(r.windows[0].display, /到期时间可能更早/, `the page in hand closed the window: ${r.windows[0].display}`)
+})
+
+test("a page cap on pages that reach yesterday but no further is a cut scan", async () => {
+  // The mirror of the test above: the rows reached back into yesterday and
+  // hold nothing older, so an older page can still carry a grant that expires
+  // sooner. The cap cuts the scan there, and the card has to say the time it
+  // shows is a floor.
+  const fill = (i) => ({ gmt_created: today, type: "EARN", rule_key: `fill_${i}`, title: `t${i}`, total_amount: 1, count: 1 })
+  const yday = (n, i) => ({ ...spend(1, 1, daysBack(1)), rule_key: `spend_${n}_${i}` })
+  const rows = (n) => Array.from({ length: 50 }, (_, i) => yday(n, i))
+  const routes = { [BALANCE_PATH]: { body: { success: true, data: { available_balance: 1 } } }, [TX_PATH]: { body: { success: true, data: { records: [day(), ...rows(1).slice(1)] } } } }
+  for (let n = 2; n <= 6; n += 1) routes[`/openapi/v1/magicubes/transactions?page=${n}&page_size=50`] = { body: { success: true, data: { records: rows(n) } } }
+  const r = await withFetch(routes, async () => auth.usage(async () => ({ type: "api", key: "ms-cap-0000-0000-0000-000000000044" })))
+  assert.ok(!r.error, r.error)
+  assert.match(r.windows[0].display, /到期时间可能更早/, `the cut scan is a floor: ${r.windows[0].display}`)
+})
+
+test("a full page carrying one already-counted row is not a short page", async () => {
+  // The page-end proof asks whether the page had room to spare, and it was
+  // asked of the rows this walk *counted* rather than the rows the page
+  // carried: one repeat on a full page left 49, "less than 50" ended the day,
+  // and the rest of the ledger — including today's grant — was never read.
+  // A page's own row count is what says whether the ledger was cut.
+  const dup = spend(3, 1, today)
+  const fill = (i) => ({ gmt_created: today, type: "EARN", rule_key: `fill_${i}`, title: `t${i}`, total_amount: 1, count: 1 })
+  const first = [ ...Array.from({ length: 49 }, (_, i) => fill(i)), dup]
+  const second = [dup, ...Array.from({ length: 49 }, (_, i) => fill(100 + i))]
+  const third = [day({ total_amount: 200 })]
+  const pages = []
+  const r = await withFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 1 } } },
+      [TX_PATH]: { body: { success: true, data: { records: first } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: second } } },
+      "/openapi/v1/magicubes/transactions?page=3&page_size=50": { body: { success: true, data: { records: third } } },
+    },
+    async () => {
+      const seen = globalThis.fetch
+      globalThis.fetch = async (url, init) => {
+        if (new URL(url).pathname.endsWith("/transactions")) pages.push(Number(new URL(url).searchParams.get("page") ?? 1))
+        return seen(url, init)
+      }
+      return auth.usage(async () => ({ type: "api", key: "ms-dup-0000-0000-0000-000000000042" }))
+    },
+  )
+  assert.ok(!r.error, r.error)
+  assert.ok(pages.includes(3), `the walk stopped on the repeat: ${pages}`)
+  // 49 fills on page 1, 49 more on page 2, and the 200-credit grant on page 3
+  assert.match(r.windows[0].display, /领 298/, `the grant on page 3 was never counted: ${r.windows[0].display}`)
+})
+
 test("the page cap on a scan whose numbers are proven does not fail the check-in", async () => {
   // The countdown scan keeps reading past a day that is already whole. When
   // the page cap cut that scan, `complete` was left false and the check-in

@@ -2396,7 +2396,7 @@ async function todayEarn(token, deadline, opts = {}) {
   gate(profile, res, body, parsed, token, "账单查询失败")
   const day = todayCN()
   const first = recordsOf(body)
-  const { all, pages, complete, scanComplete, last, seenPages, seenRows, total } = await dayRows(profile, token, day, first, deadline, body, opts)
+  const { all, pages, complete, scanComplete, last, seenPages, seenRows, total, refused } = await dayRows(profile, token, day, first, deadline, body, opts)
   return {
     profile,
     day,
@@ -2404,6 +2404,7 @@ async function todayEarn(token, deadline, opts = {}) {
     pages,
     complete,
     scanComplete,
+    refused,
     last,
     seenPages,
     seenRows,
@@ -2505,9 +2506,20 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
   // be proven whole while this is still open: the card then shows the
   // earliest expiry it saw and says the scan was cut short.
   let scanDone = false
+  // the token was refused on a courtesy page: the numbers stand, and the
+  // account is expired (the caller reports it)
+  let refused = false
   // the walk ended on a page that reached back past the day: the only ending
   // where another page can still hold a running grant
   let endedByOlder = false
+  // no row on the page is older than yesterday: a page that reached back past
+  // the day and holds none of those closes the countdown's window, because a
+  // running grant is at most 24 hours old and the rows are newest first
+  const noOlderThanYesterday = (rs) =>
+    !rs.some((r) => {
+      const s = dayOf(r)
+      return isDay(s) && s < yesterday
+    })
   for (;;) {
     const older = rows.some((r) => {
       const s = dayOf(r)
@@ -2531,6 +2543,11 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
     // total the rows account for. Once proven, a cut costs only the scan.
     if (total === null && rows.length >= PAGE_SIZE && (pages > DAY_PAGES || deadline <= Date.now())) {
       complete = dayDone
+      // the page the cap stopped on can already be the window's end: it
+      // reached past the day and holds nothing older than yesterday, which is
+      // the same evidence the walk below asks for. Without this the card
+      // printed "到期时间可能更早" for a window the rows in hand had closed.
+      scanDone = !expiry || !endedByOlder || !noOlderThanYesterday(rows)
       break
     }
     // a page with room to spare is the end — unless `total` still promises
@@ -2568,10 +2585,7 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
     try {
       got = await json(profile.site, token, `${TXNS}?page=${pages + 1}&page_size=${PAGE_SIZE}`, deadline)
     } catch {
-      if (dayDone) {
-        complete = true
-        scanDone = true
-      }
+      if (dayDone) complete = true
       break
     }
     const { res } = got
@@ -2587,16 +2601,17 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
       // did when the walk stopped before this page at all
       if (dayDone) {
         complete = true
-        scanDone = true
+        // a refusal on a courtesy page ends the scan without touching the
+        // numbers — but the scan did not reach its end, and the token *was*
+        // refused: the card says the expiry it shows is a floor, and the
+        // account is reported expired instead of the refusal being swallowed
+        refused = true
         break
       }
       throw deadToken(profile.where)
     }
     if (!got.parsed || res.status !== 200 || !okOf(got.body)) {
-      if (dayDone) {
-        complete = true
-        scanDone = true
-      }
+      if (dayDone) complete = true
       break
     }
     // a page whose shape this walk cannot read — no data, records not a list —
@@ -2614,17 +2629,11 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
       // and cannot end the walk on that number.
       pageTotal = totalOf(got.body, raw)
     } catch {
-      if (dayDone) {
-        complete = true
-        scanDone = true
-      }
+      if (dayDone) complete = true
       break
     }
     if (pageTotal.contradicted) {
-      if (dayDone) {
-        complete = true
-        scanDone = true
-      }
+      if (dayDone) complete = true
       break
     }
     // the page's own `total` is the ledger's count as the server sees it now;
@@ -2695,9 +2704,12 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
       complete = dayDone || (total !== null && all.length >= total)
       break
     }
-    // the page's own rows still drive the page-end checks: a page that was
-    // full of repeats and updates says nothing about room to spare
-    rows = fresh.length ? fresh : raw
+    // the page-end proof asks the page that the server sent, not the rows this
+    // walk counted: one repeat on a full page left 49 counted rows, "less than
+    // 50" read as room to spare, and the rest of the ledger — today's grant
+    // included — was never read. A page of nothing but repeats has its own
+    // ending above (an empty or repeated page is the end of the ledger).
+    rows = raw
     all.push(...fresh)
   }
   // `last` is the page the walk stopped on, for a following page-reader to
@@ -2714,6 +2726,7 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
     // whether the countdown's own scan reached its end (see scanDone above);
     // a walk that was not asked to scan at all never started one
     scanComplete: !expiry || scanDone,
+    refused,
     total,
     last: complete || !rows.length ? null : rows,
     seenPages,
@@ -3545,6 +3558,10 @@ export async function MsmoliPlugin(input) {
             plan: profile.plan,
             user: nameText(names.get(token) ?? "", token),
             balance: `${available} 魔粒可用`,
+            // a token refused on a courtesy page is refused: the numbers that
+            // page was read for stand, and the card says what the next poll
+            // would say anyway — the account needs signing in again
+            ...(walked.refused ? { signIn: "expired" } : {}),
             windows: [
               {
                 name: "魔粒",
