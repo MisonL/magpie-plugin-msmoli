@@ -5548,3 +5548,24 @@ test("--to-preset tells an unreadable entry from a missing login", () => {
   const none = planToPreset({ preset: presetOf(A), accounts: [], force: true })
   assert.ok(/没有登录/.test(none.lines.join("\n")), none.lines.join("\n"))
 })
+
+test("a preset key that is not a string is not an empty preset", () => {
+  // keyedOf answers "no key" for a key that is any other type, so --to-preset
+  // treated a providers.json entry carrying {"key": 12345} (or a null) as a
+  // slot with nothing to lose: it planned the write without --force, and the
+  // "现在没有 key，会被填上" line claimed the entry was empty when it was not.
+  // magpie itself would refuse or replace whatever is there — either way the
+  // user's --force decision was skipped.
+  for (const key of [12345, null, { token: A }, ["ms-x"], true]) {
+    const preset = { ...presetOf(A), key }
+    const p = planToPreset({ preset, accounts: [{ name: "msmoli", token: B }], force: false })
+    assert.equal(p.action, "refuse", `key=${JSON.stringify(key)} was written without --force: ${p.action}`)
+    assert.equal(p.cmds.length, 0, `key=${JSON.stringify(key)}: a write was planned`)
+    assert.ok(/读不出|不是字符串/.test(p.lines.join("\n")), `key=${JSON.stringify(key)}: ${p.lines.join(" | ")}`)
+  }
+  // the controls: a slot with nothing in it is still a destination — no key
+  // field at all, and the empty string
+  for (const preset of [{ id: "modelscope", preset: "modelscope" }, { ...presetOf(A), key: "" }]) {
+    assert.equal(planToPreset({ preset, accounts: [{ name: "msmoli", token: B }], force: false }).action, "run", JSON.stringify(preset))
+  }
+})

@@ -1493,6 +1493,18 @@ export function planToPreset({ preset, accounts, force }) {
     lines.push(`  要加的话：magpie provider add ${PRESET} <key>（工具不代建 provider）。`)
     return { action: "refuse", lines, cmds: [] }
   }
+  // A key field that is there but is not a string is not an empty slot. keyedOf
+  // answers "no key" for any other type, and this direction treats that as a
+  // preset with nothing to lose — so {"key": null} was written over without
+  // --force, and {"key": 12345} was announced as "现有 key（（不可用））会被整条
+  // 替换". Either way the user's replacement decision was skipped or unreadable.
+  // Absent and "" are the two spellings of a slot with nothing to lose, and
+  // both have a type of "string" (or undefined): the test is the type alone.
+  if (preset.key !== undefined && typeof preset.key !== "string") {
+    lines.push(`✗ 内置预设 ${arg(preset.id)} 的 key 不是字符串（${preset.key === null ? "null" : typeof preset.key}），读不出它现在是什么。`)
+    lines.push(`  请先修好 providers.json 里那一项（或删掉它），再重跑：magpie provider key ${arg(preset.id)} <key>。`)
+    return { action: "refuse", lines, cmds: [] }
+  }
   // The plugin refuses a key with anything but visible ASCII in it (tokenOf,
   // it would go out in an Authorization header). Writing such a key into the
   // preset would break chat requests while this tool reported success — and
