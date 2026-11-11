@@ -2487,21 +2487,35 @@ async function dayRows(profile, token, day, first, deadline, body) {
   })
   let { total, contradicted } = totalOf(body, first)
   let complete = false
+  // Two questions end this walk, and they are not the same one. The day's
+  // numbers are proven complete by a page older than the day, a total the rows
+  // account for, or a page with room to spare. The card's countdown needs
+  // more: a daily grant runs 24 hours, so yesterday's grant can be the soonest
+  // to expire, and only a row older than yesterday proves that none can
+  // follow. Once the numbers are proven the walk keeps reading — bounded by
+  // the page cap and the budget — for that scan alone, and a page that fails
+  // there ends the scan without touching the numbers: a 401 met after the
+  // claim still does not undo the claim.
+  const dayOf = (r) => String(r?.gmt_created ?? "").slice(0, 10)
+  const yesterday = new Date(Date.parse(`${day}T00:00:00Z`) - 86400e3).toISOString().slice(0, 10)
+  let dayDone = false
+  // the walk ended on a page that reached back past the day: the only ending
+  // where another page can still hold a running grant
+  let endedByOlder = false
   for (;;) {
     const older = rows.some((r) => {
-      const s = String(r?.gmt_created ?? "").slice(0, 10)
+      const s = dayOf(r)
       return isDay(s) && s < day
     })
-    if (older) {
-      complete = true
-      break
-    }
-    // The number the page printed beside its rows is the whole ledger's count:
-    // when the rows in hand already account for it, there is no next page to
-    // read, whether this page was full or not.
-    if (!contradicted && total !== null && all.length >= total) {
-      complete = true
-      break
+    if (!dayDone) {
+      if (older) {
+        dayDone = true
+        endedByOlder = true
+      }
+      // The number the page printed beside its rows is the whole ledger's
+      // count: when the rows in hand already account for it, there is no next
+      // page to read for the day's numbers, whether this page was full or not.
+      else if (!contradicted && total !== null && all.length >= total) dayDone = true
     }
     // A full page with no `total` that the walk stopped reading (the page cap,
     // the budget) is a truncation, not an end: the ledger may continue past
@@ -2516,15 +2530,28 @@ async function dayRows(profile, token, day, first, deadline, body) {
     // a `total` below the rows beside it is the ledger contradicting itself:
     // it proves neither "this is the end" nor "there is more", so the page is
     // walked on like a short page with no total at all
-    if (rows.length < PAGE_SIZE && !contradicted && (total === null || all.length >= total)) {
-      complete = true
-      break
-    }
-    if (pages > DAY_PAGES || deadline <= Date.now()) break
+    if (!dayDone && rows.length < PAGE_SIZE && !contradicted && (total === null || all.length >= total)) dayDone = true
+    if (dayDone) {
+      // A near-running grant must have landed within the last 24 hours, so it
+      // sits in yesterday's rows or today's. Another page is worth reading
+      // only when this one reached back into yesterday and holds nothing older
+      // than it: the numbers' own endings (a total the rows account for, a
+      // page with room to spare) mean the ledger was read to its end already
+      // and cost no second read.
+      const couldRun = endedByOlder && !rows.some((r) => {
+        const s = dayOf(r)
+        return isDay(s) && s < yesterday
+      })
+      if (!couldRun || pages > DAY_PAGES || deadline <= Date.now()) {
+        complete = true
+        break
+      }
+    } else if (pages > DAY_PAGES || deadline <= Date.now()) break
     let got
     try {
       got = await json(profile.site, token, `${TXNS}?page=${pages + 1}&page_size=${PAGE_SIZE}`, deadline)
     } catch {
+      if (dayDone) complete = true
       break
     }
     const { res } = got
@@ -2534,8 +2561,20 @@ async function dayRows(profile, token, day, first, deadline, body) {
     // token being refused, and swallowing it here kept a confirmed expiry off
     // the card and out of the check-in's answer: it goes through the same
     // dead-token throw the first page's gate uses.
-    if (got.parsed && res.status === 401 && awaitsSignIn(got.body)) throw deadToken(profile.where)
-    if (!got.parsed || res.status !== 200 || !okOf(got.body)) break
+    if (got.parsed && res.status === 401 && awaitsSignIn(got.body)) {
+      // a refusal on a courtesy page (the numbers already proven) ends the
+      // scan without touching them: the claim it was read for stands, as it
+      // did when the walk stopped before this page at all
+      if (dayDone) {
+        complete = true
+        break
+      }
+      throw deadToken(profile.where)
+    }
+    if (!got.parsed || res.status !== 200 || !okOf(got.body)) {
+      if (dayDone) complete = true
+      break
+    }
     // a page whose shape this walk cannot read — no data, records not a list —
     // is a page it failed to read, the same as a 500 on it: the walk stops with
     // the rows it has and `complete` false, so the card says the number is low
@@ -2551,9 +2590,13 @@ async function dayRows(profile, token, day, first, deadline, body) {
       // and cannot end the walk on that number.
       pageTotal = totalOf(got.body, raw)
     } catch {
+      if (dayDone) complete = true
       break
     }
-    if (pageTotal.contradicted) break
+    if (pageTotal.contradicted) {
+      if (dayDone) complete = true
+      break
+    }
     // the page's own `total` is the ledger's count as the server sees it now;
     // a ledger that grew between the reads printed 51 on the first page and 52
     // on the second, and the walk ended on the first page's number with one
@@ -2568,7 +2611,7 @@ async function dayRows(profile, token, day, first, deadline, body) {
     // printed, is the ledger contradicting itself — 50 read, then a page
     // claiming 52 while the rows in hand pass it — and adopting it would end
     // the walk on the number it just refuted. The walk stops here, incomplete.
-    if (pageTotal.said !== null) {
+    if (!dayDone && pageTotal.said !== null) {
       if (pageTotal.said < all.length || (total !== null && pageTotal.said < total)) break
       total = pageTotal.said
     }
@@ -2578,7 +2621,7 @@ async function dayRows(profile, token, day, first, deadline, body) {
     // being ignored, and summing it again would inflate the day's numbers.
     const stamp = stable(raw)
     if (!raw.length || seenPages.has(stamp)) {
-      complete = !raw.length && total === null ? true : total !== null && all.length >= total
+      complete = dayDone || (!raw.length && total === null ? true : total !== null && all.length >= total)
       break
     }
     seenPages.add(stamp)
@@ -2613,7 +2656,7 @@ async function dayRows(profile, token, day, first, deadline, body) {
     if (!fresh.length && !changed) {
       // every row on this page was already counted: the window moved, not the
       // ledger
-      complete = total !== null && all.length >= total
+      complete = dayDone || (total !== null && all.length >= total)
       break
     }
     // the page's own rows still drive the page-end checks: a page that was

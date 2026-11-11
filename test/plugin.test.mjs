@@ -11255,3 +11255,52 @@ test("a parsed 429 or 5xx outranks the other site's transport error, in either o
   assert.match(await say(slow, dead), /too many requests/)
   testables.sites.clear()
 })
+
+test("a still-running grant on the page past yesterday is not missed by the countdown", async () => {
+  // The day scan stopped at the first page holding a row older than today —
+  // but a grant that landed yesterday runs for 24 hours and can expire before
+  // today's own. When the page boundary fell right after a yesterday spend,
+  // that grant sat on the next page, the walk never read it, and the
+  // countdown pointed at tomorrow. Only a page holding nothing from yesterday
+  // or today proves no running grant can follow.
+  const fill = (i) => ({ gmt_created: today, type: "EARN", rule_key: `fill_${i}`, title: `t${i}`, total_amount: 1, count: 1 })
+  const page1 = [...Array.from({ length: 49 }, (_, i) => fill(i)), spend(1, 1, daysBack(1))]
+  const page2 = [day({ gmt_created: daysBack(1) })]
+  const r = await withFetch(
+    {
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 1 } } },
+      [TX_PATH]: { body: { success: true, data: { records: page1, total: 50 } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: page2 } } },
+    },
+    async () => auth.usage(async () => ({ type: "api", key: "ms-ygrant-0000-0000-0000-00000000003" })),
+  )
+  assert.ok(!r.error, r.error)
+  // day()'s own expire_at is "${tomorrow} 00:00:24" Beijing — 16:00:24Z a day earlier
+  assert.match(r.windows[0].resetsAt, /T16:00:24\.000Z$/, JSON.stringify(r.windows[0]))
+})
+
+test("a courtesy page that refuses the token does not undo the claim", async () => {
+  // Reading one more page for the countdown must not turn a claimed day into
+  // failed: before this, the walk stopped before that page at all, so a 401
+  // met on it was never seen. The numbers were proven on the page before.
+  const fill = (i) => ({ gmt_created: today, type: "EARN", rule_key: `fill_${i}`, title: `t${i}`, total_amount: 1, count: 1 })
+  const page1 = [day(), ...Array.from({ length: 48 }, (_, i) => fill(i)), spend(1, 1, daysBack(1))]
+  const pages = []
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    if (u.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 1 } } })
+    const n = Number(u.searchParams.get("page") ?? 1)
+    pages.push(n)
+    if (n === 1) return reply({ body: { success: true, data: { records: page1 } } })
+    return reply({ status: 401, body: {} })
+  }
+  try {
+    const c = await auth.checkin(async () => ({ type: "api", key: "ms-courtesy-0000-0000-0000-0000004" }))
+    assert.notEqual(c.outcome, "failed", JSON.stringify(c))
+    assert.equal(c.credit, 200, "the claim stands")
+  } finally {
+    globalThis.fetch = real
+  }
+})
