@@ -2544,10 +2544,14 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
     if (total === null && rows.length >= PAGE_SIZE && (pages > DAY_PAGES || deadline <= Date.now())) {
       complete = dayDone
       // the page the cap stopped on can already be the window's end: it
-      // reached past the day and holds nothing older than yesterday, which is
+      // reached past the day and holds a row older than yesterday, which is
       // the same evidence the walk below asks for. Without this the card
       // printed "到期时间可能更早" for a window the rows in hand had closed.
-      scanDone = !expiry || !endedByOlder || !noOlderThanYesterday(rows)
+      // A page of nothing but today's rows closes nothing — the cap cut the
+      // walk before yesterday's grants were read, and the scan is a floor —
+      // and neither does one that reached yesterday but stopped short of an
+      // older row: the next page can still carry one that expires sooner.
+      scanDone = !expiry || (endedByOlder && !noOlderThanYesterday(rows))
       break
     }
     // a page with room to spare is the end — unless `total` still promises

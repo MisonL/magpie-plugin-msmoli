@@ -11384,6 +11384,21 @@ test("a page cap on a page that already holds an older row is a finished scan", 
   assert.doesNotMatch(r.windows[0].display, /到期时间可能更早/, `the page in hand closed the window: ${r.windows[0].display}`)
 })
 
+test("a page cap reached on a page of today's rows is a cut scan", async () => {
+  // The cap can stop the walk while every row in hand is from today: yesterday's
+  // grants — which run for 24 hours and can expire before today's — were never
+  // read. The card must not name a later time as settled there.
+  const fill = (i) => ({ gmt_created: today, type: "EARN", rule_key: `fill_${i}`, title: `t${i}`, total_amount: 1, count: 1 })
+  const rows = (n) => Array.from({ length: 50 }, (_, i) => fill(n * 100 + i))
+  const routes = { [BALANCE_PATH]: { body: { success: true, data: { available_balance: 1 } } }, [TX_PATH]: { body: { success: true, data: { records: [day(), ...rows(1).slice(1)] } } } }
+  for (let n = 2; n <= 6; n += 1) routes[`/openapi/v1/magicubes/transactions?page=${n}&page_size=50`] = { body: { success: true, data: { records: rows(n) } } }
+  const r = await withFetch(routes, async () => auth.usage(async () => ({ type: "api", key: "ms-cap-0000-0000-0000-000000000047" })))
+  assert.ok(!r.error, r.error)
+  // the numbers are a floor too: the day's rows were cut off by the same cap
+  assert.match(r.windows[0].display, /账单未读完，数字偏低/, `the numbers are a floor: ${r.windows[0].display}`)
+  assert.match(r.windows[0].display, /到期时间可能更早/, `the scan was cut before yesterday: ${r.windows[0].display}`)
+})
+
 test("a page cap on pages that reach yesterday but no further is a cut scan", async () => {
   // The mirror of the test above: the rows reached back into yesterday and
   // hold nothing older, so an older page can still carry a grant that expires
