@@ -2665,9 +2665,12 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
     const stamp = stable(raw)
     if (!raw.length || seenPages.has(stamp)) {
       complete = dayDone || (!raw.length && total === null ? true : total !== null && all.length >= total)
-      // an empty or repeated page is the end of the ledger: no running grant
-      // can follow it either
-      scanDone = true
+      // an empty page is the end of the ledger: no running grant can follow it.
+      // A repeated page is the server ignoring the page number — the rows are
+      // the ones already read, and a grant older than them (which runs 24 hours
+      // and can expire sooner) may sit on a page the walk never reached, so the
+      // countdown stays a floor there.
+      scanDone = !raw.length
       break
     }
     seenPages.add(stamp)

@@ -10185,6 +10185,33 @@ test("ordinary names still reach the card and are written back", async () => {
   }
 })
 
+test("a page the server repeats does not settle the countdown", async () => {
+  // A repeated page means the server is ignoring the page number, not that the
+  // ledger ends there: the day's numbers the walk already has are the honest
+  // answer, but a grant older than the repeat — which runs 24 hours and can
+  // expire sooner — may sit on a page the walk never reached. Claiming the scan
+  // done there named a later expiry as settled.
+  const token = "ms-repxscan-0000-0000-0000-00000000ab"
+  const rows = [day(), ...Array.from({ length: 49 }, (_, i) => ({ ...spend(1, i + 1, today), rule_key: `fill_${i}` }))]
+  const pages = []
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 4 } } })
+    const n = Number(u.searchParams.get("page"))
+    pages.push(n)
+    // page 2 and beyond repeat page 1: the server ignores the page number
+    return reply({ body: { success: true, data: { records: rows } } })
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: token }))
+    assert.ok(!u.error, u.error)
+    assert.match(u.windows[0].display, /到期时间可能更早/, `a repeated page settled the countdown: ${u.windows[0].display}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("a page repeated with its fields in another order is the same page", async () => {
   // JSON.stringify keeps insertion order, so a server that serialises the same
   // rows with the keys in a different order made them read as new pages and
