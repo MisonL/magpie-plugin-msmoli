@@ -1413,13 +1413,34 @@ const foldedSpans = (raw) => {
   // full-width comma folds word by word, and one span over all of it was the
   // quadratic reading this replaced)
   const MAX_SPAN = 96
+  // a word of key material after the folded span continues the key: a
+  // full-width front ("ＡＫＩＡＩＯＳＦ") with its ASCII body ("ODNN7EXAMPLE") is
+  // one key cut by the copy, and the body does not fold, so the fold-only span
+  // stopped at the front and the body reached the terminal. Joining is gated by
+  // the same keyish test below, and a word that starts with a lowercase letter
+  // is the sentence's ("… ODNN7EXAMPLE is invalid"), not the key's, so a
+  // sentence's words are never taken.
+  const isCutGap = (g) => /^[ \t\r\n 　]+$/.test(g)
+  const keyMat = (t) => KEYCHARS.test(t) && !/^[a-z]/.test(t) && !(PROSE.test(t) && !/^[A-Z]+$/.test(t) && !keyedBody(t))
+  const endAt = (w) => w.at + w.text.length
   let spans = 0
   for (let i = 0; i < words.length && spans < 128; i += 1) {
     if (!folds(words[i].text)) continue
     let j = i
-    while (j + 1 < words.length && folds(words[j + 1].text) && words[j + 1].at + words[j + 1].text.length - words[i].at <= MAX_SPAN) j += 1
+    while (j + 1 < words.length && folds(words[j + 1].text) && endAt(words[j + 1]) - words[i].at <= MAX_SPAN) j += 1
+    const keyishOf = (k) => {
+      const folded = raw.slice(words[i].at, endAt(words[k])).normalize("NFKC")
+      return joinedKey(folded.toLowerCase()) || (folded.length >= 12 && /\d/.test(folded) && argRun(folded) !== folded)
+    }
+    // read on over the key-material words that follow the folded front (a cut
+    // is a space or a wide space), and take the longest join that reads as a
+    // key; the fold-only span is the floor
+    for (let k = j + 1; k < words.length && k - i <= 48 && endAt(words[k]) - words[i].at <= MAX_SPAN; k += 1) {
+      if (!isCutGap(raw.slice(endAt(words[k - 1]), words[k].at)) || !keyMat(words[k].text)) break
+      if (keyishOf(k)) j = k
+    }
     const start = words[i].at
-    const stop = words[j].at + words[j].text.length
+    const stop = endAt(words[j])
     const text = raw.slice(start, stop)
     const folded = text.normalize("NFKC")
     // the joined copy is the key the fold makes: the whole-value judgement

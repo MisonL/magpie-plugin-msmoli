@@ -6189,6 +6189,24 @@ test("a full-width key inside a sentence is masked, and the words around it are 
   }
 })
 
+test("a full-width key front with an ASCII body across a space is masked too", () => {
+  // The fold reading only joined words that each fold: "ＡＫＩＡＩＯＳＦ" folds
+  // but its ASCII body "ODNN7EXAMPLE" does not, so the span stopped at the
+  // front and the body — a real AWS key-id shape — reached the terminal. The
+  // span must read on over the key-material words that follow, like a cut.
+  const cases = ["ＡＫＩＡＩＯＳＦ ODNN7EXAMPLE", "ＡＫＩＡＩＯＳＦ ODNN7EXAMPL"]
+  for (const v of cases) {
+    const out = arg(v)
+    assert.doesNotMatch(out, /ODNN7EXAMPL/, `the ASCII body printed whole: ${out}`)
+    const s = scrub(`child: ${v}`)
+    assert.doesNotMatch(s, /ODNN7EXAMPL/, `the ASCII body printed whole in scrub: ${s}`)
+  }
+  // the prose around it still stays readable: only the key span is masked
+  const sentence = arg("Key ＡＫＩＡＩＯＳＦ ODNN7EXAMPLE is invalid, please retry.")
+  assert.match(sentence, /^Key Ａ/, `the word before the key is the text's: ${sentence}`)
+  assert.match(sentence, / is invalid, please retry\.$/, `the words after it are the text's: ${sentence}`)
+})
+
 test("a launcher that cannot be followed is refused even without --dir, and one bad branch spoils the launcher", async () => {
   // Two holes in the fail-safe: the refusal sat inside the `--dir` guard, so
   // a run that let the folder be inferred never reached it; and the exec walk
