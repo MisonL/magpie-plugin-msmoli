@@ -440,6 +440,15 @@ const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]
 const CUT_RUN = /[ \t\r\n\u00a0\u3000·•∙‧・/]+/g
 const CUT_ONE = /^[ \t\r\n\u00a0\u3000·•∙‧・/]+/
 const PIECE = /[^ \t\r\n\u00a0\u3000·•∙‧・/]+/g
+// a value the spaced reading could join: an ms-/sk- front, its own characters
+// allowed to sit behind any run of the separators PIECE splits on (a space, a
+// wide space, a middot, a slash) — the front is found in the pieces, so this is
+// the same front seen before the pieces are cut. \s is a superset of those
+// separators, which only ever means a front found here is not one after the
+// join: the reading then does what it always did.
+const FRONT_SEP = "[\\s·•∙‧・/]*"
+const MS_FRONT = new RegExp(`m${FRONT_SEP}s${FRONT_SEP}-`, "i")
+const SK_FRONT = new RegExp(`s${FRONT_SEP}k${FRONT_SEP}-`, "i")
 const KEYCHARS = /^[A-Za-z0-9+/=_.-]+$/
 // RUNCUT is the length at which a run is long enough to be a key: the floor
 // every reading asks for, and all a mask needs to show
@@ -463,6 +472,14 @@ const PROSE = /^[A-Za-z]{3,}$/
 const FRONT_PIECE = /^(?:m|s|k|ms|sk|s-|g|h|p|u|r|o|x|ox|a|i|l|ali|as|akia|aida|ghp|gho|ghu|ghs|ghr|xox|asia)$/i
 
 function spacedKey(s) {
+  // the reading only ever joins a value that carries an ms- or sk- front, even
+  // when the front itself was cut ("m s - 0 1"): the front is looked for in the
+  // pieces with the separators taken out, so it is the same front, allowed to
+  // sit behind any run of separators here. A value with no such front is no key
+  // this reading makes, and the pieces are not built at all — most of a child's
+  // prose. The separator class is a superset of the one PIECE splits on, so a
+  // front found here that the join does not make only costs the old path.
+  if (!MS_FRONT.test(s) && !SK_FRONT.test(s)) return null
   // a control or format character is not a cut's spelling (a key with one in
   // it is one word); a line break is, and is read like a space
   if (/(?:(?![\n\r])[\p{Cc}\p{Cf}])/u.test(s)) return null
@@ -728,6 +745,13 @@ const LISTY = /^(?:[A-Za-z]+\d+)+$/
 // already masked; a join holding one key-shaped piece (a key an invisible
 // character cut) is still a key by its run arm.
 const isKey = (word, runs = true) => {
+  // a word under the shortest floor that carries no digit and no capital is no
+  // key under any arm below: the shortest floor is the 12-character base64
+  // reading, and every other arm needs a digit, a capital or a separator (a
+  // separator alone, with neither, still fails every arm — "a-b-c" is prose).
+  // This is most of a child's prose, and the guard keeps the dozen regexes
+  // below off it.
+  if (word.length < 12 && !/[0-9A-Z]/.test(word)) return false
   // an upper-cased vendor key is the same key, and its pieces are too short
   // for the run floors ("SK-ANT-API03-EYAI1PKJRF_KBWT"); the rhythm a key has
   // (a capital beside a digit) tells it from a sentence in capitals
@@ -1405,6 +1429,10 @@ export function arg(v) {
 // text around it goes through the ordinary readings.
 const FOLDABLE = /[^\x00-\x7f]/
 const foldedSpans = (raw) => {
+  // the reading masks the words that fold, and only a character outside ASCII
+  // (a full-width one) folds: a value with none has no span to read, and the
+  // word walk below is not built for it (every ASCII value is this case).
+  if (!FOLDABLE.test(raw)) return ""
   const parts = []
   let at = 0
   let hit = false
@@ -1572,7 +1600,10 @@ const argWords = (x) =>
       const value = w.slice(sep + 1)
       if (!value.includes("…") && VENDOR.test(value) && isKey(value)) return `${w.slice(0, sep + 1)}${mask(value)}`
     }
-    const marks = (y) => y.replace(RUN, (r) => (keyRun(r) ? mask(r) : r)).replace(UUID_ANY, (m) => mask(m))
+    // no run under keyRun's shortest floor (16) can be a key, and a UUID is 36
+    // characters: a word shorter than 16 is returned as it is, and the two
+    // replaces are not run over it (most of a child's prose is here).
+    const marks = (y) => (y.length < 16 ? y : y.replace(RUN, (r) => (keyRun(r) ? mask(r) : r)).replace(UUID_ANY, (m) => mask(m)))
     const out = marks(w)
     // the folded copy can be key-shaped where the original is not — a token
     // written in full width has no ASCII runs and no ASCII path prefix, so the

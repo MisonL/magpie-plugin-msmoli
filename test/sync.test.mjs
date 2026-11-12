@@ -5590,6 +5590,94 @@ test("the CLI's 32 KiB worst case stays fast", () => {
   assert.ok(arg("9f8e7d6c5b4a39281706f5e4d3c2b1a0".split("").join(" ")).includes("9f8e…b1a0"))
 })
 
+test("a page of ordinary prose is left as it is, and read without the key paths", () => {
+  // Most of what reaches the masker is a child's prose, and every word of it
+  // used to go through isKey's dozen regexes and the two replaces of marks().
+  // A word under the shortest floor with no digit and no capital cannot be a
+  // key under any arm, and a word under 16 characters has no run keyRun can
+  // take; those two guards skip the work. The value must come out unchanged
+  // (a guard that changed an answer would be a leak or an over-mask) and the
+  // whole page must still be read quickly. The bound is loose on purpose: it
+  // guards the reading from going back to per-word work, not a machine's speed.
+  const page = "the quick brown fox jumps over the lazy dog. ".repeat(6000).slice(0, 262144)
+  const t0 = performance.now()
+  const out = arg(page)
+  const ms = performance.now() - t0
+  assert.equal(out, page, "ordinary prose was changed by the masker")
+  assert.ok(ms < 4000, `256 KiB of prose took ${ms.toFixed(0)}ms`)
+})
+
+test("words carrying sk and ms that are not fronts are still prose", () => {
+  // The spaced reading now looks for an ms-/sk- front before it builds its
+  // pieces, with a separator class that is a superset of the one the pieces
+  // split on. A word pair that carries the letters but no front must still be
+  // left alone: the guard only skips work, it does not widen what is a key.
+  for (const v of [
+    "ask me to mask the disk",
+    "the task master asks",
+    "risk assessment and skim reading",
+    "ms-word and ms-dos are programs",
+    "sk-y is not a vendor",
+  ]) assert.equal(arg(v), v, `prose was masked: ${arg(v)}`)
+})
+
+test("a short lower-case body ending in = is still a key, so the 12-character floor holds", () => {
+  // isKey now bails out on a word under the shortest floor that has no digit
+  // and no capital. The shortest floor is base64y's 12 characters, and a body
+  // of lower-case letters with base64 padding (a token copied with its tail
+  // cut off, "abcdefghijkl=") is a key with neither a digit nor a capital. The
+  // guard's bound is exactly that floor: raise it to 20 and these go out whole.
+  for (const [v, want] of [
+    ["abcdefghijkl=", "abcd…ijkl="],
+    ["abcdefghijklm=", "abcd…jklm="],
+    ["abcdefghijklmnop=", "abcd…mnop="],
+  ]) assert.equal(arg(v), want, `${v} -> ${arg(v)}`)
+  // one character under the floor: the mask spends four at each end and the
+  // value is too short to hide anything, so it is not a key (printed with its
+  // own length)
+  assert.equal(arg("abcdefghijk="), "（11 字符）=")
+})
+
+test("a front cut inside itself by a middot is still one key", () => {
+  // spacedKey now looks for an ms-/sk- front before it builds its pieces, and
+  // that look allows the front's own characters to sit behind any of the
+  // separators the pieces split on — among them the middot a display cuts a key
+  // with. Drop the middot from that separator class and "m·s-…" is no front,
+  // the pieces are never built, and the key goes out whole.
+  for (const [v, want] of [
+    ["m·s-aaaa1111-bbbb-2222-cccc-333344445555", "ms-a…5555"],
+    ["ms·-aaaa1111-bbbb-2222-cccc-333344445555", "ms-a…5555"],
+    ["s·k-ant-api03-Zx9Yw8Vu7Ts6Rq5", "sk-a…6Rq5"],
+  ]) assert.equal(arg(v), want, `${v} -> ${arg(v)}`)
+  // a space-cut front is the same key (the older spelling)
+  assert.equal(arg("m s - aaaa1111-bbbb-2222-cccc-333344445555"), "ms-a…5555")
+})
+
+test("a front cut by a slash inside itself is still one key", () => {
+  // The same separator class the spaced reading looks for the front behind
+  // includes the slash — PIECE splits a value on it, so "m/s-…" joins to "ms-…"
+  // and is one key. Take the slash out of that class and the front is not
+  // found, the pieces are never built, and the key goes out whole.
+  for (const [v, want] of [
+    ["m/s-aaaa1111-bbbb-2222-cccc-333344445555", "ms-a…5555"],
+    ["ms/-aaaa1111-bbbb-2222-cccc-333344445555", "ms-a…5555"],
+    ["s/k-ant-api03-Zx9Yw8Vu7Ts6Rq5", "sk-a…6Rq5"],
+  ]) assert.equal(arg(v), want, `${v} -> ${arg(v)}`)
+})
+
+test("a key-like run inside a short word is masked by the run reading", () => {
+  // marks() is the per-run pass for a word that is not a key as a whole. It now
+  // returns a word under 16 characters unchanged (no run can clear keyRun's
+  // floor, and a UUID is 36). A word of 16 or more can still carry one run that
+  // is a key — "abc/9f8e7d6c5b4a3928" is not a key as a whole (a lower-case
+  // letter and a slash), but its 16-character hex run is a digest. Raise the
+  // guard's bound past a word like this and the run goes out whole.
+  for (const [v, want] of [
+    ["abc/9f8e7d6c5b4a3928", "abc/9f8e…3928"],
+    ["abc/9f8e7d6c5b4a39281706", "abc/9f8e…1706"],
+  ]) assert.equal(arg(v), want, `${v} -> ${arg(v)}`)
+})
+
 test("a middot cut keeps only the mask's four characters at each end", () => {
   // The review's CLI repros: a cut key showed "ghp_1234…7890" (eight of the
   // front's characters) and a UUID cut into pieces came out "123e123e…4000"
