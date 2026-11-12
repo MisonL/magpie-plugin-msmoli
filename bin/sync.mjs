@@ -1385,9 +1385,14 @@ const joinedKey = (s) => {
 
 export function arg(v) {
   const orig = String(v ?? "")
+  // the glue is one pass over the value, and all three readings below ask the
+  // same question of the same characters: it is removed once and handed to each
+  // ("glue" is the value with an invisible character between two key characters
+  // taken out, so a key cut by one is put back together)
+  const glued0 = orig.replace(GLUE, "")
   // the ms- front has its own joiner for pieces of any width (one to a
   // character), and it reads the value as it was typed
-  const cut = spacedKey(orig.replace(GLUE, ""))
+  const cut = spacedKey(glued0)
   // the body spans the gaps the pieces were cut with; the key is the
   // characters themselves, and mask() keeps its first and last four — a
   // three-character last piece ("… nop3 456") otherwise shows the gap in the
@@ -1397,12 +1402,12 @@ export function arg(v) {
   if (cut && msKey(cut.body, false)) return argRun(cut.pre) + mask(cut.body.replace(/\s+/g, "")) + argRun(cut.post)
   // a key with no ms-/sk- front, cut the same way: the pieces are joined and
   // asked whether they read as one key (splitKey)
-  const split = splitKey(orig.replace(GLUE, ""))
+  const split = splitKey(glued0)
   if (split) return argRun(split.pre) + mask(split.body.replace(/\s+/g, "")) + arg(split.post)
   // full-width pieces fold to a key; an ellipsis folds to three dots and would
   // read as key material ("ms-a…5555" → "ms-a...5555"), so a value that
   // already carries a mask is not asked again
-  const raw = orig.replace(GLUE, "")
+  const raw = glued0
   if (!raw.includes("…")) {
     const folded = foldedSpans(raw)
     if (folded) return folded
@@ -1613,7 +1618,14 @@ const argWords = (x) =>
     // is what the user typed anyway. A key already masked ("ms-a…5555") is left
     // as it is: it is a short string of letters now, and the token shape no
     // longer matches it — but its mask is not a word to be judged again.
-    if (out === w && (marks(f) !== f || (f.match(tokenShaped) ?? []).some((m) => msKey(m, x.trim() === w))) && !w.includes("…")) return mask(w)
+    // a word with no character that folds has f === w, and marks(f) is then
+    // marks(w), which is the answer already in hand (out === w): only a word
+    // with a fold of its own is asked a second time. tokenShaped needs a
+    // literal "-" in the value (m…s…-), which most words carry none of, so the
+    // regex and the array it returns are skipped for them. Both are read in
+    // the order the question was asked in before: marks(f) first, and the
+    // token shape only when it did not answer.
+    if (out === w && !w.includes("…") && ((f !== w && marks(f) !== f) || (f.includes("-") && (f.match(tokenShaped) ?? []).some((m) => msKey(m, x.trim() === w))))) return mask(w)
     return out
   })
 
