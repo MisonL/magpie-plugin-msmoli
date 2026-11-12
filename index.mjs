@@ -176,9 +176,10 @@ function saidFailure(e, ctl, budget) {
     // Ceiling, not round: the budget can be down to a few hundred
     // milliseconds when the hook's own deadline is what cut it short, and
     // "request timed out (0 s)" tells the user nothing about which of the two
-    // it was. The flag is how siteRead tells a timeout (the link, which the
-    // other site would wait out again) from a refusal (that site's answer).
-    return Object.assign(new Error(`请求超时（${Math.max(1, Math.ceil(budget / 1000))} 秒）`), { timeout: true })
+    // it was. siteRead treats every thrown read alike — it moves on to the
+    // other site and keeps this error as the last thing reported — so nothing
+    // reads a flag off this error.
+    return new Error(`请求超时（${Math.max(1, Math.ceil(budget / 1000))} 秒）`)
   }
   if (e?.name === "TypeError" || /fetch failed/i.test(String(e?.message ?? ""))) {
     return new Error("请求失败：网络不通、被代理拦截，或遇到了重定向")
@@ -252,7 +253,13 @@ async function siteRead(token, path, deadline = Infinity) {
   // control" is more useful than "check your proxy"). It is kept as `answer`
   // while the loop goes on: the site that gave it may not be the one holding
   // this token (a stale `site`, a re-keyed sign-in, a middlebox's 404).
+  // The priority when no site answers, in one place: a ModelScope-shaped 403
+  // (`riskAnswer`) first — it is the one failure that says the site knows the
+  // token; then this 4xx (`answer`); then `said`; then the transport error;
+  // and expiry is only said when every site refused the token with a 401. A
+  // stale remembered site's refusal is not proof (see the 401 branch).
   let answer
+  let riskAnswer
   // `said` is a parsed reply that is not an answer (429, 5xx, a 200 that says
   // it failed); `down` is a transport error. They are kept apart so the
   // promise above holds in both directions: whatever the site said beats the
@@ -313,11 +320,19 @@ async function siteRead(token, path, deadline = Infinity) {
     // answer too; a genuine risk-control 403 on the right site still ends up
     // as the report when the other site has nothing better to say.
     if (got.parsed && got.res.status >= 400 && got.res.status < 500 && got.res.status !== 429) {
-      answer ??= { profile, ...got }
+      // A 403 in ModelScope's own shape is the one failure that says this site
+      // knows the token and refused it by policy (gate's risk control). It is
+      // kept apart so it outranks every other failure below however the sites
+      // were ordered: a token remembered on one site probes that one first, and
+      // first-wins made the card's message depend on that history (a plain 404
+      // from the remembered site hid the other site's risk control).
+      if (got.res.status === 403 && riskShaped(got.body)) riskAnswer ??= { profile, ...got }
+      else answer ??= { profile, ...got }
       continue
     }
     said ??= { answer: { profile, ...got } }
   }
+  if (riskAnswer) return riskAnswer
   if (answer) return answer
   if (said) return said.answer
   if (down) throw down.error
@@ -526,7 +541,7 @@ function todayCN() {
 // part is right for both spellings and wrong for neither.
 const onDay = (stamp, day) => {
   const s = String(stamp ?? "")
-  return s.slice(0, 10) === day && /^\d{4}-\d{2}-\d{2}/.test(s)
+  return s.slice(0, 10) === day && /^\d{4}-\d{2}-\d{2}(?![0-9])/.test(s)
 }
 
 // cnTime turns ModelScope's "2026-10-22 15:35:35" (Beijing time, no zone) into
@@ -583,7 +598,12 @@ const CONFIG_ENV = "MAGPIE_MSMOLI_CONFIG"
 // portable one. The host hands that folder over as input.directory; guessing
 // ~/.config/magpie here would silently ignore the file on a portable magpie.
 function configPath(dir) {
-  if (process.env[CONFIG_ENV]) return process.env[CONFIG_ENV]
+  // The env override has to be absolute for the same reason XDG_CONFIG_HOME
+  // does: a relative one is resolved against whatever folder magpie was
+  // started in, so the user's file silently does nothing (or, worse, a
+  // different file of the same name is read).
+  const envPath = process.env[CONFIG_ENV]
+  if (envPath && isAbsolute(envPath)) return envPath
   // A set-but-relative XDG_CONFIG_HOME is ignored by magpie itself (appdir's
   // rooted() in env.go), so joining it would read a file magpie never keeps:
   // "./magpie/msmoli.json", resolved against whatever folder magpie happened
@@ -2352,6 +2372,18 @@ const RISK = "被魔搭风控拒绝（HTTP 403）"
 // server saying why in its own words ("too many requests" / "system busy").
 // Merged, a JSON-carrying 429 was reported as "the response is not JSON" and
 // sent the user to check their proxy.
+// riskShaped is whether a 403 is ModelScope's own answer rather than a path's
+// page: the site's envelope carries success or Code/data, and it does not name
+// a path. Shared by gate() (which words the refusal) and siteRead() (which
+// ranks it), so the two cannot drift apart: a body that reads as risk control
+// there has to be the one ranked first here.
+const riskShaped = (body) => {
+  const shaped = body !== null && typeof body === "object" && !Array.isArray(body)
+  if (!shaped) return false
+  if (PATH_MARK.test(JSON.stringify(body))) return false
+  return "success" in body || "Success" in body || "Code" in body || "code" in body || "data" in body || "Data" in body
+}
+
 const gate = (profile, res, body, parsed, token, what, risk = RISK) => {
   // A 401 is the token being refused only when it is ModelScope's own JSON.
   // A proxy's HTML 401 ("proxy authentication required") is the path, not the
@@ -2377,11 +2409,7 @@ const gate = (profile, res, body, parsed, token, what, risk = RISK) => {
   // ("Cannot use 'in' operator to search for 'success' in 17") at the hook,
   // with the request's name and the HTTP status lost. A non-object body is a
   // reply this plugin does not understand, and says so below.
-  const shaped = parsed && body !== null && typeof body === "object"
-  const envelope = shaped && !Array.isArray(body) && (("success" in body) || ("Success" in body))
-  const msLogin = shaped && !Array.isArray(body) && (("Code" in body) || ("code" in body) || ("data" in body) || ("Data" in body))
-  const pathSaid = PATH_MARK.test(JSON.stringify(body))
-  if (res.status === 403 && !pathSaid && (envelope || msLogin)) throw new Error(risk)
+  if (res.status === 403 && riskShaped(body)) throw new Error(risk)
   if (res.status === 403) throw new Error(`${what}：响应不是魔搭的（HTTP 403）`)
   if (!parsed) throw new Error(`${what}：响应不是 JSON（HTTP ${res.status}）`)
   if (res.status !== 200 || !okOf(body)) throw new Error(`${what}：${saidOf(body, token) || `HTTP ${res.status}`}`)
@@ -2578,11 +2606,9 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
         break
       }
     } else if (pages > DAY_PAGES || deadline <= Date.now()) {
-      // the page cap cut a walk whose numbers were already proven: the day is
-      // complete (an older page or a total said so), and only the countdown's
-      // scan is cut short — the check-in must not read this as a book it could
-      // not finish
-      if (dayDone) complete = true
+      // the page cap cut a walk whose numbers were *not* proven (the branch
+      // above is the proven one): the day stays open, the card says the number
+      // is low, and the check-in retries
       break
     }
     let got
@@ -3093,9 +3119,18 @@ export async function MsmoliPlugin(input) {
         // (the name lookup, the streak walk): the day's answer stands, and the
         // host still has to hear that the token was refused
         const marks = { expired: false }
+        // a 401 the walk met on a courtesy page (its numbers already proven)
+        // ends that page's scan without throwing — dayRows reports it as
+        // `refused`. The day's answer still stands, and the account is
+        // expired; without this the check-in swallowed a refusal it had
+        // already read past (the usage card has always marked it).
+        const noted = (read) => {
+          if (read.refused) marks.expired = true
+          return read
+        }
         const answer = await (async () => {
         try {
-          let before = await todayEarn(token, deadline, { expiry: false })
+          let before = noted(await todayEarn(token, deadline, { expiry: false }))
           let rolls = 0
           for (;;) {
           const profile = before.profile
@@ -3238,7 +3273,7 @@ export async function MsmoliPlugin(input) {
           if (todayCN() !== before.day && rolls < 2) {
             rolls += 1
             const wasDay = before.day
-            before = await todayEarn(token, deadline, { expiry: false })
+            before = noted(await todayEarn(token, deadline, { expiry: false }))
             probe = before.profile
             // The touch was this run's, and the day changed under it: the
             // baseline is yesterday's, and `gained` reads an empty one for a
@@ -3312,7 +3347,7 @@ export async function MsmoliPlugin(input) {
             }, streak, marks)
           }
 
-          const fresh = await todayEarn(token, deadline, { expiry: false })
+          const fresh = noted(await todayEarn(token, deadline, { expiry: false }))
           probe = fresh.profile
           const daily = gained(fresh.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)), fresh.day)
           if (daily) return await claimedNow(fresh, daily)
@@ -3327,7 +3362,7 @@ export async function MsmoliPlugin(input) {
           // by checkinSureHour). From noon the host settles the day, so in the
           // afternoon the plugin asks for one more ask half an hour later itself,
           // via until.
-          const again = await todayEarn(token, deadline, { expiry: false })
+          const again = noted(await todayEarn(token, deadline, { expiry: false }))
           probe = again.profile
           const later = gained(again.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)), again.day)
           if (later) return await claimedNow(again, later)
@@ -3355,6 +3390,10 @@ export async function MsmoliPlugin(input) {
           if (hourCN >= SURE_HOUR && deferred.get(token) !== today) {
             for (const [k, d] of deferred) if (d !== today) deferred.delete(k)
             deferred.set(token, today)
+            // a long-lived host sees tokens come and go; the day's stale
+            // entries are pruned above, and this bounds a single day's (a
+            // deleted account's token would otherwise stay until tomorrow)
+            if (deferred.size > 64) deferred.delete(deferred.keys().next().value)
             return {
               outcome: "inactive",
               message: "登录已触达，账本里还没有今天的到账；半小时后再核对一次",
@@ -3442,145 +3481,183 @@ export async function MsmoliPlugin(input) {
           // below zero, and "-5 credits available" is not a thing the card can show
           const available = Math.max(0, yin(availableN))
 
-          const tx = await json(profile.site, token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
-          gate(profile, tx.res, tx.body, tx.parsed, token, "账单查询失败")
+          // the ledger only adds the day's numbers; the balance is already
+          // read and is what the card exists to show. Everything below is in
+          // this try so a ledger that times out, is refused, or answers a body
+          // we cannot read leaves the balance on the card instead of taking it
+          // off with the day's numbers (the next poll reads the ledger again).
+          // A 401 is the one failure that is about the sign-in rather than the
+          // read: it still goes to the outer catch, and the account is signed
+          // out over it.
+          try {
+            const tx = await json(profile.site, token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
+            gate(profile, tx.res, tx.body, tx.parsed, token, "账单查询失败")
 
-          const day = todayCN()
-          const walked = await dayRows(profile, token, day, recordsOf(tx.body), deadline, tx.body)
-          let earned = 0
-          let spent = 0
-          let earliest = ""
-          for (const r of walked.all) {
-            // Only the two kinds that go into the card's numbers need an
-            // amount. A row of a kind we do not sum is not counted either
-            // way, and failing the whole card over its amount would turn a
-            // ledger that grew a new kind (an expiry row, say) into "no
-            // numbers at all" — the opposite of what the rule is for.
-            if (onDay(r?.gmt_created, day)) {
-              if (r?.type === "EARN") {
-                // "Claimed" means everything credited today, promotions
-                // included: the card asks "how much came in, how much was
-                // used", and excluding promotions would show "claimed 0" while
-                // the balance rose by 500. The credit the check-in reports is a
-                // different question (how much this check-in claimed), counting
-                // only the daily grants; the two numbers differing is each
-                // giving its own answer, not two ways of computing one number.
-                earned += amountOf(r)
-              } else if (r?.type === "SPEND_CONFIRM") {
-                spent += amountOf(r)
+            const day = todayCN()
+            const walked = await dayRows(profile, token, day, recordsOf(tx.body), deadline, tx.body)
+            let earned = 0
+            let spent = 0
+            let earliest = ""
+            for (const r of walked.all) {
+              // Only the two kinds that go into the card's numbers need an
+              // amount. A row of a kind we do not sum is not counted either
+              // way, and failing the whole card over its amount would turn a
+              // ledger that grew a new kind (an expiry row, say) into "no
+              // numbers at all" — the opposite of what the rule is for.
+              if (onDay(r?.gmt_created, day)) {
+                if (r?.type === "EARN") {
+                  // "Claimed" means everything credited today, promotions
+                  // included: the card asks "how much came in, how much was
+                  // used", and excluding promotions would show "claimed 0" while
+                  // the balance rose by 500. The credit the check-in reports is a
+                  // different question (how much this check-in claimed), counting
+                  // only the daily grants; the two numbers differing is each
+                  // giving its own answer, not two ways of computing one number.
+                  earned += amountOf(r)
+                } else if (r?.type === "SPEND_CONFIRM") {
+                  spent += amountOf(r)
+                }
+              }
+              // The countdown ends when the soonest of the day's credits is
+              // actually lost, so it reads every daily grant that is still
+              // running — including yesterday's, which runs until 24 hours after
+              // it landed and can expire before today's own grant does. Tying it
+              // to today's rows alone pointed the countdown past a batch that
+              // disappears sooner. A grant already expired cannot be "when the
+              // credits run out" either.
+              if (r?.type === "EARN" && DAILY_RULES.includes(r?.rule_key) && r?.expire_at) {
+                const at = cnTime(r.expire_at)
+                if (at && Date.parse(at) > Date.now() && (!earliest || at < earliest)) earliest = at
               }
             }
-            // The countdown ends when the soonest of the day's credits is
-            // actually lost, so it reads every daily grant that is still
-            // running — including yesterday's, which runs until 24 hours after
-            // it landed and can expire before today's own grant does. Tying it
-            // to today's rows alone pointed the countdown past a batch that
-            // disappears sooner. A grant already expired cannot be "when the
-            // credits run out" either.
-            if (r?.type === "EARN" && DAILY_RULES.includes(r?.rule_key) && r?.expire_at) {
-              const at = cnTime(r.expire_at)
-              if (at && Date.parse(at) > Date.now() && (!earliest || at < earliest)) earliest = at
+
+            // Not truncated at 100: magpie reads used > 100 as "overspent"
+            // (host.js's "past 100 when overspent"). Today's credits being spent
+            // up means nothing was claimed today and the balance is zero. The
+            // lower bound is clamped to 0: refunds in the ledger are negative
+            // SPEND_CONFIRM rows, and without the clamp the card would show a
+            // "used -50 today / claimed 200" combination and a negative
+            // percentage — the host clamps it itself; this is one more safety net.
+            // summed in floating point: 0.1 + 0.2 is 0.30000000000000004, and it
+            // would go into the card as written
+            earned = yin(earned)
+            spent = yin(spent)
+            // The credit direction can also come out negative (reversals,
+            // clawbacks). Without the clamp the card would write "claimed -50",
+            // and a negative limit makes even less sense. Same for the spend
+            // direction.
+            const earnedToday = Math.max(0, earned)
+            const usedToday = Math.max(0, spent)
+            // When there is no credit today, the percentage's denominator becomes
+            // "how much is in hand today" — what was used plus what remains. When
+            // that denominator is 0 the old measure stands: only a depleted
+            // balance counts as spent up. Otherwise the card would show the
+            // combination used=0, used 348.5 today, claimed 0 — the progress bar
+            // says nothing moved while the text says a lot was spent.
+            //
+            // Both numbers in the ledger passed readable(), yet the ratio can be
+            // large enough to overflow to Infinity at ×10000; the host reads a
+            // non-finite used as 0 (host.js's num accepts only finite numbers),
+            // and so "almost all used up" was drawn as nothing having moved. When
+            // the percentage cannot be computed it is handed to the host as "not
+            // said" (used omitted = null), and the text line still states the
+            // real amounts.
+            const pct = (n, d) => {
+              const v = Math.round((n / d) * 10000) / 100
+              return Number.isFinite(v) ? v : null
             }
-          }
+            // More used than claimed today, yet a balance remains: what was spent
+            // is yesterday's not-yet-expired credits, not an overage. The
+            // denominator switches to "how much is in hand today" then too —
+            // otherwise, 250 claimed yesterday at 15:00, 250 claimed today, 300
+            // used this morning, the card would draw a 120% overage beside a
+            // balance of 200. An overage holds only when the balance is empty too.
+            const used =
+              earnedToday > 0 && (usedToday <= earnedToday || available === 0)
+                ? pct(usedToday, earnedToday)
+                : usedToday + available > 0
+                  ? pct(usedToday, usedToday + available)
+                  : 100
 
-          // Not truncated at 100: magpie reads used > 100 as "overspent"
-          // (host.js's "past 100 when overspent"). Today's credits being spent
-          // up means nothing was claimed today and the balance is zero. The
-          // lower bound is clamped to 0: refunds in the ledger are negative
-          // SPEND_CONFIRM rows, and without the clamp the card would show a
-          // "used -50 today / claimed 200" combination and a negative
-          // percentage — the host clamps it itself; this is one more safety net.
-          // summed in floating point: 0.1 + 0.2 is 0.30000000000000004, and it
-          // would go into the card as written
-          earned = yin(earned)
-          spent = yin(spent)
-          // The credit direction can also come out negative (reversals,
-          // clawbacks). Without the clamp the card would write "claimed -50",
-          // and a negative limit makes even less sense. Same for the spend
-          // direction.
-          const earnedToday = Math.max(0, earned)
-          const usedToday = Math.max(0, spent)
-          // When there is no credit today, the percentage's denominator becomes
-          // "how much is in hand today" — what was used plus what remains. When
-          // that denominator is 0 the old measure stands: only a depleted
-          // balance counts as spent up. Otherwise the card would show the
-          // combination used=0, used 348.5 today, claimed 0 — the progress bar
-          // says nothing moved while the text says a lot was spent.
-          //
-          // Both numbers in the ledger passed readable(), yet the ratio can be
-          // large enough to overflow to Infinity at ×10000; the host reads a
-          // non-finite used as 0 (host.js's num accepts only finite numbers),
-          // and so "almost all used up" was drawn as nothing having moved. When
-          // the percentage cannot be computed it is handed to the host as "not
-          // said" (used omitted = null), and the text line still states the
-          // real amounts.
-          const pct = (n, d) => {
-            const v = Math.round((n / d) * 10000) / 100
-            return Number.isFinite(v) ? v : null
-          }
-          // More used than claimed today, yet a balance remains: what was spent
-          // is yesterday's not-yet-expired credits, not an overage. The
-          // denominator switches to "how much is in hand today" then too —
-          // otherwise, 250 claimed yesterday at 15:00, 250 claimed today, 300
-          // used this morning, the card would draw a 120% overage beside a
-          // balance of 200. An overage holds only when the balance is empty too.
-          const used =
-            earnedToday > 0 && (usedToday <= earnedToday || available === 0)
-              ? pct(usedToday, earnedToday)
-              : usedToday + available > 0
-                ? pct(usedToday, usedToday + available)
-                : 100
+            // Before today's credits are claimed, put the window's target moment
+            // on the card, so "claimed 0" does not look like something went wrong.
+            //
+            // The config is read only when the card actually needs the target:
+            // after the day's grant has landed there is no hint to compute, and
+            // this file read is the hook's only synchronous I/O — a poll every
+            // few minutes per account should not pay for it to be thrown away.
+            // `win` is null when earnedToday is non-zero, so `ahead` is null
+            // exactly where `win && earnedToday === 0` used to make it so.
+            const win = earnedToday === 0 ? windowOf(configOf(configDir)) : null
+            const ahead = win ? plan(win, token, day) : null
+            // the minute is Beijing's (minuteCN), while the card's reset time is
+            // the machine's zone: say which one this is, or a reader elsewhere
+            // takes it for their own clock.
+            const hint = ahead && !ahead.due ? ` · ${clock(ahead.target)} 领取（北京时间）` : ""
+            // A walk that could not finish leaves the two numbers a floor: the
+            // ledger contradicted itself, or a page failed. Said on the card, so
+            // they are not read as the day's whole truth.
+            // the countdown's own scan can be cut short while the numbers are
+            // whole (the page cap, the budget): then the earliest expiry seen is
+            // a floor, not the answer, and the card says so rather than naming a
+            // later time as if it were settled
+            const part = (walked.complete ? "" : " · 账单未读完，数字偏低") + (walked.scanComplete || !earliest ? "" : " · 到期时间可能更早")
 
-          // Before today's credits are claimed, put the window's target moment
-          // on the card, so "claimed 0" does not look like something went wrong.
-          //
-          // The config is read only when the card actually needs the target:
-          // after the day's grant has landed there is no hint to compute, and
-          // this file read is the hook's only synchronous I/O — a poll every
-          // few minutes per account should not pay for it to be thrown away.
-          // `win` is null when earnedToday is non-zero, so `ahead` is null
-          // exactly where `win && earnedToday === 0` used to make it so.
-          const win = earnedToday === 0 ? windowOf(configOf(configDir)) : null
-          const ahead = win ? plan(win, token, day) : null
-          // the minute is Beijing's (minuteCN), while the card's reset time is
-          // the machine's zone: say which one this is, or a reader elsewhere
-          // takes it for their own clock.
-          const hint = ahead && !ahead.due ? ` · ${clock(ahead.target)} 领取（北京时间）` : ""
-          // A walk that could not finish leaves the two numbers a floor: the
-          // ledger contradicted itself, or a page failed. Said on the card, so
-          // they are not read as the day's whole truth.
-          // the countdown's own scan can be cut short while the numbers are
-          // whole (the page cap, the budget): then the earliest expiry seen is
-          // a floor, not the answer, and the card says so rather than naming a
-          // later time as if it were settled
-          const part = (walked.complete ? "" : " · 账单未读完，数字偏低") + (walked.scanComplete || !earliest ? "" : " · 到期时间可能更早")
+            // last, and awaited: the card must not be answered ahead of the
+            // write (a poll answered before it would race the very retry this
+            // exists for), while the reads above have already had the budget to
+            // themselves.
+            await rememberAccountFields(client, token, { name: names.get(token) ?? "", profile, probeDone: true }, auth, configDir, deadline, getAuth)
 
-          // last, and awaited: the card must not be answered ahead of the
-          // write (a poll answered before it would race the very retry this
-          // exists for), while the reads above have already had the budget to
-          // themselves.
-          await rememberAccountFields(client, token, { name: names.get(token) ?? "", profile, probeDone: true }, auth, configDir, deadline, getAuth)
-
-          return {
-            plan: profile.plan,
-            user: nameText(names.get(token) ?? "", token),
-            balance: `${available} 魔粒可用`,
-            // a token refused on a courtesy page is refused: the numbers that
-            // page was read for stand, and the card says what the next poll
-            // would say anyway — the account needs signing in again
-            ...(walked.refused ? { signIn: "expired" } : {}),
-            windows: [
-              {
-                name: "魔粒",
-                used,
-                display: `今日用 ${usedToday} / 领 ${earnedToday} · 余额 ${available}${hint}${part}`,
-                amount: usedToday,
-                limit: earnedToday,
-                unit: "魔粒",
-                resetsAt: earliest,
-                span: 86400,
-              },
-            ],
+            return {
+              plan: profile.plan,
+              user: nameText(names.get(token) ?? "", token),
+              balance: `${available} 魔粒可用`,
+              // a token refused on a courtesy page is refused: the numbers that
+              // page was read for stand, and the card says what the next poll
+              // would say anyway — the account needs signing in again
+              ...(walked.refused ? { signIn: "expired" } : {}),
+              windows: [
+                {
+                  name: "魔粒",
+                  used,
+                  display: `今日用 ${usedToday} / 领 ${earnedToday} · 余额 ${available}${hint}${part}`,
+                  amount: usedToday,
+                  limit: earnedToday,
+                  unit: "魔粒",
+                  resetsAt: earliest,
+                  span: 86400,
+                },
+              ],
+            }
+          } catch (e) {
+            // the ledger's failure is the day line's, not the card's: the
+            // balance was read before it, and a card with the balance and the
+            // reason beats an error with neither. A 401 is the sign-in's and
+            // keeps going to the outer catch.
+            if (signedOut(e)) throw e
+            const why = cardText(whyOf(e), token) || "账单查询失败"
+            await rememberAccountFields(client, token, { name: names.get(token) ?? "", profile, probeDone: true }, auth, configDir, deadline, getAuth)
+            return {
+              plan: profile.plan,
+              user: nameText(names.get(token) ?? "", token),
+              balance: `${available} 魔粒可用`,
+              windows: [
+                {
+                  name: "魔粒",
+                  // not said, not zero: the host reads a null used as "no
+                  // percentage", and a 0 amount beside a 0 limit would draw a
+                  // day that moved nothing
+                  used: null,
+                  display: `${why} · 余额 ${available}`,
+                  amount: 0,
+                  limit: 0,
+                  unit: "魔粒",
+                  resetsAt: "",
+                  span: 86400,
+                },
+              ],
+            }
           }
         } catch (e) {
           return { error: cardText(whyOf(e), token) || "用量查询失败", signIn: signedOut(e) ? "expired" : "" }
@@ -3619,6 +3696,6 @@ export async function MsmoliPlugin(input) {
 // exporting them as functions: magpie's loader treats every exported function
 // as a plugin entry (see windowOf above), but an object it skips. The tests
 // are the only reader.
-export const testables = { windowOf, streakOf, CN, INTL, sites, maskAll, cardText, nameText, hostText, awaitsSignIn, gate }
+export const testables = { windowOf, streakOf, onDay, CN, INTL, sites, deferred, maskAll, cardText, nameText, hostText, awaitsSignIn, gate }
 
 export default MsmoliPlugin

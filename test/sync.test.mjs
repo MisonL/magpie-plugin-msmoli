@@ -3131,7 +3131,11 @@ test("a key that is not a string does not take the check-in down with it", async
     const text = out.join("\n")
     assert.doesNotMatch(text, /is not a function/, "an internal error reached the user")
     assert.equal(code, 1)
-    assert.match(text, /还没有 key/, `a numeric key is no key: ${text}`)
+    // "还没有 key" sends the user to add a key the file already has: the value
+    // is there, its type is wrong (a hand-edited file, a tool that wrote a
+    // number). Say which of the two it is; the advice is the same.
+    assert.match(text, /key 不是文本/, `a numeric key is no key, and the message must say why: ${text}`)
+    assert.doesNotMatch(text, /还没有 key/, `the file does carry a key: ${text}`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -5770,6 +5774,24 @@ test("a key quoted in a frame shows its own four characters, not the frame's", (
   assert.equal(arg("(" + "hello" + ")"), "(hello)")
 })
 
+test("an ms- key keeps its own four ends inside a frame", () => {
+  // show()'s ms- shape runs over printable ASCII, so it swallowed the frame's
+  // punctuation after the key: the mask spends four characters at each end on
+  // the key's own, and a quote took one of them ("ms-1…c6d\"" instead of
+  // "ms-1…5c6d\""). The frame has to stay outside the mask, as it does for
+  // the other shapes and for the word readings.
+  const key = "ms-1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"
+  const want = "ms-1…5c6d"
+  assert.equal(arg(key), want, "the bare key")
+  for (const [open, close] of [["(", ")"], ["[", "]"], ["{", "}"], ['"', '"'], ["'", "'"]]) {
+    assert.equal(arg(open + key + close), open + want + close, `${open}${close} frame`)
+    assert.equal(scrub(open + key + close), open + want + close, `scrub ${open}${close} frame`)
+  }
+  assert.equal(arg(`{"token":"${key}"}`), `{"token":"${want}"}`, "a JSON value keeps its quotes")
+  assert.equal(arg(`{"token":"${key}",`), `{"token":"${want}",`, "and its comma")
+  assert.equal(scrub(`token=${key}`), `token=${want}`, "a NAME=value keeps its name")
+})
+
 test("a key cut by a space is masked in the CLI, whatever its shape", () => {
   // arg()/scrub() join the pieces of a cut only when the value carries an ms-
   // or sk- front; a UUID, a GitHub token or a digest cut by a space went out
@@ -6407,5 +6429,179 @@ test("a launcher that cannot be followed is refused even without --dir, and one 
   } finally {
     rmSync(noDir, { recursive: true, force: true })
     rmSync(mixed, { recursive: true, force: true })
+  }
+})
+
+// ── Round 51: a long line of ms- punctuation must not be quadratic ───────
+// msBody is asked of every tokenShaped match. Its second arm ends in
+// [\x21-\x7e]*\d, and when the tail carries no digit the scan restarts at each
+// starting position: a 32 KiB line of "--token=ms-====…" took 5.4 s, 64 KiB
+// took 22 s, and 1 MiB never finished. One line of a child's output (a rule of
+// "------", a base64 padding of "==") reaches this path, so the shape has to be
+// read in linear time.
+test("a long line of ms- punctuation is read in one pass", () => {
+  for (const [name, v] of [
+    ["=", "--token=ms-" + "=".repeat(65536)],
+    ["!", "--token=ms-" + "!".repeat(65536)],
+    ["/", "--token=ms-" + "/".repeat(65536)],
+    ["hex+g", "--token=ms-" + "a".repeat(65536) + "g"],
+  ]) {
+    const t0 = performance.now()
+    arg(v)
+    const ms = performance.now() - t0
+    assert.ok(ms < 2000, `${name} 的 64 KiB 单行耗时 ${ms.toFixed(0)}ms，判定为二次回溯未修`)
+  }
+})
+
+test("an ms- shape four million characters long does not overflow the stack", () => {
+  // tokenShaped's body is (?:INV*[\x21-\x7e]){11,}; the {11,} loop puts one
+  // frame on V8's regexp stack per character, and a single line of 4,194,304
+  // characters threw RangeError: Maximum call stack size exceeded. spawnSync
+  // allows a 16 MiB line, so the shape has to be read without a per-character
+  // stack frame.
+  const long = "ms-" + "a".repeat(4_300_000)
+  const t0 = performance.now()
+  assert.doesNotThrow(() => arg(long), "a long ms- shape must not throw")
+  const ms = performance.now() - t0
+  assert.ok(ms < 10000, `4.3M 字符的 ms- 形状耗时 ${ms.toFixed(0)}ms`)
+})
+
+// ── Round 51: what the review found reaching the terminal ───────────────
+// The criterion is the one this file already uses (longestKept, above): a
+// secret must not survive as 12 or more contiguous characters. Each case is
+// an input the review reproduced on the CLI and the masked answer now owes.
+const assertKept = (actual, secret, what) => {
+  const kept = longestKept(actual, secret)
+  assert.ok(kept.length < 12, `${what}：原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}：${JSON.stringify(actual)}`)
+}
+
+test("a token in a URL query, path or fragment keeps only its four ends", () => {
+  // The backstop masked only [A-Za-z0-9]{16,} runs once a word carried a "/",
+  // so isKey's separator arm failed the whole word and the vendor front and the
+  // 12-13 digit id groups went out as written: an xoxb token in "?token=" …
+  // "&x=1" left 36 characters on the terminal.
+  const cases = [
+    "xoxb-43519999-19440999-OQaLmNbVcXz4s",
+    "github_pat_11ABCDEFG0123456789_AbCdEfGhIjKlMnOpQrSt",
+    "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+    "sk-ant-api03-Eyai1pkJrF_KbwtX9ZqLmNeR2vTuH",
+    "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+  ]
+  for (const key of cases) {
+    for (const where of [
+      `https://h/v1?token=${key}&x=1`,
+      `https://h/v1/keys/${key}/info`,
+      `https://h/v1#${key}`,
+    ]) {
+      assertKept(arg(where), key, `arg ${where}`)
+      assertKept(scrub(where), key, `scrub ${where}`)
+    }
+  }
+})
+
+test("a token cut by a space or a line break is still masked whole", () => {
+  // Two pieces, each under every floor on its own, were printed as written.
+  const cases = [
+    "wJalrXUtnFEMI/K7MDENG/bPx RfiCYEXAMPLEKEY",
+    "AKIAI OSFODNN7EXAMPLE",
+    "12 3e4567-e89b-12d3-a456-426614174000",
+    "123e\n4567-e89b-12d3-a456-426614174000",
+    "ghp_Abcd1234Efgh567 8Ijkl9012Mnop3456Qrst",
+    "9f8e7d6c5b4a3928 1706f5e4d3c2b1a0",
+  ]
+  for (const key of cases) {
+    const flat = key.replace(/\s+/g, "")
+    for (const wrap of [(k) => `{"key":"${k}"}`, (k) => `token=${k}`, (k) => k]) {
+      const input = wrap(key)
+      assertKept(arg(input), flat, `arg ${JSON.stringify(input)}`)
+      assertKept(scrub(input), flat, `scrub ${JSON.stringify(input)}`)
+    }
+  }
+})
+
+test("a token cut by a space is still masked whole on a 32 KiB line", () => {
+  // joinFramed stopped at 8 KiB, so on a long line (a wrapped child's output, a
+  // pretty-printed error) neither half of a cut key cleared a floor on its own
+  // and the per-word pass has no join of them: the first 21 characters of an
+  // AWS secret went out as written. The walk is linear, so it runs to the same
+  // 32 KiB bound the other whole-text readings use; past that the per-word
+  // pass still masks a key stored as whole words (the README says so).
+  const secret = "wJalrXUtnFEMI/K7MDENGbPxRfiCYEXAMPLEKEY"
+  const cut = "wJalrXUtnFEMI/K7MDENG bPxRfiCYEXAMPLEKEY"
+  const padded = `${cut} ${"a".repeat(32 * 1024 - cut.length - 1)}`
+  assert.ok(padded.length > 32 * 1024 - 16 && padded.length < 32 * 1024 + 1)
+  assertKept(arg(padded), secret, "arg on a 32 KiB line")
+  assertKept(scrub(padded), secret, "scrub on a 32 KiB line")
+  // the same text with the join a line break supplies is still one key
+  assertKept(arg(`x ${"b".repeat(16000)}\n${cut}`), secret, "arg after a long line")
+})
+
+test("an ms- token cut by one punctuation character keeps only its four ends", () => {
+  // spacedKey stopped at the first non-key character after the front and
+  // returned a short body, which arg() took in preference to splitKey's
+  // whole-key reading: 15-23 characters reached the terminal in a sentence.
+  const body = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"
+  for (const cut of [":", "(", ")", "[", "]", "{", "}", "<", ">", "?", "!", "@", "#", "$", "%", "^", "&", "*", "'", '"', ",", ";", "|", "~", "`", "\\"]) {
+    const at = 22
+    const key = `ms-${body.slice(0, at)}${cut}${body.slice(at)}`
+    const input = `no key ${key} for provider`
+    assertKept(arg(input), body, `arg cut by ${JSON.stringify(cut)}`)
+    assertKept(scrub(input), body, `scrub cut by ${JSON.stringify(cut)}`)
+  }
+})
+
+test("an ms- token with an invisible or confusable mark in it keeps only its four ends", () => {
+  // INV/GLUE strip only Cc/Cf; a variation selector (Mn), a Cyrillic
+  // look-alike, a U+2007 figure space, or two zero-width spaces in a row are
+  // none of those, and tokenShaped's ASCII body stopped at them.
+  const body = "kT3hblJXj0aUHHyokFhDF2v6rNo1AEWuQL"
+  const marks = [
+    ["️", "VS16"],
+    ["е", "Cyrillic e"],
+    [" ", "figure space"],
+    ["​​", "two ZWSP"],
+    ["́", "combining acute"],
+    ["О", "Cyrillic O"],
+  ]
+  for (const [mark, name] of marks) {
+    const at = 26
+    const key = `ms-${body.slice(0, at)}${mark}${body.slice(at)}`
+    for (const input of [key, `error: key ${key} rejected`]) {
+      assertKept(arg(input), body, `arg ${name}`)
+      assertKept(scrub(input), body, `scrub ${name}`)
+    }
+  }
+  // a UUID with one mark in it was printed whole
+  const uuid = "d2a6da84-c65b-bc2d-6f41-25dc258045c3"
+  const cutUuid = `${uuid.slice(0, 26)}️${uuid.slice(26)}`
+  assertKept(arg(cutUuid), uuid, "UUID with VS16")
+  assertKept(scrub(cutUuid), uuid, "UUID with VS16")
+})
+
+// ── Round 51: a vendor key in all lower case ────────────────────────────
+// Every reading asked for a capital, a digit, or a run of 16+; a vendor key
+// written all in lower case is none of those, and it went out whole in every
+// context. No word of prose carries a vendor front, so the front alone is
+// enough once the body is long enough to be a key rather than a word
+// ("sk-preset-20261031" stays a provider id, and "sk-" alone is not a key).
+test("a vendor key written in lower case is masked whole", () => {
+  const keys = [
+    "ghp_abcdefghijklmnopqrstuvwx",
+    "ghp_abcde12345fghijklmno",
+    "xoxb-abcdefghijklmnopqrstuvwx",
+    "sk-ant-api03-eyai1pkjrf_kbwt",
+    "github_pat_abcdefghijklmnopqrstuvwx",
+  ]
+  const wraps = [(k) => `error ${k} end`, (k) => `key=${k}`, (k) => `(${k})`, (k) => `https://h/v1?token=${k}&x=1`]
+  for (const key of keys) {
+    for (const wrap of wraps) {
+      const input = wrap(key)
+      assertKept(arg(input), key, `arg ${JSON.stringify(input)}`)
+      assertKept(scrub(input), key, `scrub ${JSON.stringify(input)}`)
+    }
+  }
+  // a front with a short, word-like or versioned body is not a key
+  for (const s of ["sk-preset-20261031 is a provider id", "the sk- prefix names the vendor", "ghp_ short"]) {
+    assert.equal(arg(s), s, `ordinary text was masked: ${JSON.stringify(s)} -> ${JSON.stringify(arg(s))}`)
   }
 })

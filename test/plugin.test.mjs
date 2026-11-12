@@ -28,6 +28,30 @@ if (Number.isFinite(SHIFT)) {
   Date.now = () => SHIFT + (realNow() - LOAD)
 }
 
+// The two clock modes prepublish and CI run are only worth their name if the
+// shim is actually in effect: an env read renamed, the shift dropped, or the
+// --import path inert would leave the mode green while testing the plain clock
+// it was meant to move. Each mode carries a test that only runs inside it, so
+// prepublish can require the mode's count to exceed the plain run's by one —
+// a cheap proof the mode did something.
+if (Number.isFinite(SHIFT)) {
+  test("the shifted clock is in effect for this run", () => {
+    // SHIFT is 2030-01-01; the real clock is below it until then, so a read
+    // that clears it can only be the shift. (After 2030 this proves less, and
+    // the mode's own fixtures — built from the shifted clock — do the work.)
+    assert.ok(Date.now() >= SHIFT, `MSMOLI_FAKE_NOW=${SHIFT} must move Date.now(), got ${Date.now()}`)
+  })
+}
+if (Date.name === "TickingDate") {
+  test("the ticking clock shim is in effect for test files", () => {
+    // reads from a test file advance a second each; two reads in a row differ
+    // unless the shim is inert (the plain clock returns the same millisecond)
+    const a = Date.now()
+    const b = Date.now()
+    assert.notEqual(a, b, "the shim must tick between two reads from a test file")
+  })
+}
+
 const TEST_CONFIG = join(tmpdir(), `msmoli-test-${process.pid}.json`)
 process.env.MAGPIE_MSMOLI_CONFIG = TEST_CONFIG
 writeFileSync(TEST_CONFIG, JSON.stringify({ checkinWindow: false }))
@@ -274,6 +298,21 @@ const withUrlFetch = async (responses, fn) => {
 
 // bySite answers differently on the two origins of the same path.
 const bySite = (cn, intl) => (origin) => (origin === CN_ORIGIN ? cn : intl)
+
+// ledgerFailure reads the card usage answers when the balance was read but the
+// ledger was not: the plan, the balance, and one window carrying the failure's
+// own words. Today's numbers are "not said" (null / 0), never guessed, and the
+// next poll reads the ledger again. A 401 is the sign-in's and still fails the
+// whole card, so it never reaches here.
+const ledgerFailure = (u) => {
+  assert.equal(u.error, undefined, `the balance was read and must stand: ${u.error}`)
+  const w = u.windows?.[0]
+  assert.ok(w, `a card with the balance and the reason: ${JSON.stringify(u)}`)
+  assert.equal(w.used, null, "today's numbers are not said")
+  assert.equal(w.amount, 0, "nor is today's spend")
+  assert.equal(w.limit, 0, "nor today's claim")
+  return w.display
+}
 
 test("one provider serves both sites, and it is the only entry", () => {
   // A second provider would be a second card the user has to tell apart; the
@@ -803,6 +842,82 @@ test("the remembered sites are bounded, and the oldest goes first", async () => 
   assert.equal(testables.sites.has(tokens[64]), true, "the newest is kept")
 })
 
+test("a deferred day is bounded like the remembered sites", async () => {
+  // An `inactive` after noon buys one half-hour re-read, remembered per token
+  // for the day. The map is pruned of other days, but a single day of tokens
+  // (a deleted account's included) would still grow for the life of a
+  // long-lived host; the bound is the same 64 the site cache uses.
+  testables.deferred.clear()
+  const token = (i) => `ms-defer-${String(i).padStart(4, "0")}-0000-0000-000000000029`
+  await withWindow(false, `${today} 14:30:00`, async () => {
+    for (let i = 0; i < 65; i += 1) {
+      await withFetch(
+        {
+          [TX_PATH]: { body: { success: true, data: { records: [] } } },
+          "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+        },
+        async () => auth.checkin(async () => ({ type: "api", key: token(i) })),
+      )
+    }
+  })
+  assert.equal(testables.deferred.size, 64, "the deferral map is capped at 64 tokens")
+  assert.equal(testables.deferred.has(token(0)), false, "the oldest is the one evicted")
+  assert.equal(testables.deferred.has(token(64)), true, "the newest is kept")
+  testables.deferred.clear()
+})
+
+test("a malformed stamp is not read as today", () => {
+  // The comparison is the date's first ten characters, so a stamp that runs
+  // straight on into a digit ("2026-10-2609:13:40") has the same prefix as a
+  // real one. Nothing writes that today; reading it as today's row would
+  // count a malformed row as this run's claim.
+  const { onDay } = testables
+  assert.equal(onDay(today, today), true, "a bare date is the day")
+  assert.equal(onDay(`${today} 09:13:40`, today), true, "a time after a space is the day")
+  assert.equal(onDay(`${today}T09:13:40`, today), true, "so is an ISO T")
+  assert.equal(onDay(`${today}09:13:40`, today), false, "a stamp running into a digit is not")
+  assert.equal(onDay(yesterday, today), false, "and another day is another day")
+})
+
+test("a relative MAGPIE_MSMOLI_CONFIG is not resolved against the host's cwd", async () => {
+  // The env var is a path the user sets; a relative one is resolved against
+  // whatever folder magpie was started in, so the file read is not the one the
+  // user meant — and with none there the window falls back to the default
+  // 08:30-10:00, silently ignoring the `checkinWindow: false` the user wrote.
+  // The XDG variable is refused for exactly this reason; the override is now
+  // too, and the host's own folder is used instead. The clock is pinned
+  // before the default window so the two readings answer differently.
+  const dir = tmpDir("msmoli-relcfg-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  process.env.MAGPIE_MSMOLI_CONFIG = "msmoli-relative.json"
+  const realNow = Date.now
+  Date.now = () => Date.parse(`${today} 07:00:00`.replace(" ", "T") + "+08:00")
+  try {
+    const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async () => {} } } })
+    let reads = 0
+    const real = globalThis.fetch
+    globalThis.fetch = async (url) => {
+      const u = new URL(url)
+      const path = u.pathname + u.search
+      if (path === "/api/v1/users/login/info") return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+      reads += 1
+      const records = reads === 1 ? [] : [day()]
+      return reply({ body: { success: true, data: { records } } })
+    }
+    try {
+      const r = await p.auth.checkin(async () => ({ type: "api", key: "ms-relcfg-0000-0000-000000000030" }))
+      assert.equal(r.outcome, "claimed", `the folder's own file must be read: ${r.message}`)
+    } finally {
+      globalThis.fetch = real
+    }
+  } finally {
+    Date.now = realNow
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
 test("a token both sites refuse is expired, and says so", async () => {
   testables.sites.clear()
   const refused = { status: 401, body: { success: false, message: "Invalid authentication" } }
@@ -854,6 +969,39 @@ test("a 401 after the site is known names that site", async () => {
   )
   assert.equal(u.signIn, "expired")
   assert.match(u.error, /令牌失效或不属于国际站（HTTP 401）/, u.error)
+})
+
+test("what the two sites say is ranked by what it says, not by which was asked first", async () => {
+  // Both sites fail. The order they are asked in depends on which site the
+  // token was remembered on, so a priority decided by arrival makes the card's
+  // message depend on history: the first 4xx won. A ModelScope-shaped 403 is
+  // the one failure that says the site knows this token and refused it by
+  // policy, so it outranks every other failure; among the rest the first is
+  // still the one reported (it is the one the user was closest to).
+  //
+  // The refusal a stale remembered site gives is deliberately NOT ranked
+  // above a 4xx: every token meets a 401 on the site it does not belong to, so
+  // reading it as proof would sign a live login out (see "a stale remembered
+  // site's 401 does not take a live sign-in down with it").
+  const cases = [
+    { name: "remembered on the domestic site", token: "ms-rank-0000-0000-0000-000000000031", known: "cn" },
+    { name: "remembered on the international site", token: "ms-rank-0000-0000-0000-000000000032", known: "intl" },
+  ]
+  for (const c of cases) {
+    testables.sites.clear()
+    testables.sites.set(c.token, c.known === "cn" ? testables.CN : testables.INTL)
+    // the site asked first answers a plain 4xx (a path answer), the other a
+    // ModelScope 403; whichever comes first, the 403 is the report
+    const responses = {
+      [BALANCE_PATH]: bySite({ status: 404, body: { message: "not found" } }, { status: 403, body: { success: false, code: "RiskControl" } }),
+      [TX_PATH]: bySite({ status: 404, body: { message: "not found" } }, { status: 403, body: { success: false, code: "RiskControl" } }),
+    }
+    const u = await withUrlFetch(responses, async () => auth.usage(async () => ({ type: "api", key: c.token })))
+    assert.match(u.error, /风控/, `${c.name}: the 403 is the answer that names the token: ${u.error}`)
+    assert.match(u.error, /HTTP 403/, `${c.name}: and the status code the README promises: ${u.error}`)
+    assert.equal(u.signIn, "", `${c.name}: a 403 is not a bad token`)
+  }
+  testables.sites.clear()
 })
 
 test("checkin claims when the day had no daily_active", async () => {
@@ -1714,8 +1862,8 @@ test("a ledger whose records is not a list is a failure, not a crash", async () 
     },
     async () => {
       const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
-      assert.ok(u.error, "a body without a real ledger is not a balance of zero")
-      assert.doesNotMatch(u.error, /is not a function/, "an internal error must not reach the card")
+      const said = ledgerFailure(u)
+      assert.doesNotMatch(said, /is not a function/, "an internal error must not reach the card")
     },
   )
 })
@@ -1755,10 +1903,12 @@ test("a 403 is risk control, not a token that expired", async () => {
       },
       async () => {
         const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
-        assert.ok(u.error, `usage should report the refusal at ${at}`)
-        assert.match(u.error, /风控/, `${at}: the message should name the refusal`)
-        assert.match(u.error, /HTTP 403/, `${at}: and the status code the README promises: ${u.error}`)
-        assert.equal(u.signIn, "", `${at}: a 403 must not mark the sign-in expired`)
+        let said = u.error
+        if (at === "balance") assert.ok(said, `usage should report the refusal at ${at}`)
+        else said = ledgerFailure(u)
+        assert.match(said, /风控/, `${at}: the message should name the refusal`)
+        assert.match(said, /HTTP 403/, `${at}: and the status code the README promises: ${said}`)
+        assert.notEqual(u.signIn, "expired", `${at}: a 403 must not mark the sign-in expired`)
       },
     )
   }
@@ -2471,8 +2621,7 @@ test("a non-finite amount from the server never reaches the card", async () => {
     },
     async () => {
       const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
-      assert.match(u.error ?? "", /total_amount 不是数字/, `should refuse the row's amount: ${u.error}`)
-      assert.ok(!u.windows, "no card is built from a ledger we did not understand")
+      assert.match(ledgerFailure(u), /total_amount 不是数字/, "should refuse the row's amount")
     },
   )
 })
@@ -2532,7 +2681,9 @@ test("a spent budget sends no request at all", async () => {
     }
     try {
       const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
-      assert.ok(u.error, `usage must fail rather than answer (spent ${spent} ms)`)
+      // the balance answered before the budget ran out; the ledger never went
+      assert.equal(u.balance, "300 魔粒可用", `the balance must survive (spent ${spent} ms)`)
+      assert.match(ledgerFailure(u), /预算/, `the day line says why the numbers are missing (spent ${spent} ms)`)
     } finally {
       globalThis.fetch = realFetch
       Date.now = realNow
@@ -3500,9 +3651,10 @@ test("a usage read refused by risk control names it, without 'not JSON' in the m
       },
       async () => {
         const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
-        assert.match(u.error, /风控/, `${at}: should name risk control, got: ${u.error}`)
-        assert.doesNotMatch(u.error, /不是 JSON/, `${at}: a 403 is not a parse failure`)
-        assert.equal(u.signIn, "", `${at}: a 403 is not a bad token`)
+        const said = at === "balance" ? u.error : ledgerFailure(u)
+        assert.match(said, /风控/, `${at}: should name risk control, got: ${said}`)
+        assert.doesNotMatch(said, /不是 JSON/, `${at}: a 403 is not a parse failure`)
+        assert.notEqual(u.signIn, "expired", `${at}: a 403 is not a bad token`)
       },
     )
   }
@@ -3533,10 +3685,12 @@ test("a non-200 that answers JSON repeats what it said, not 'not JSON'", async (
       },
       async () => auth.usage(async () => ({ type: "api", key: "ms-test" })),
     )
-    assert.ok(u.error, `${at}: a 429 is an error`)
-    assert.match(u.error, want, `${at}: the server's own words: ${u.error}`)
-    assert.doesNotMatch(u.error, /不是 JSON/, `${at}: a body that parsed is not a parse failure`)
-    assert.equal(u.signIn, "", `${at}: a rate limit is not a bad token`)
+    let said = u.error
+    if (at === "balance") assert.ok(said, `${at}: a 429 is an error`)
+    else said = ledgerFailure(u)
+    assert.match(said, want, `${at}: the server's own words: ${said}`)
+    assert.doesNotMatch(said, /不是 JSON/, `${at}: a body that parsed is not a parse failure`)
+    assert.notEqual(u.signIn, "expired", `${at}: a rate limit is not a bad token`)
   }
   // and the same at the check-in's own ledger read, which has a copy of the line
   const r = await withFetch(
@@ -3611,10 +3765,17 @@ test("a 2xx that is not 200 is a refusal on the usage reads too", async () => {
       },
       async () => auth.usage(async () => ({ type: "api", key: "ms-test" })),
     )
-    assert.ok(u.error, `${at}: a 202 is not an answer`)
-    assert.equal(u.windows, undefined, `${at}: no card from a request still in flight`)
-    assert.match(u.error, /HTTP 202/, `${at}: names the status: ${u.error}`)
-    assert.doesNotMatch(u.error, /不是 JSON/, `${at}: a body that parsed is not a parse failure`)
+    if (at === "balance") {
+      assert.ok(u.error, `${at}: a 202 is not an answer`)
+      assert.equal(u.windows, undefined, `${at}: no card from a balance we could not read`)
+      assert.match(u.error, /HTTP 202/, `${at}: names the status: ${u.error}`)
+      assert.doesNotMatch(u.error, /不是 JSON/, `${at}: a body that parsed is not a parse failure`)
+    } else {
+      // the balance was read; the ledger's 202 leaves the day's numbers unsaid
+      const said = ledgerFailure(u)
+      assert.match(said, /HTTP 202/, `${at}: names the status: ${said}`)
+      assert.doesNotMatch(said, /不是 JSON/, `${at}: a body that parsed is not a parse failure`)
+    }
   }
   // and the check-in's ledger read has its own copy of the gate
   const r = await withFetch(
@@ -4156,8 +4317,9 @@ test("a Data that is null is a body we do not understand, not an internal error"
       assert.match(r.message, /账单格式/, `the card should say what we could not read: ${r.message}`)
       assert.doesNotMatch(r.message, /Cannot read propert/, "an internal error must not reach the card")
       const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
-      assert.match(u.error, /账单格式/, `usage reads the same ledger: ${u.error}`)
-      assert.doesNotMatch(u.error, /Cannot read propert/, "an internal error must not reach the card")
+      const said = ledgerFailure(u)
+      assert.match(said, /账单格式/, `usage reads the same ledger: ${said}`)
+      assert.doesNotMatch(said, /Cannot read propert/, "an internal error must not reach the card")
     },
   )
   await withFetch(
@@ -4624,12 +4786,11 @@ test("a request cut short by the hook's own deadline does not say 0 seconds", as
         }
         try {
           const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
-          assert.match(u.error ?? "", /请求超时/, `should name the timeout: ${u.error}`)
-          assert.doesNotMatch(u.error ?? "", /0 秒/, `a zero-second timeout says nothing: ${u.error}`)
-          assert.ok(
-            (u.error ?? "").includes(`请求超时（${said}）`),
-            `${left}ms is ${said}, the ceiling of the budget: ${u.error}`,
-          )
+          // the balance read answered; the ledger's timeout is the day line's
+          const where = ledgerFailure(u)
+          assert.match(where, /请求超时/, `should name the timeout: ${where}`)
+          assert.doesNotMatch(where, /0 秒/, `a zero-second timeout says nothing: ${where}`)
+          assert.ok(where.includes(`请求超时（${said}）`), `${left}ms is ${said}, the ceiling of the budget: ${where}`)
         } finally {
           globalThis.fetch = real
           Date.now = realNow
@@ -4783,8 +4944,8 @@ test("a ledger amount we cannot read fails the read, it does not become 0", asyn
       },
       async () => {
         const u = await auth.usage(async () => ({ type: "api", key: "ms-test" }))
-        assert.match(u.error ?? "", /total_amount/, `amount ${JSON.stringify(amount)} must fail the read: ${JSON.stringify(u)}`)
-        assert.ok(!u.windows, "no card from a ledger we did not understand")
+        const said = ledgerFailure(u)
+        assert.match(said, /total_amount/, `amount ${JSON.stringify(amount)} must fail the read: ${JSON.stringify(u)}`)
       },
     )
     await withFetch(
@@ -5647,9 +5808,24 @@ test("usage names an answer it cannot read, at either step and in its own words"
       },
       async () => auth.usage(async () => ({ type: "api", key: "ms-test" })),
     )
-    assert.ok(u.error, `${at} with ${JSON.stringify(bad)} must fail`)
-    assert.match(u.error, want, `the failure should be this step's own: ${u.error}`)
-    assert.equal(u.windows, undefined, `no window from a read we could not understand (${at})`)
+    if (at === "balance") {
+      assert.ok(u.error, `${at} with ${JSON.stringify(bad)} must fail`)
+      assert.match(u.error, want, `the failure should be this step's own: ${u.error}`)
+      assert.equal(u.windows, undefined, `no window from a balance we could not read (${at})`)
+    } else {
+      // the balance was read; the ledger failing must not take it off the card
+      // with it. The step's own wording still reaches the card (the day line
+      // carries it), so this still pins the gate call, and the numbers that
+      // would have come from the ledger are "not said" rather than zero.
+      assert.equal(u.error, undefined, `the balance stands on its own (${at}): ${u.error}`)
+      assert.equal(u.balance, "5 魔粒可用", `the balance must survive a failed ledger read (${at})`)
+      const w = u.windows?.[0]
+      assert.ok(w, `a card with the balance, no day numbers (${at})`)
+      assert.match(w.display, want, `the failure should be this step's own: ${w.display}`)
+      assert.equal(w.used, null, `today's numbers are not said (${at})`)
+      assert.equal(w.amount, 0, `nor is today's spend (${at})`)
+      assert.equal(w.limit, 0, `nor today's claim (${at})`)
+    }
   }
   // The check-in path reads the same ledger through todayEarn, which has its
   // own copy of the two lines — mutating either of *those* stayed green while
@@ -7387,8 +7563,7 @@ test("a finite amount too large to render is refused, not turned into Infinity",
     },
     async () => {
       const u = await auth.usage(async () => ({ type: "api", key: "ms-huge-row" }))
-      assert.match(u.error ?? "", /total_amount 不是数字/)
-      assert.ok(!u.windows)
+      assert.match(ledgerFailure(u), /total_amount 不是数字/)
     },
   )
   // and the check-in, whose credit is summed the same way
@@ -7419,8 +7594,7 @@ test("a sum that overflows only after adding is refused too", async () => {
     },
     async () => {
       const u = await auth.usage(async () => ({ type: "api", key: "ms-sum-over" }))
-      assert.ok(u.error, `a sum we cannot render is a failure: ${JSON.stringify(u.windows)}`)
-      assert.ok(!u.windows)
+      assert.match(ledgerFailure(u), /金额超出可显示范围|不是数字/, `a sum we cannot render is a failure: ${JSON.stringify(u.windows)}`)
     },
   )
 })

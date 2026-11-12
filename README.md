@@ -221,7 +221,7 @@ budgets this document describes.
 If you are on **0.2.0**, that version ships an older `bin/sync.mjs` with both
 directions, but it keeps the international site in a second provider and
 predates this round of fixes. Upgrade (`npm i -g magpie-plugin-msmoli@latest`
-or `magpie plugin update msmoli`) to get what this document describes.
+or `magpie plugin update`) to get what this document describes.
 
 It syncs the **domestic site only**: the built-in preset it reads is the
 `modelscope.cn` one. Sign an international account in by hand.
@@ -657,13 +657,20 @@ The terms and risks are in
   shape; a proxy's 403 page is reported as an ordinary refusal. A sign-in
   that was refused after the day's credits landed reports the expiry but
   keeps the day's answer.
-- **A body it doesn't understand fails; it never reads as zero.** A missing
-  `data`, a list where an object belongs, a missing or non-numeric
-  `available_balance`: each is a failure with its reason, because
-  "0 魔粒可用" would be a definite and false answer. Server text (a message, a
-  grant's title) has any key in it masked before it reaches the card or the log.
-- `MAGPIE_MSMOLI_CONFIG` overrides the config file's path. It exists for the
-  test suite, and works in production too.
+- **A body it doesn't understand is not read as zero.** A missing `data`, a
+  list where an object belongs, a missing or non-numeric `available_balance`:
+  a balance like that is a failure with its reason, because "0 魔粒可用"
+  would be a definite and false answer. A *ledger* that fails is the day
+  line's problem, not the card's: the balance was read before it and stays on
+  the card, the line carries the failure's own words
+  (`账单查询失败：… · 余额 100`), today's numbers are "not said" (no window
+  percentage) rather than 0, and the next poll reads the ledger again. A 401
+  is the sign-in's, and still answers expired. Server text (a message, a
+  grant's title) has any key in it masked before it reaches the card or the
+  log.
+- `MAGPIE_MSMOLI_CONFIG` overrides the config file's path. An absolute path
+  only: a relative one would be resolved against whatever folder magpie was
+  started in, so it is ignored.
 - The other 170 credits a day (liking items, posting AIGC works and models) have
   no API and would mean driving the web UI. This plugin doesn't touch them.
 

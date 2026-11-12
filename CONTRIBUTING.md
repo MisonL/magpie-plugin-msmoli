@@ -248,7 +248,9 @@ node --test                     # the suite, no network
 npm pack --dry-run             # what goes in: module, sync CLI, README, licence, package.json
 npm version <patch|minor> -m "v%s — <one line>"
 git push origin main --tags
-npm publish                     # prepublishOnly runs the suite again
+npm publish                     # prepublishOnly runs every mode again, and
+                                # checks each one's own count: a mode that
+                                # found no tests is not a green mode
 gh release create "v$(node -p 'require("./package.json").version')" \
   --title "v$(node -p 'require("./package.json").version')" --verify-tag --generate-notes
 ```
@@ -306,10 +308,14 @@ versions. It is not submitted to the community marketplace.
   nothing usable — a 401, a transport failure or timeout, a 5xx, a JSON 429, a
   body that is not JSON, or a parsed 4xx. A timeout is the link, not the site,
   so a remembered site that hangs no longer traps the account on it. The first
-  usable answer wins. When neither site gives one, a parsed 4xx/5xx (a
-  risk-control 403, say) is preferred as the report over the other site's
-  transport error; only when neither site answered at all does the first
-  failure come back. The result is cached per token (`sites`, the last 64,
+  usable answer wins. When neither site gives one, the report is ranked by
+  what it says about the token, not by which site was asked first: a
+  ModelScope-shaped 403 (the site knows the token and refused it by policy)
+  first, then any other parsed 4xx, then a 429/5xx, then the transport error;
+  only when every site refused the token with a 401 is it reported expired.
+  A stale remembered site's 401 is not proof of that (every token meets a 401
+  on the site it does not belong to), so it never outranks another site's
+  answer. The result is cached per token (`sites`, the last 64,
   oldest evicted first), so polls do not re-probe.
   Everything that differs between the sites lives in a profile object —
   origin, the plan line, and the CN/INT-site word in the 401. Only

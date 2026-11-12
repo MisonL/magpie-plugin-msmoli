@@ -421,8 +421,17 @@ export function presetCandidates(providers, from = "", keyed = true) {
 // pasting one, or a child's echo) turned into a space first cut the token in
 // two, each piece under the floor, and both were printed whole. A line break
 // still ends a run — a token never spans one.
-const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
-const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]){11,}`, "giu")
+// Cc/Cf is not the whole of "invisible": a variation selector (U+FE0F) and a
+// combining mark are Mn, and a figure space (U+2007) is Zs. A key with one of
+// those inside it was cut in two by tokenShaped's ASCII body and its tail went
+// out whole. The space-like characters are the Zs block minus U+0020 and
+// U+0009 (a real space is a word break, not part of a key).
+const INV = String.raw`(?:(?![\n\r\t \u00A0\u3000])[\p{Cc}\p{Cf}\p{Mn}\p{Me}\p{Zs}])`
+// {11,} with a quantifier inside its loop put one frame on V8's regexp stack
+// per character: a single line of 4.2M characters threw RangeError. A real
+// ModelScope key is under 200 characters; 512 is an upper bound on the shape,
+// not on the text being read. (A key longer than 512 characters is not a key.)
+const tokenShaped = new RegExp(String.raw`m${INV}*s${INV}*-(?:${INV}*[\x21-\x7e]){11,512}`, "giu")
 // A key cut into pieces by whitespace is still one key, and the key starts
 // where the ms- front does. The value may carry anything before it: the flag
 // it was pasted behind ("--token=ms-01234 56789abc …"), a path (--dir
@@ -481,8 +490,15 @@ function spacedKey(s) {
   // front found here that the join does not make only costs the old path.
   if (!MS_FRONT.test(s) && !SK_FRONT.test(s)) return null
   // a control or format character is not a cut's spelling (a key with one in
-  // it is one word); a line break is, and is read like a space
-  if (/(?:(?![\n\r])[\p{Cc}\p{Cf}])/u.test(s)) return null
+  // it is one word); a line break is, and is read like a space. A combining
+  // mark (Mn/Me — a variation selector, a base letter and its accent) and a
+  // space-like character that PIECE does not cut on (U+2007 and its block) are
+  // the same: the walk cannot step over them (KEYCHARS is ASCII), so it stopped
+  // mid-key and the tail came out as written. Handing the value to the per-word
+  // pass lets GLUE take the mark out and read the key whole. NBSP and the
+  // ideographic space stay out of this list: they are cuts the join is meant to
+  // read across.
+  if (/(?:(?![\n\r])[\p{Cc}\p{Cf}\p{Mn}\p{Me}\u2000-\u200A\u202F\u205F])/u.test(s)) return null
   // the pieces, and where each starts in the value
   const pieces = []
   for (const m of s.matchAll(PIECE)) pieces.push({ text: m[0], at: m.index })
@@ -522,7 +538,6 @@ function spacedKey(s) {
   // The walk starts at the end of the piece the front's own characters sit in:
   // the rest of that piece ("--ms-01234567") is the key's first body, not a
   // gap
-  if (idx < 0) return null
   // the front's own characters, then whatever of its piece follows them with
   // no gap ("ms-aaaa1111", "--ms-01234"): the key begins right after its
   // front, so the rest of that piece is key material, not filler
@@ -587,13 +602,50 @@ function spacedKey(s) {
   if (!/^ms-/i.test(body) && !isKey(body)) return null
   return { pre: s.slice(0, start), body, post: s.slice(end) }
 }
-const keyish = (x) => isKey(x) || /^(?:ms-|sk-)/i.test(x)
-
 // msBody is whether what follows an ms- front reads as key material, the same
 // question the card's keyBody asks: an ordinary word after the front ("The
 // ms-interviewing feature is unavailable") is not a key, and the CLI masked it
 // while the card kept it. A ModelScope key is hex or base64 with a digit in it.
-const msBody = /(?:[0-9a-f]{11,}(?![0-9a-z])|(?=[\x21-\x7e]{11,})(?!\w)[\x21-\x7e]*\d)/
+// Read this as one forward pass, not a regexp with a greedy tail: the old
+// (?!\w)[\x21-\x7e]*\d restarted its scan at every punctuation character, so
+// a long line of "=" behind an ms- front was quadratic (64 KiB took 22s, and a
+// child's output can carry that line). A regexp cannot promise a linear scan
+// here; the two arms below ask the same question over the same characters:
+//   - an 11+ character hex run that ends before a lower-case letter or digit
+//   - a printable run starting on punctuation, 11+ long, with a digit in it
+// Both are answered by walking the string once and remembering where a run
+// started. Invisible characters are taken out of the run by the caller's match
+// (tokenShaped keeps them in its match), so they cannot split a body here.
+const msBody = (m) => {
+  const s = String(m)
+  const HEX = /[0-9a-f]/i
+  const PRINT = /[\x21-\x7e]/
+  // arm 1: an 11+ hex run that does not end in a lower-case letter or digit
+  let hexAt = -1
+  for (let i = 0; i <= s.length; i += 1) {
+    const c = i < s.length ? s[i] : ""
+    if (c !== "" && HEX.test(c)) { if (hexAt < 0) hexAt = i; continue }
+    if (hexAt >= 0 && i - hexAt >= 11 && (c === "" || !/[0-9a-z]/.test(c))) return true
+    hexAt = -1
+  }
+  // arm 2: from EACH punctuation character, an 11+ printable run with a digit
+  // in it. The old regexp checked (?!\w) at every starting position; checking
+  // it only once at the string's start missed "ms-foreign_key-1234-…" (the
+  // match begins with "m", a word character). Walking from each punct keeps
+  // the same answer in one pass per run, without a greedy tail that backtracks
+  // at every position.
+  for (let i = 0; i < s.length; i += 1) {
+    if (/\w/.test(s[i]) || !PRINT.test(s[i])) continue
+    let j = i, digit = false
+    while (j < s.length && PRINT.test(s[j])) {
+      if (/[0-9]/.test(s[j])) digit = true
+      j += 1
+    }
+    if (j - i >= 11 && digit) return true
+    i = j - 1   // the while loop already read everything up to j
+  }
+  return false
+}
 // msKey is whether an ms- run is a key, and the two shapes that are one
 // whatever their body says: a run in capitals (a child that upper-cases its
 // output) and a value that is nothing but the run (a token pasted into a
@@ -601,10 +653,20 @@ const msBody = /(?:[0-9a-f]{11,}(?![0-9a-z])|(?=[\x21-\x7e]{11,})(?!\w)[\x21-\x7
 // Everything else is asked of its body, as the card asks.
 // a version's dotted groups are not key material ("ms-cli 2026.11.9" is a
 // program and its version, as the card reads it)
-const msKey = (m, whole) => whole || m === m.toUpperCase() || (!m.includes(".") && msBody.test(m))
+const msKey = (m, whole) => whole || m === m.toUpperCase() || (!m.includes(".") && msBody(m))
 const show = (s) =>
   String(s ?? "")
-    .replace(tokenShaped, (m) => (msKey(m, String(s).trim() === m) ? mask(m.replace(/[\p{Cc}\p{Cf}]/gu, "")) : m))
+    .replace(tokenShaped, (m) => {
+      // the shape's body runs over printable ASCII, so it takes the frame's
+      // punctuation after the key with it (a quote, a comma, a closing
+      // bracket). The mask spends four characters at each end on the key's
+      // own, so the frame has to stay outside it — "ms-1…c6d\"" was a quote
+      // spending one of the four. The key alphabet's own trailing characters
+      // ("=", "-", "_", ".") stay: they are the key's.
+      const core = m.replace(/[^A-Za-z0-9+/=_.-]+$/, "")
+      if (!core || !msKey(core, String(s).trim() === m)) return m
+      return mask(core.replace(/[\p{Cc}\p{Cf}]/gu, "")) + m.slice(core.length)
+    })
     // an upper-cased vendor key is the same key, and its pieces are too short
     // for the per-word floors ("SK-ANT-API03-EYAI1PKJRF_KBWT")
     .replace(/[^\s]+/g, (w) => (isKey(w) && VENDOR.test(w) && w === w.toUpperCase()) || (w.startsWith("--") && w.includes("=") && isKey(w.slice(w.indexOf("=") + 1))) ? mask(w) : w)
@@ -848,10 +910,22 @@ const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g
 // put back together and ordinary words are left alone. One character wide at
 // each lookaround, so it is a linear pass, not the kind of scan that backtracked
 // to minutes on a body of control characters.
-const GLUE = new RegExp(String.raw`(?<=[A-Za-z0-9+\/=_.-])${INV}(?=[A-Za-z0-9+\/=_.-])`, "gu")
+// INV+ and not INV: two invisible characters in a row (two zero-width spaces,
+// a base letter and its combining mark) are one interruption, and the old
+// single-character form left both in place because neither was between two key
+// characters on its own.
+const GLUE = new RegExp(String.raw`(?<=[A-Za-z0-9+\/=_.-])${INV}+(?=[A-Za-z0-9+\/=_.-])`, "gu")
 // VENDOR and MASKED are index.mjs's, to the letter: a key's front that is no
 // key on its own, and the ellipsis a mask carries.
 const VENDOR = /^(?:sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|akia|asia|aida|aliyun|ssh-rsa|-----begin)/i
+// the same fronts, unanchored, with the key characters that follow: the span
+// of a vendor key inside a larger word (a URL, a path, a header)
+// the body may carry a character the ASCII pass cannot read — a Cyrillic
+// look-alike, a full-width letter — and stopping there left the tail as
+// written. The span runs over letters, numbers and marks of any script; what
+// it stops at is whitespace, a quote and the ASCII punctuation that frames a
+// value.
+const VENDOR_SPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida|ms-|aiza)[\p{L}\p{N}\p{M}_+\/=.-]*/giu
 const MASKED = "…"
 // keyAt: a word is the front of a key when it is key-shaped on its own or
 // carries a vendor's front. A front like "ghp_" or "sk-" is under every word
@@ -868,11 +942,6 @@ const PREFIX = /^(?:sk_(?:live|test)_|sk-|gh[pousr]_|github_pat_|xox[abposr]-|ak
 // on its own: a digit in it, or a short piece with a capital
 const continues = (w) => (/[0-9]/.test(w) || /[A-Z]/.test(w)) && !VENDOR.test(w)
 const glued = (ws) => ws.map((w) => w[0]).join("")
-// startProse: a run's first word is a word of prose — all lower-case letters,
-// two or more of them — and a run that starts with one is no key's head.
-const startProse = (w) => /^[a-z]{4,}$/.test(w) && !VENDOR.test(w) && !/^ms-/.test(w)
-// a word of English written in capitals, three or more letters
-const WORDS = /^[A-Z]{3,}$/
 // splitKey is spacedKey's reading for the keys that carry no front: a UUID, a
 // ghp_ token, a digest, an ms- key cut where the front's own walk does not
 // reach. spacedKey begins at an ms-/sk- front and reads on from there; a value
@@ -1148,7 +1217,6 @@ const maskCut = (s) => {
       if (w.length >= 4 && /^[a-z]{4,}$/.test(w) && !VENDOR.test(w)) proseCount += 1
     }
     if (!/^[0-9]*$/.test(t0)) allNumeric = false
-    let allAlphabet = /^[A-Za-z0-9+/=_.-]*$/.test(t0)
     let anyDigit = /[0-9]/.test(t0)
     let anyCap = /[A-Z]/.test(t0)
     // (a key is shorter than 128 characters, and every reading below is asked
@@ -1183,7 +1251,6 @@ const maskCut = (s) => {
       body += x
       pieces.push(x)
       notePiece(x)
-      if (allAlphabet && !/^[A-Za-z0-9+/=_.-]*$/.test(x)) allAlphabet = false
       if (!sawHard && (/[A-Z]/.test(x) || /\d/.test(x))) sawHard = true
       if (!anyDigit && /[0-9]/.test(x)) anyDigit = true
       if (!anyCap && /[A-Z]/.test(x)) anyCap = true
@@ -1389,7 +1456,7 @@ export function arg(v) {
   // same question of the same characters: it is removed once and handed to each
   // ("glue" is the value with an invisible character between two key characters
   // taken out, so a key cut by one is put back together)
-  const glued0 = orig.replace(GLUE, "")
+  const glued0 = joinFramed(orig.replace(GLUE, ""))
   // the ms- front has its own joiner for pieces of any width (one to a
   // character), and it reads the value as it was typed
   const cut = spacedKey(glued0)
@@ -1412,7 +1479,7 @@ export function arg(v) {
     const folded = foldedSpans(raw)
     if (folded) return folded
   }
-  return argRun(raw)
+  return argRun(joinFramed(raw))
 }
 
 // foldedSpans reads the words that fold (a full-width key, its spaces), and
@@ -1555,6 +1622,83 @@ const frameSpan = (w) => {
   return body ? { lead: w.slice(0, a), body, tail: w.slice(b) } : null
 }
 
+// joinFramed reads a value cut by a space: "key=AKIAI OSFODNN7EXAMPLE",
+// '{"token":"wJalr…/bPx RfiCY…"}', and the bare "wJalr…/bPx RfiCY…". Each
+// half is under every floor on its own, and splitKey sets a framed piece aside
+// whole (it is the frame's, not the key's), so both went out as written —
+// measured: 15 characters of an AWS secret, 34 of a UUID. The run starts where
+// the value does (after the frame's last punctuation, or at the word's first
+// character when there is no frame), and each following word is joined while
+// it is key material. The longest join that reads as a key is the one masked:
+// masking the first prefix that read as a key left the rest of an AWS secret
+// ("wJalr…K7MDENG") on the terminal. A head that already reads as a key on its
+// own is left to the passes that own it, so a truncated key beside a separate
+// word keeps the reading it had.
+const FRAME_AT = /[=:([{,"'`<>]/
+const KEYCH = /^[A-Za-z0-9+/=_.-]+$/
+const STEM = /[^A-Za-z0-9+/=_.-]+$/
+function joinFramed(s) {
+  // the walk is linear (a head reads at most eight words on) and its only
+  // allocation per word is the joined head, so the same 32 KiB bound the other
+  // whole-text readings use applies here: an 8 KiB one left a cut key on a
+  // 32 KiB line to the per-word pass, which has neither half's join.
+  if (s.length > 32 * 1024 || s.includes("…")) return s
+  const words = []
+  for (const m of s.matchAll(PIECE)) words.push({ text: m[0], at: m.index })
+  if (words.length < 2) return s
+  for (let i = 0; i < words.length - 1; i += 1) {
+    const t0 = words[i].text
+    let cut = -1
+    for (let j = 0; j < t0.length; j += 1) if (FRAME_AT.test(t0[j])) cut = j
+    const head = t0.slice(cut + 1)
+    if (!head || !KEYCH.test(head)) continue
+    // a value a frame names is read from after the frame. With no frame the
+    // head has to look like the start of a key and not like a folder or a word:
+    // a vendor front ("AKIAI OSFODNN7EXAMPLE"), or a body that is neither
+    // path-led nor a capitalised/lower-case word ("wJalrXUtnFEMI/K7MDENG/bPx
+    // RfiCY…"). A head like "Users", "Documents", "report" or "/Users" is a
+    // folder with a space in its name, which the README says must keep its
+    // shape.
+    // with no frame the head must read as the start of a key: a vendor front,
+    // or a body of some length that carries a capital after its first letter
+    // ("wJalrXUtnFEMI"). A path segment ("q19jry150l16…") and a word
+    // ("Documents") do not, and a value starting like a path is a folder.
+    if (cut < 0 && !VENDOR.test(head) && !/^ms-/i.test(head)) {
+      if (PATHY.test(head) || /^[\\/]/.test(head)) continue
+      if (head.length < 8 || !/[A-Z]/.test(head.slice(1))) continue
+      // a segment inside a path is a folder's name, not a key's start: joining
+      // it took /var/folders/…/msmoli-two-line-XXXX/ghs_… into one mask
+      const before = words[i].at > 0 ? s[words[i].at - 1] : ""
+      if (before === "/" || before === "\\") continue
+    }
+    // a head that is a key already is the passes' own business: joining it to
+    // the next word would move the four characters a mask is allowed to show
+    if (isKey(head)) continue
+    let joined = head
+    let best = ""
+    let bestEnd = 0
+    for (let k = i + 1; k < words.length && k - i <= 8; k += 1) {
+      const gap = s.slice(words[k - 1].at + words[k - 1].text.length, words[k].at)
+      if (!/^[ \t\r\n\u00a0\u3000/]{1,3}$/.test(gap)) break
+      const stem = words[k].text.replace(STEM, "")
+      if (!stem || !KEYCH.test(stem)) break
+      // a word of prose ends the run: a value's body carries a digit or a
+      // capital, a sentence's next word does not
+      if (!/[0-9]/.test(stem) && !/[A-Z]/.test(stem) && stem.length < 12) break
+      joined += stem
+      if (joined.length >= 12 && /[0-9]/.test(joined) && isKey(joined, false)) {
+        best = joined
+        bestEnd = words[k].at + stem.length
+      }
+    }
+    if (best) {
+      const startAt = words[i].at + cut + 1
+      return s.slice(0, startAt) + mask(best) + s.slice(bestEnd)
+    }
+  }
+  return s
+}
+
 // argWords is the per-word judgement: one word key-shaped is masked whole,
 // and inside a word that is not, its key-like runs and UUIDs are masked. The
 // word in the other spellings a key is printed in — full-width characters,
@@ -1605,6 +1749,53 @@ const argWords = (x) =>
       const value = w.slice(sep + 1)
       if (!value.includes("…") && VENDOR.test(value) && isKey(value)) return `${w.slice(0, sep + 1)}${mask(value)}`
     }
+    // a vendor key sits in a word that also carries a URL or a path: "the
+    // token at https://h/v1?token=xoxb-…&x=1" is one word to this pass, and
+    // marking only the 16+ runs left the front and the 12-13 digit id groups
+    // as written (36 characters of an xoxb token reached the terminal). The
+    // key's own span starts at the vendor front and runs over key characters:
+    // it is masked whole when it is long enough to be a key, and the word keeps
+    // its shape around it, as a path keeps the folder.
+    // a path keeps its shape (README, and the /tmp/ghp_16C7… case): a value
+    // that starts like a path, or whose slashes cut it into path segments, is
+    // left to the run reading. Only a word that is not path-shaped reaches here
+    // a URL is not a folder: "https://h/v1?token=xoxb-…" and
+    // "https://h/keys/xoxb-…/info" carry a scheme, a query or a fragment, and
+    // their key segment is a value, not a folder the user meant to see
+    const urlShaped = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(w) || /[?#]/.test(w)
+    const pathShaped = !urlShaped && /[\\/]/.test(w) && (PATHY.test(w) || w.split(/[\\/]/).filter((seg) => seg.length >= 4).length >= 3)
+    const vendorSpans = pathShaped ? [] : [...w.matchAll(VENDOR_SPAN)].filter((m) => {
+      const span = m[0]
+      const c = span.replace(/[^\p{L}\p{N}]/gu, "")
+      // a vendor key's body is long enough to be a key, not a word. It used to
+      // also ask for a digit or a capital, which left an all-lower-case token
+      // ("ghp_abc…") as written. Length alone would mask a hyphenated name
+      // ("sk-anti-fraud-review-team"), so at least one piece of the body has
+      // to be a single unbroken run of 16+ — a key's length is in one piece,
+      // a name's is in words.
+      if (c.length < 12) return false
+      const body = span.slice(span.search(/[-_]/) + 1)
+      // a piece of 16+ is the plain case ("ghp_abcdefghijklmnopqrstuvwx");
+      // a key whose body is several pieces of 8+ ("sk-ant-api03-…_kbwt") is
+      // still no name if the pieces are all key material and the whole body
+      // is 20+. A name's pieces are words of prose ("anti-fraud-review-team").
+      const pieces = body.split(/[-_./]/).filter(Boolean)
+      // a single piece of 12+ that carries a digit and both cases is a key's
+      // head cut by a space ("ghp_Abcd1234Efgh567 8Ijk…"): a word of prose has
+      // no digit, or is all one case.
+      return pieces.some((piece) => piece.length >= 16) ||
+        (body.length >= 20 && pieces.length >= 3 && pieces.every((piece) => /^[A-Za-z0-9]+$/.test(piece)) && pieces.some((piece) => /[0-9]/.test(piece))) ||
+        (pieces.length === 1 && body.length >= 12 && /[0-9]/.test(body) && /[a-z]/.test(body) && /[A-Z]/.test(body))
+    })
+    if (vendorSpans.length) {
+      let out = ""
+      let last = 0
+      for (const m of vendorSpans) {
+        out += w.slice(last, m.index) + mask(m[0])
+        last = m.index + m[0].length
+      }
+      return out + w.slice(last)
+    }
     // no run under keyRun's shortest floor (16) can be a key, and a UUID is 36
     // characters: a word shorter than 16 is returned as it is, and the two
     // replaces are not run over it (most of a child's prose is here).
@@ -1653,6 +1844,13 @@ function hostOf(chat) {
 // pair was written to fix — so there is one copy.
 const oursOf = (p) => p?.id === PRESET || p?.preset === PRESET || hostOf(p?.chat) === HOST
 const keyedOf = (p) => typeof p?.key === "string" && Boolean(p.key.trim())
+// a key that is present but of another type is a hand-edited file or a tool
+// that wrote a number: "还没有 key" sends the user to add the key the file
+// already has, so the two cases are told apart. The advice is the same.
+const keyNote = (p) => {
+  if (keyedOf(p)) return mask(p.key)
+  return p?.key === undefined || p?.key === null || (typeof p.key === "string" && !p.key.trim()) ? "还没有 key" : "key 不是文本"
+}
 
 // The plugin-side accounts: the primary key msmoli plus msmoli#xxxxxx, told
 // apart by token.
@@ -2029,7 +2227,11 @@ export function scrub(out, ...secrets) {
       break
     }
   }
-  return s.replace(/\r\n?/g, "\n").split("\n").map(arg).join("\n")
+  // a value a frame names is read across a line break too: the lines are split
+  // for echoing, and a key cut by the break is one key ("{\"key\":\"123e" and
+  // "4567-e89b-…" on the next line). joinFramed runs on the whole text for the
+  // same reason the join above does.
+  return joinFramed(s).replace(/\r\n?/g, "\n").split("\n").map(arg).join("\n")
 }
 
 function run(cmds, bin, { dryRun, log, spawn = spawnSync, timeout = 120_000 }) {
@@ -2341,7 +2543,7 @@ export async function main({
   // is a destination, not "unconfigured"; --to-plugin needs a key to read.
   const cands = presetCandidates(providers, args.from, args.to !== "preset")
 
-  const shownPreset = (p) => `${arg(p.id)}（${keyedOf(p) ? mask(p.key) : "还没有 key"}）`
+  const shownPreset = (p) => `${arg(p.id)}（${keyNote(p)}）`
   log(`  内置 ModelScope：${cands.length === 1 ? shownPreset(cands[0]) : cands.length ? "多个候选" : "未配置"}`)
   log(`  签到插件 msmoli：${accounts.length ? accounts.map((a) => `${arg(a.name)}（${mask(a.token)}）`).join("、") : "未登录"}`)
 
@@ -2373,7 +2575,7 @@ export async function main({
       const any = all.filter((p) => p?.id === args.from)
       const bare = any.filter((p) => oursOf(p) && !keyedOf(p))
       if (bare.length) {
-        log(`✗ "${arg(args.from)}" 在，但还没有 key，没有可同步的令牌。`)
+        log(`✗ "${arg(args.from)}" 在，但${keyNote(bare[0]) === "key 不是文本" ? " key 不是文本（providers.json 里的值类型不对）" : "还没有 key"}，没有可同步的令牌。`)
         log(`  用 magpie provider key ${arg(args.from)} <key> 写入。`)
       } else if (any.length) {
         log(`✗ "${arg(args.from)}" 在，但它不是 ModelScope：chat 不指向 ${HOST}，id/preset 也不是 ${PRESET}。`)
@@ -2385,7 +2587,7 @@ export async function main({
     } else {
       const bare = all.filter((p) => oursOf(p) && !keyedOf(p))
       if (bare.length) {
-        log(`✗ 内置侧的 ${arg(bare[0].id)} 在，但还没有 key，没有可同步的令牌。`)
+        log(`✗ 内置侧的 ${arg(bare[0].id)} 在，但${keyNote(bare[0]) === "key 不是文本" ? " key 不是文本（providers.json 里的值类型不对）" : "还没有 key"}，没有可同步的令牌。`)
         log(`  用 magpie provider key ${arg(bare[0].id)} <key> 写入，或在 magpie 的「供应商」页填上。`)
       } else {
         log(`✗ 内置侧没有带 key 的 ModelScope 预设。`)
