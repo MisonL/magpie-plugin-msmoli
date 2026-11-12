@@ -214,12 +214,14 @@ From a clone, run `./bin/sync.mjs` (or `node bin/sync.mjs` on Windows and
 WSL). npm 12 blocks `npx github:…` by default, so don't start from that.
 
 `npx`, `magpie plugin add magpie-plugin-msmoli` and `magpie plugin update` all
-follow the npm package. Until 0.3.0 is published, the npm package still serves
-**0.2.0** — the last release. That version does ship an older `bin/sync.mjs`
-with both directions, but it keeps the international site in a second
-provider, and it predates this round of fixes (chunked echoes, the row-level
-ledger dedupe, the budgets). Run it from a clone to get what this document
-describes.
+follow the npm package. The current release is **0.3.0**: one provider for
+both sites, the row-level ledger dedupe, the chunked-echo masking, and the
+budgets this document describes.
+
+If you are on **0.2.0**, that version ships an older `bin/sync.mjs` with both
+directions, but it keeps the international site in a second provider and
+predates this round of fixes. Upgrade (`npm i -g magpie-plugin-msmoli@latest`
+or `magpie plugin update msmoli`) to get what this document describes.
 
 It syncs the **domestic site only**: the built-in preset it reads is the
 `modelscope.cn` one. Sign an international account in by hand.
