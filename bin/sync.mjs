@@ -876,8 +876,14 @@ function splitKey(s) {
   // a piece of letters that alternates case is key material too ("wJalrXUtnFEMI"
   // is the front of an AWS secret cut by its slashes and a space): a word
   // capitalises once ("McDonald"), and the run is only taken when the join
-  // reads as a key, so a sentence's words are still never glued
-  const piece = (t) => t.length <= 48 && KEYCHARS.test(t) && !(PROSE.test(t) && !/^[A-Z]+$/.test(t) && !keyedBody(t))
+  // reads as a key, so a sentence's words are still never glued. A 16+
+  // mixed-case run is key material whatever its transitions ("MNOPqrstUVWXZZZZ"
+  // is a token's back half cut at the middle, one l-to-M capitalisation and
+  // nothing more) — the same shape keyRun masks when the half stands alone
+  const piece = (t) =>
+    t.length <= 48 &&
+    KEYCHARS.test(t) &&
+    !(PROSE.test(t) && !/^[A-Z]+$/.test(t) && !keyedBody(t) && !((t.match(RUN) ?? []).some(keyRun)))
   // a frame's punctuation ("key=…", "(…)") is read by maskCut, whose head
   // begins after it; joining from the piece's own first character would take
   // the frame for key material ("key=AKIA…" masked from the "k")

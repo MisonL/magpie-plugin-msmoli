@@ -5735,6 +5735,22 @@ test("a key the child wrapped at a line break is masked across the lines", () =>
   }
 })
 
+test("a key cut in the middle is masked as one, not as two masks", () => {
+  // A 40-character ghp_ token cut at its midpoint made two masks —
+  // "ghp_…ijkl MNOP…ZZZZ" — and the four characters either side of the cut
+  // ("ijkl", "MNOP") are the token's middle, which one mask would have hidden.
+  // The back half ("MNOPqrstUVWXZZZZ") carries one lower-to-upper transition,
+  // under keyedBody's floor, but it is a 16+ mixed-case run — the same shape
+  // keyRun masks when the half stands alone — so it is key material as a piece
+  // too, and the join reads as one key.
+  const token = "ghp_AbCdEf1234567890ijklMNOPqrstUVWXZZZZ"
+  for (let at = 8; at < token.length - 8; at += 1) {
+    const out = arg(`no key ${token.slice(0, at)} ${token.slice(at)} for provider`)
+    assert.equal((out.match(/…/g) ?? []).length, 1, `cut at ${at} made two masks: ${out}`)
+    assert.ok(!out.includes(token), `the token survived cut at ${at}: ${out}`)
+  }
+})
+
 test("a secret with slashes in it, cut by a space, is masked whole", () => {
   // splitKey's PIECE splits on "/", and its GAP did not accept "/", so the
   // walk broke at the first slash and the front of an AWS secret cut by a
