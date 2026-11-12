@@ -6160,6 +6160,25 @@ test("a short vendor key with its tail cut off is masked, alone and behind a nam
   }
 })
 
+test("a long key behind NAME=value keeps the variable's name", () => {
+  // isKey reads "token=ghp_…" as one key (its compact is 20+ and alternates),
+  // so a long value masked the variable's name too, while a short
+  // "token=ghp_Abcd1234Ef" kept it — the same shape went out two ways. The
+  // name on the left of "=" is an identifier and the value is the secret; only
+  // the value is masked.
+  const long = "ghp_AbCdEf1234567890ijklMNOPqrstUVWXZZZZ"
+  for (const [v, want] of [
+    [`ANTHROPIC_API_KEY=sk-ant-api03-Zx9Yw8Vu7Ts6Rq5`, `ANTHROPIC_API_KEY=sk-a…6Rq5`],
+    [`GITHUB_TOKEN=${long}`, `GITHUB_TOKEN=ghp_…ZZZZ`],
+    [`token=ghp_Abcd1234Ef`, `token=ghp_…34Ef`],
+  ]) assert.equal(arg(v), want, `${v} -> ${arg(v)}`)
+  // an identifier needs two or more letters: "x=<key>" is not a variable's
+  // spelling this reading owns, and the whole word masks as before
+  assert.equal(arg(`x=${long}`), mask(`x=${long}`))
+  // prose behind "=" is untouched
+  for (const v of ["retry=true", "code=ENOENT", "key=value", "time=12:30:45"]) assert.equal(arg(v), v, v)
+})
+
 test("a page of full-width words is not folded into one mask", () => {
   // The fold reading was bounded by the whole value: every word of a page
   // written in full width folds, they joined into one span, and the page was

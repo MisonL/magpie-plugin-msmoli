@@ -1538,6 +1538,19 @@ const argWords = (x) =>
     // word gave the frame's punctuation the two characters the mask spends on
     // the key's own ends: "(ghp_…Qrst)" printed "(ghp…rst)")
     const inFrame = frameSpan(w)
+    // NAME=value: an identifier on the left of "=" or ":" and a key on the
+    // right is the variable and its value, and only the value is the secret.
+    // Judged before the whole word, because isKey reads "token=ghp_…" as one
+    // key (its compact is 20+ and alternates) and masked the variable's name
+    // too: a short "token=ghp_Abcd1234Ef" kept its name and a long one did
+    // not, so the same shape went out two ways. The left side has to read as a
+    // name (letters, digits, underscores, two or more letters) so "retry=true"
+    // and "code=ENOENT" are left alone, and the value is still a key on its own.
+    const eq = Math.max(w.indexOf("="), w.indexOf(":"))
+    if (eq > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(w.slice(0, eq)) && (w.slice(0, eq).match(/[A-Za-z]/g) ?? []).length >= 2) {
+      const value = w.slice(eq + 1)
+      if (!value.includes("…") && isKey(value)) return `${w.slice(0, eq + 1)}${mask(value)}`
+    }
     // the word as written and its lowercase fold; a full-width key with no
     // ASCII at all is the whole-value NFKC reading's business (above), which
     // sees it as one value rather than word by word
