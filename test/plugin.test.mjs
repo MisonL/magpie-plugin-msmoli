@@ -4365,6 +4365,31 @@ test("the window reads the other separators an IME or an editor substitutes", ()
   }
 })
 
+test("a failed read after the touch does not turn a claimed day into failed", async () => {
+  // The touch ran (the name was unknown) and the ledger read after it failed.
+  // The day's claim had already landed: answering `failed` there makes the
+  // host ask again every half hour for a claim that is done. The baseline
+  // already proves the day, so the answer is `done` with the baseline's number.
+  const token = "ms-afterfail-0000-000-000000000051"
+  const real = globalThis.fetch
+  let reads = 0
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    const reply = (body) => new Response(JSON.stringify(body), { status: 200 })
+    if (u.pathname.endsWith("/login/info")) return reply({ Code: 200, Success: true, Data: { NickName: "alice" } })
+    reads += 1
+    if (reads === 1) return reply({ success: true, data: { records: [day()], total: 1 } })
+    return new Response("bad gateway", { status: 502 })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(r.outcome, "done", `the claim already landed: ${JSON.stringify(r)}`)
+    assert.equal(r.credit, 200, `the baseline's number: ${JSON.stringify(r)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("a grant that landed between the baseline and the touch is not left off the card", async () => {
   // The day was already in the ledger when the baseline was read, so the
   // answer is `done` — but the name was not known yet, so this ask also

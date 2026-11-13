@@ -3354,7 +3354,19 @@ export async function MsmoliPlugin(input) {
             // what the ledger holds now; with no growth it is the same total.
             // (An ask that touched nothing — claimed and the name known —
             // skips this, and stays at the baseline.)
-            const after = touched ? noted(await todayEarn(token, deadline, { expiry: false })) : null
+            // A read that fails here is not the day's answer: the claim has
+            // landed, and `failed` would make the host ask again every half
+            // hour for it. The baseline's number stands, as it did before this
+            // read existed.
+            let after = null
+            if (touched) {
+              try {
+                after = await todayEarn(token, deadline, { expiry: false })
+              } catch (e) {
+                if (signedOut(e)) marks.expired = true
+                after = null
+              }
+            }
             if (after) {
               probe = after.profile
               const grewNow = gained(after.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)), after.day)

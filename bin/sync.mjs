@@ -508,6 +508,9 @@ function spacedKey(s) {
   // ideographic space stay out of this list: they are cuts the join is meant to
   // read across.
   if (/(?:(?![\n\r])[\p{Cc}\p{Cf}\p{Mn}\p{Me}\u2000-\u200A\u202F\u205F])/u.test(s)) return null
+  // an ellipsis is a masked value's spelling, not a key's: a value carrying one
+  // is not read as a key cut by it ("ms-… …" is mask output, and joining across
+  // the "…" would put a key's halves back together from a digest's leftovers)
   // the pieces, and where each starts in the value
   const pieces = []
   for (const m of s.matchAll(PIECE)) pieces.push({ text: m[0], at: m.index })
@@ -536,7 +539,12 @@ function spacedKey(s) {
   if (start < 0) return null
   // the key's own characters from the front; a digit is what separates a key
   // cut into pieces from a name with a version after it
-  const bodyFrom = (i) => s.slice(start, i).replace(CUT_RUN, "")
+  // (a full-width colon a display cut the key with is a cut, not part of the
+  // body: left in, the joined body failed isKey and the walk was never made to
+  // answer. Only non-ASCII punctuation goes: an ASCII mark can be a key's own
+  // body under VENDOR_SPAN's reading, and taking it would split that key.)
+  const FRAME_PUNCT = /[^\x00-\x7f\p{L}\p{N}]/gu
+  const bodyFrom = (i) => s.slice(start, i).replace(CUT_RUN, "").replace(FRAME_PUNCT, "")
   // the key's own span, not the rest of the line: a bracket, a comma or a
   // Chinese character abutting the key's end is the text's, and judging the
   // whole remainder as key material refused a valid key ("(sk-ant-…vTuH)")
@@ -573,7 +581,11 @@ function spacedKey(s) {
     // the body with the next piece's key span: a key cut before its cut piece
     // reads as one only once the second half is in. Asked before the bridge so
     // a cut just after the front ("ms-aaaa1111: bbbb…") is still spanned
-    const spanNext = /^[A-Za-z0-9+/=_.-]*/.exec((pieces[idx + 1]?.text ?? "").replace(/^[^\sA-Za-z0-9]{1,2}/, ""))?.[0] ?? ""
+    // the next piece without its leading frame: ASCII punctuation (at most two,
+    // as the piece walk strips) or a full-width mark ("："), so the span starts
+    // on key material. Only non-ASCII punctuation beyond that goes — an ASCII
+    // letter is the key's own.
+    const spanNext = /^[A-Za-z0-9+/=_.-]*/.exec((pieces[idx + 1]?.text ?? "").replace(/^[^\sA-Za-z0-9]{1,2}/, "").replace(/^[^\x00-\x7f\p{L}\p{N}]+/u, ""))?.[0] ?? ""
     const strongNext = strong || (spanNext.length >= 8 && isKey(bodyFrom(end) + spanNext))
     // the gap before the next piece: one cut joins, a short run of cuts joins
     // too (the card's own separator is a middot with a space either side,
@@ -590,7 +602,7 @@ function spacedKey(s) {
     // second half on the terminal. Read across only once the body already reads
     // as a key, so a sentence's bracket is not a cut
     if (!gap && strongNext) {
-      const bridged = /^[^\sA-Za-z0-9]{1,2}[ \t\r\n\u00a0\u3000]+/.exec(s.slice(end))
+      const bridged = /^[^\sA-Za-z0-9\p{L}\p{N}]{1,2}[ \t\r\n\u00a0\u3000]+/u.exec(s.slice(end))
       if (bridged) gap = bridged
     }
     if (!gap) break
@@ -604,7 +616,7 @@ function spacedKey(s) {
     // and a bracket the next half opens with ("… (e6f7…") are both the text's,
     // and the key starts at the first key character after them
     const framed = /^[^\sA-Za-z0-9]{1,2}(?:[ \t\r\n\u00a0\u3000]+)?/.exec(pieces[idx].text)?.[0] ?? ""
-    const lead = strongNext || (strong && /^[^\sA-Za-z0-9]{1,2}[ \t\r\n\u00a0\u3000]+/.test(s.slice(end))) ? framed.length : 0
+    const lead = strongNext || (strong && /^[^\sA-Za-z0-9\p{L}\p{N}]{1,2}[ \t\r\n\u00a0\u3000]+/u.test(s.slice(end))) ? framed.length : 0
     const piece = /^[A-Za-z0-9+/=_.-]*/.exec(pieces[idx].text.slice(lead))[0]
     if (!piece) break
     if (VERNUM.test(piece) && !/\d/.test(bodyFrom(end))) break
@@ -2491,6 +2503,11 @@ export async function main({
   log = (s) => process.stdout.write(`${s}\n`),
 } = {}) {
   const args = parseArgs(argv)
+  // every way out of a --status report says so, the early give-ups included:
+  // a report that ended in "add a provider" read like a half-run command
+  const statusNote = () => {
+    if (args.status) log(`(--status：以上是计划，未执行)`)
+  }
   if (args.help) {
     log(USAGE)
     return 0
@@ -2619,6 +2636,7 @@ export async function main({
         log(`  先在 magpie 的「供应商」页添加 ModelScope，或 magpie provider add ${PRESET} <key>。`)
       }
     }
+    statusNote()
     return 1
   }
 
@@ -2629,7 +2647,7 @@ export async function main({
   // and a reader scripting the output could not otherwise tell a report from a
   // run that had happened. The exit code still carries the verdict.
   if (plan.action !== "run") {
-    if (args.status) log(`(--status：以上是计划，未执行)`)
+    statusNote()
     return plan.action === "noop" ? 0 : 1
   }
 

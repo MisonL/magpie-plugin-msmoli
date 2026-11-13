@@ -1790,6 +1790,22 @@ test("--status answers with its verdict, not with a constant", async () => {
   }
 })
 
+test("a --status that gives up early still says nothing was run", async () => {
+  // The "no provider to sync" way out returned before the annotation, so a
+  // report whose last line was "add a provider" read like a half-finished run.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-status-early-"))
+  try {
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [] }))
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify({}))
+    const out = []
+    const code = await main({ argv: ["--dir", dir, "--status"], log: (s) => out.push(s), spawn: () => ({ status: 0, stdout: "", stderr: "" }) })
+    assert.equal(code, 1)
+    assert.match(out.join("\n"), /--status：以上是计划，未执行/, out.join("\n"))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("--status beats --dry-run when both are given, and neither runs", async () => {
   const dir = mkdtempSync(join(tmpdir(), "msmoli-status-dry-"))
   try {
@@ -5891,6 +5907,28 @@ test("a frame's bracket sitting right on the cut does not end the key", () => {
     const out = arg(input)
     assert.equal(out, expected, `${JSON.stringify(input)}: ${out}`)
     assert.ok(!out.includes(a) && !out.includes(b.slice(0, 12)), `${JSON.stringify(input)} leaked: ${out}`)
+  }
+})
+
+test("a full-width pause on the cut does not leave the key's front behind", () => {
+  // The next-piece span the bridge judges ("does this read as a key now?")
+  // dropped a frame's *ASCII* punctuation but not a full-width one, so a cut
+  // through "：" looked like a key and the bridge read across — while the
+  // piece walk that follows only strips ASCII, so the join stopped at the
+  // colon and the key's first half went out beside the masked tail.
+  const key = "ms-abcd1234efgh5678ijkl9012mnop3456"
+  const want = "ms-a…3456"
+  // the cut lands on the mark, and the sentence goes on after the key
+  for (const mark of ["：", "；", "，", "、", "。", "—", "–"]) {
+    const v = `no key ${key.slice(0, 12)}${mark} ${key.slice(12)} for provider`
+    const out = arg(v)
+    assert.equal(out, `no key ${want} for provider`, `${mark}: ${out}`)
+  }
+  // and the mark on its own, with no sentence after the key
+  assert.equal(arg(`${key.slice(0, 12)}： ${key.slice(12)}`), want)
+  // the ASCII spellings still read the same way
+  for (const mark of [":", ";", ",", "|", "!"]) {
+    assert.equal(arg(`no key ${key.slice(0, 12)}${mark} ${key.slice(12)} for provider`), `no key ${want} for provider`, mark)
   }
 })
 
