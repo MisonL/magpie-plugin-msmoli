@@ -128,12 +128,22 @@ Three invariants to keep when touching it:
   and no mixed-case word (it can become no key), at 4×20 on one piece, and
   when it finds no key at all the next start is its end. The run readings
   stop at 32 KiB: past that only the per-word pass runs. Measured on
-  one-character words (the worst case): 32 KiB costs about 0.3 s on the card
-  (`"A " × 16384`) and about 0.15 s in the CLI — all passes together — against a
-  25 s hook and a 120 s child; ordinary text of 32 KiB costs under 50 ms. A run
-  that found nothing hands the scan on to the last word it read, unless it saw
-  a digit or a front on the way (the CLI: before that, `"1A1 " × 8192` took 9 s
-  and 32 KiB of `"A "` 1.8 s).
+  one-character words (the worst case): 32 KiB costs about 0.5 s on the card
+  (`"A " × 16384`) and the same in the CLI — all passes together — against a
+  25 s hook and a 120 s child; ordinary text of 32 KiB costs about 0.2 s (the
+  card's readings ask `isKeyWord` of the growing run at every piece, and every
+  arm of it needs a digit, a base64 symbol or a case mix: a body of one case
+  with no numeral is skipped by that test alone — before it, 28,000 characters
+  of `"x "` delayed a check-in by 36 s). A run that found nothing hands the
+  scan on to the last word it read, unless it saw a digit or a front on the
+  way (the CLI: before that, `"1A1 " × 8192` took 9 s and 32 KiB of `"A "`
+  1.8 s). The CLI's split reading reads to the same 32 KiB, and skips a head
+  with no digit or letter within the 48 pieces it reads on in one pre-pass:
+  a key cut by a space on a long line is joined (`ghp_ 1234 AbCd …`), a page
+  of one plain word is passed over. A sentence's word is no longer read as a
+  cut's head — `check-in failed: …` and `Hello World Example 2026` were masked
+  whole before — and a mask the CLI wrote is not joined across (`arg` is
+  idempotent: `NickName=[ms-F…6789·abcdefABCDEF]` is left as it is).
   Any change to these thresholds has to keep both suites
   green: both carry a table of cut shapes (one, three, four, six, eight,
   twelve characters, line breaks, no-break and ideographic spaces, middots)

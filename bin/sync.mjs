@@ -510,6 +510,18 @@ const unmark = (s) => {
     i += c.length
   }
   const M = (c) => c !== undefined && MARK1.test(c)
+  // an ellipsis is a cut only where eight key characters follow it, and the
+  // scan stops at the eighth: joining the whole tail to ask the same question
+  // read a line of masks to its square (4,000 copies spent 22 s)
+  const KEY_CH = /^[A-Za-z0-9+/=_.-]$/
+  const keyAhead = (i) => {
+    let seen = 0
+    for (let j = i + 1; j < cps.length && seen < 8; j += 1) {
+      if (!KEY_CH.test(cps[j])) return false
+      seen += 1
+    }
+    return seen >= 8
+  }
   const out = []
   for (let i = 0; i < cps.length; i += 1) {
     if (!M(cps[i])) {
@@ -517,7 +529,7 @@ const unmark = (s) => {
       continue
     }
     let j = i
-    if (cps[i] === "…" && !/^[A-Za-z0-9+/=_.-]{8}/.test(cps.slice(i + 1).join(""))) {
+    if (cps[i] === "…" && !keyAhead(i)) {
       out.push(cps[i])
       continue
     }
@@ -931,6 +943,12 @@ const isKey = (word, runs = true) => {
     // with separators (a version or a date has no such piece). A word with no
     // separator is not judged here: the run test above has already seen all of
     // it
+    // a mask we wrote is not a separator a key's pieces were cut by: joining
+    // across it rebuilds key-shaped material out of the mask and the text
+    // around it, and arg stopped being idempotent on its own output
+    // ("…6789、abcdefABCDEF" read back as one key and took the name in front
+    // of it with it)
+    if (word.includes("…")) return false
     const c = compact(word)
     if (c === word) return false
     if (c.length >= 20 && alternates(word)) return true
@@ -1040,9 +1058,11 @@ const glued = (ws) => ws.map((w) => w[0]).join("")
 // lists and prose a message carries do not.
 function splitKey(s) {
   // a page of one- and two-character pieces is the worst case for a walk that
-  // starts at every piece, and no value a person types or a child prints this
-  // long is one key cut up: past this the other readings still run
-  if (s.length > 8 * 1024) return null
+  // starts at every piece, and no value this long is one key cut up (a 32 KiB
+  // command line is the widest the reader lists): past this the other
+  // readings still run. The walk is linear — a head reads at most 48 pieces
+  // on — and the piece scans below are one pass each
+  if (s.length > 32 * 1024) return null
   if (/(?:(?![\n\r])[\p{Cc}\p{Cf}])/u.test(s)) return null
   const pieces = [...s.matchAll(PIECE)].map((m) => ({ text: m[0], at: m.index }))
   if (pieces.length < 2) return null
@@ -1073,7 +1093,27 @@ function splitKey(s) {
   // read (the segment carries digits and case), and a path must keep its shape.
   const SLASH = /^\/{1,3}$/
   const pathLed = PATHY.test(s) || /^[\\/]/.test(s)
+  // the walk is skipped where it cannot find a key: a key needs a digit and a
+  // letter within the pieces a head reads on, and both scans are one pass — a
+  // page of "x x x …" or "1 1 1 …" has none in reach, and reading it piece by
+  // piece was minutes of the hook's budget
+  const nearest = (re) => {
+    const next = new Int32Array(pieces.length + 1).fill(1e9)
+    for (let i = pieces.length - 1; i >= 0; i -= 1) next[i] = re.test(pieces[i].text) ? i : next[i + 1]
+    return next
+  }
+  const nextDigit = nearest(/[0-9]/)
+  const nextLetter = nearest(/[A-Za-z]/)
   for (let from = 0; from < pieces.length - 1; from += 1) {
+    // (continue, not break: a page of prose has no key in reach at its first
+    // piece and one at its last, and the scan has to reach it. The skip is
+    // what keeps the walk linear — the page reads each piece once)
+    if (nextDigit[from] > from + 48 || nextLetter[from] > from + 48) continue
+    // a single-character piece is skipped: the character pass reads a run of
+    // them whole ("9f8e 7d6c … b a 1 0"), and joining one to a key's tail took
+    // the road's own prose with it ("… Y3z9 x x x x" read "Y3z9x" into the
+    // key, and the next window read on from there)
+    if (pieces[from].text.length === 1) continue
     if (!piece(pieces[from].text) || framed(pieces[from].text)) continue
     // a middot before the piece is a cut the other readings own: their walk
     // starts at the key's front, and starting a second one here took the
@@ -1103,6 +1143,10 @@ function splitKey(s) {
       }
       // a long numeral after the key is a count or a year, not the key's own
       if (VERNUM.test(pieces[k].text) && !/\d/.test(joined)) break
+      // the rule maskCut applies once a cut is found: a word of one to three
+      // lower-case letters after it is the text's ("no key ghp_… for
+      // provider" keeps its "for", and "… Y3z9 x x x" keeps its x's)
+      if (best > 0 && /^[a-z]{1,3}$/.test(pieces[k].text)) break
       joined += pieces[k].text
       if (joined.length < 12) continue
       if (/\d/.test(joined) && isKey(joined, false)) best = k
@@ -1126,6 +1170,9 @@ const capsPiece = (w) => /^[A-Z0-9]{4,}$/.test(w) && /[A-Z]/.test(w)
 const tokenShaped1 = new RegExp(tokenShaped.source, "iu")
 const keyedBody = (body) => (body.match(/[a-z][A-Z]/g) ?? []).length >= 2 && /[A-Z]/.test(body) && /[a-z]/.test(body)
 const maskCut = (s) => {
+  // a body of many KiB of one-character words costs far more reading than a
+  // card ever shows: past 32 KiB the pass is skipped, and the other readings
+  // (linear in the text) still run
   if (s.length > 32 * 1024) return s
   // a middot or a bullet splits words here: it is one of the spellings a cut
   // arrives in ("ms-a·b·c"), and one word with middots inside it is a shape no
@@ -1179,11 +1226,20 @@ const maskCut = (s) => {
     // with a 48-word scan behind it (measured: 25 KB took 19 s before this
     // floor). A key behind a frame is never two digits long
     const trailing = tail.match(/[A-Za-z0-9]+$/)?.[0] ?? ""
+    // (the word's own tail is key material only when the word frames it —
+    // "key=AK", "NickName=[ghp_…" — or when it is a vendor/ms- front or a
+    // digest piece. A word's last letters are the word's: "check-in" ended in
+    // "in" and "failed:" in "failed", and either read as a head with a scan
+    // behind it, the sentence's own words joining into one "key")
+    const framedSep = sep >= 0 || /^[^A-Za-z0-9]/.test(w)
     // a piece of a digest is four characters at least, or carries a letter
     // (a hex run of "12" is no key's front, and reading it as one made every
     // word of a page a head)
     const digestTail = /^[0-9a-f-]+$/i.test(tail) && (tail.length >= 4 || /[A-Za-z]/.test(tail))
-    return { mat: VENDOR.test(tail) || /^ms-/i.test(tail) || digestTail || cutMid ? tail : trailing.length >= 4 || /[A-Za-z]/.test(trailing) ? trailing : "" }
+    // a frame's fragment is key material when it carries a digit or a capital,
+    // is too short to be a word ("key=g", "(AK"), or is long enough to be a
+    // body; a word behind a frame ("failed:", "Session") is the text's
+    return { mat: VENDOR.test(tail) || /^ms-/i.test(tail) || digestTail || cutMid ? tail : framedSep && (/\d/.test(trailing) || /[A-Z]/.test(trailing) || trailing.length <= 3 || trailing.length >= 16) ? trailing : "" }
   }
   // a piece's own spelling may carry the text's punctuation ("0.", "1,")
   // a single hyphen a key was cut at ("… 7·-·e …") is a piece too
@@ -1224,7 +1280,7 @@ const maskCut = (s) => {
     // a key cut inside a mixed-case word ("wJal rXUt nFEM …" is an AWS
     // secret): the join has to be a key of its own, which a sentence's first
     // word after a path is not
-    const mixedHead = w0.length <= 16 && /[a-z]/.test(w0) && /[A-Z]/.test(w0)
+    const mixedHead = w0.length <= 16 && /[a-z]/.test(w0) && /[A-Z]/.test(w0) && !/^[A-Z][a-z]+$/.test(w0)
     // a vendor front itself cut in two ("xox b-1 234 …", "ghp _1234 …"): the
     // front is not a word any floor keeps, and the cut falls inside it
     const frontish =
@@ -1550,7 +1606,16 @@ export function arg(v) {
   // mask ("ms-a… 456")
   // (the join is only a key when the body reads as one: "ms-cli 2026.11.9"
   // is a program and its version, and the card keeps it)
-  if (cut && msKey(cut.body, false)) return argRun(cut.pre) + mask(cut.body.replace(/\s+/g, "")) + argRun(cut.post)
+  if (cut) {
+    // a sentence's full stop is the text's, not the key's: the walk takes "."
+    // as key material, and "…ABCDEF." failed msKey while the halves were left
+    // to the per-word pass. A body that reads as a key once its trailing
+    // punctuation is set aside is the key; the punctuation prints as typed
+    const body = cut.body
+    const core = body.replace(/[._-]+$/, "")
+    const keyBody = msKey(body, false) ? body : core !== body && msKey(core, false) ? core : ""
+    if (keyBody) return argRun(cut.pre) + mask(keyBody.replace(/\s+/g, "")) + argRun(body.slice(keyBody.length) + cut.post)
+  }
   // a key with no ms-/sk- front, cut the same way: the pieces are joined and
   // asked whether they read as one key (splitKey)
   const split = splitKey(glued0)

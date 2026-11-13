@@ -593,7 +593,9 @@ The run readings give up on a body past 32 KiB and only the per-word pass
 runs: a body of thousands of one-word pieces ("s k - a n t" repeated) costs
 two orders of magnitude more reading than any message this pass exists for,
 and a key stored inside such a body as whole words is still masked. The
-bound exists so a hostile server's error cannot eat a hook's budget.
+bound exists so a hostile server's error cannot eat a hook's budget. A key
+cut by a space or a line break is still joined up to that bound, on the card
+and in the CLI alike.
 
 A piece is masked only when it carries ten characters of the key's own —
 **letters and digits, not the hyphens or spaces the token was written in**. A

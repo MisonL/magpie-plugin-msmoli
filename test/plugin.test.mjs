@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url"
 import { MsmoliPlugin, testables } from "../index.mjs"
 import { arg } from "../bin/sync.mjs"
 
-const { windowOf, streakOf } = testables
+const { windowOf, streakOf, plan, json } = testables
 
 // The check-in window reads its own config file, which the host would keep at
 // ~/.config/magpie/msmoli.json. Tests point it at a temp file so the suite
@@ -71,6 +71,7 @@ const tmpDir = (prefix) => {
 }
 
 after(() => {
+  clearInterval(keepAlive)
   for (const dir of scratchDirs) rmSync(dir, { recursive: true, force: true })
   rmSync(TEST_CONFIG, { force: true })
 })
@@ -202,6 +203,21 @@ function fakeFetch(responses) {
   }
   fn.calls = calls
   return fn
+}
+
+// pinClock holds Date.now still for the duration of fn. json() reads the
+// clock to turn a deadline into a budget, and the ticking-clock run moves
+// every read a second on: a 60 ms deadline computed across two reads became
+// the whole 8 s cap, and the test read as a hook held for ten seconds.
+const pinClock = async (fn) => {
+  const real = Date.now
+  const at = Date.now()
+  Date.now = () => at
+  try {
+    return await fn()
+  } finally {
+    Date.now = real
+  }
 }
 
 const withFetch = async (responses, fn) => {
@@ -1677,6 +1693,16 @@ test("usage without a sign-in says so, as an error and not a rejection", async (
 // user on an older patch would see these three go red on a tree that works,
 // which reads as a broken plugin. Skipped out loud, the way sync.test.mjs
 // skips a platform without symlinks — the reason shows in the run.
+// The plugin's own timers are unref'd on purpose: a hook must never hold the
+// host open. Node 18 and 22's test runner reads an event loop with nothing
+// ref'd but such a timer — an async test awaiting it, which is exactly what
+// the budget tests do — as finished: it cancels the test with "Promise
+// resolution is still pending but the event loop has already resolved", and
+// cancel() of a parent takes every test after it in the file with it. One
+// ref'd interval for the run keeps the loop alive; the after() hook clears it
+// so the process still ends. (Measured: without it Node 18 cancelled 340
+// tests and Node 22 ninety; with it both finish the suite.)
+const keepAlive = setInterval(() => {}, 60_000)
 const withMockTimers = (t) => {
   if (t.mock?.timers?.enable) return true
   t.skip("t.mock.timers needs node 18.19+ or 20.4+")
@@ -1726,37 +1752,39 @@ test("a whole check-in gives up at its own budget, not per request", { timeout: 
   }
 })
 
-test("a request that hangs gives up instead of holding the host", { timeout: 20000 }, async (t) => {
-  if (!withMockTimers(t)) return
+test("a request that hangs gives up instead of holding the host", { timeout: 20000 }, async () => {
+  // json races the fetch against an abort timer capped at the request budget
+  // and at what the hook has left. Handed a deadline 60 ms out, a fetch that
+  // never answers still gives up at that deadline — the whole point of the
+  // race is that the hook answers whether or not the transport does. (The
+  // test used to move mocked timers; on Node 18 the runner cancelled the
+  // test — and with it the rest of the file — the moment that wait left the
+  // event loop with nothing ref'd, which is exactly the state the plugin's
+  // unref'd timers create on purpose. A short real budget exercises the same
+  // race without any timer mocks.)
   const real = globalThis.fetch
-  // Node 20.4 took the object form ({ apis: […] }); 18.19 and 20.0–20.3 only
-  // know the array form, and the array form on 20+ mocks setImmediate too,
-  // which the wait below needs. Try the newer shape, fall back for the older.
-  try {
-    t.mock.timers.enable({ apis: ["setTimeout"] })
-  } catch {
-    t.mock.timers.enable(["setTimeout"])
-  }
   globalThis.fetch = (url, init) =>
     new Promise((_, reject) => {
       init.signal.addEventListener("abort", () => reject(init.signal.reason ?? new Error("aborted")), { once: true })
     })
   try {
-    const pending = auth.usage(async () => ({ type: "api", key: "ms-test" }))
-    // let the request reach its setTimeout before the clock is moved; a hung
-    // site is followed by the other one, so both timers are run out
-    for (let i = 0; i < 2; i++) {
-      await new Promise((resolve) => setImmediate(resolve))
-      t.mock.timers.tick(20001)
-    }
-    const u = await pending
-    // usage reports rather than throws
-    assert.ok(u.error, "usage should report the failure")
+    // (performance.now: the ticking-clock run moves Date.now on every read)
+    const started = performance.now()
+    // the budget's own words ("请求超时（1 秒）"), not the transport's: the abort
+    // reason is what saidFailure reads as a timeout
+    await pinClock(() =>
+      assert.rejects(json("https://modelscope.cn", "ms-test", "/openapi/v1/probe", Date.now() + 60), (e) => {
+        assert.match(e.message, /超时/, `the budget's own error, not the transport's: ${e.message}`)
+        return true
+      }),
+    )
+    const ms = performance.now() - started
+    assert.ok(ms >= 40, `gave up before its budget: ${ms}ms`)
+    assert.ok(ms < 5000, `the fetch held the hook: ${ms}ms`)
   } finally {
     globalThis.fetch = real
   }
 })
-
 test("a 200 that isn't ModelScope's answer is a failure, not an empty balance", async () => {
   await withFetch(
     {
@@ -2821,6 +2849,13 @@ test("a one-ended window claims at that minute, not at the default one", () => {
   // plan()'s modulo by zero (pinned by its own test)
   // an end before the start is still not a window
   assert.deepEqual(windowOf({ checkinWindow: ["10:00", "08:30"] }), { start: 8 * 60 + 30, end: 10 * 60 })
+  // and the window has to be one plan() can use: the bounds above are what it
+  // reads, and { start: 09:00, end: 09:00 } is a modulo by zero whatever the
+  // shape of windowOf's answer looks like
+  for (const v of [["09:00"], "09:00", ["09:00", ""], ["09:00", null]]) {
+    const win = windowOf({ checkinWindow: v })
+    assert.ok(Number.isInteger(plan(win, "ms-test", "2026-11-13").target), `${JSON.stringify(v)} leaves plan() a whole minute`)
+  }
   // an inner pair is the window: a third value is not read
   assert.deepEqual(windowOf({ checkinWindow: ["09:00", "10:00", "11:00"] }), { start: 9 * 60, end: 10 * 60 })
 })
@@ -2878,6 +2913,24 @@ test("windowOf reads the shapes a user writes, and refuses the ones it cannot", 
   // out at a time the user never named
   assert.deepEqual(windowOf({ checkinWindow: "13：00-14：00" }), { start: 13 * 60, end: 14 * 60 })
   assert.deepEqual(windowOf({ checkinWindow: ["09：15", "11：45"] }), { start: 9 * 60 + 15, end: 11 * 60 + 45 })
+})
+
+test("a single bound names a minute the claim comes due at", async () => {
+  // The card is what a user with ["09:00"] reads. windowOf answers with the
+  // minute itself (start === end), and plan() used to take `hash % (end -
+  // start)` on it: NaN, `minuteCN() >= NaN` false forever, and the card read
+  // "NaN:NaN 后自动领取" while the account never claimed — while the shape
+  // test above stayed green because it never asked plan().
+  for (const v of [["09:00"], "09:00"]) {
+    const r = await withWindow(v, `${today} 08:00:00`, async () =>
+      auth.checkin(async () => ({ type: "api", key: "ms-oneend-0000-0000-0000-000001" })),
+    )
+    const target = targetFrom(r.message)
+    assert.equal(target.minute, 9 * 60, `${JSON.stringify(v)} claims at 09:00: ${r.message}`)
+  }
+  // a minute after the 23:00 cap is a bad value, not a window that never
+  // comes: the documented default applies
+  assert.deepEqual(windowOf({ checkinWindow: ["23:30"] }), { start: 8 * 60 + 30, end: 10 * 60 })
 })
 
 test("a window whose ends meet is not a window of width zero", () => {
@@ -4796,18 +4849,14 @@ test("a body that dies half-read is told in the user's words, not the runtime's"
   }
 })
 
-test("a body that hangs half-read gives up at its own timeout, and says so", { timeout: 20000 }, async (t) => {
-  // the request's timer is armed for the whole call, but the translation that
+test("a body that hangs half-read gives up at its own timeout, and says so", { timeout: 20000 }, async () => {
+  // The request's timer is armed for the whole call, but the translation that
   // reads it sat around fetch alone: a reply that stops after the headers is
   // cut by that same timer, from the read, and would reach the card as the
-  // bare word the abort was given ("timeout").
-  if (!withMockTimers(t)) return
+  // bare word the abort was given ("timeout"). Handed a deadline 60 ms out,
+  // the same race runs on real timers — the mocked-clock form of this test
+  // cancelled on Node 18 with the rest of its file (see the hang test above).
   const real = globalThis.fetch
-  try {
-    t.mock.timers.enable({ apis: ["setTimeout"] })
-  } catch {
-    t.mock.timers.enable(["setTimeout"])
-  }
   globalThis.fetch = async (url, init) => ({
     status: 200,
     headers: { get: () => null },
@@ -4823,21 +4872,17 @@ test("a body that hangs half-read gives up at its own timeout, and says so", { t
     },
   })
   try {
-    const pending = auth.usage(async () => ({ type: "api", key: "ms-test" }))
-    // let the request arm its timer before the clock is moved; the other site
-    // is asked after this one fails, so both timers are run out
-    for (let i = 0; i < 2; i++) {
-      await new Promise((resolve) => setImmediate(resolve))
-      t.mock.timers.tick(8001)
-    }
-    const u = await pending
-    assert.match(u.error, /请求超时/, `a hung body should name the timeout, got: ${u.error}`)
-    assert.match(u.error, /8 秒/, `and its length, got: ${u.error}`)
+    await pinClock(() =>
+      assert.rejects(json("https://modelscope.cn", "ms-test", "/openapi/v1/probe", Date.now() + 60), (e) => {
+        assert.match(e.message, /请求超时/, `a hung body should name the timeout: ${e.message}`)
+        assert.match(e.message, /1 秒/, `and the budget it gave up at: ${e.message}`)
+        return true
+      }),
+    )
   } finally {
     globalThis.fetch = real
   }
 })
-
 test("a request cut short by the hook's own deadline does not say 0 seconds", async () => {
   // The per-request cap is what is left of the hook's budget, so the last
   // request can have a few hundred milliseconds. Rounded, that printed
@@ -6100,25 +6145,22 @@ test("a runtime that words its own abort still reads as a timeout", { timeout: 2
   } finally {
     globalThis.fetch = real
   }
-  // and the reason's own word, in an error that is not the reason object
-  if (!withMockTimers(t)) return
-  try {
-    t.mock.timers.enable({ apis: ["setTimeout"] })
-  } catch {
-    t.mock.timers.enable(["setTimeout"])
-  }
+  // and the reason's own word, in a fresh error that is not the reason
+  // object. A real deadline 60 ms out, and the abort reason copied from it —
+  // the race is the same one the mocked clock would tick, without leaving the
+  // loop empty for the runner to read as the end of the test on Node 18.
   globalThis.fetch = (url, init) =>
     new Promise((_, reject) => {
       init.signal.addEventListener("abort", () => reject(new Error(init.signal.reason?.message ?? "aborted")), { once: true })
     })
+  const budget = 60
   try {
-    const pending = auth.usage(async () => ({ type: "api", key: "ms-test" }))
-    for (let i = 0; i < 2; i++) {
-      await new Promise((resolve) => setImmediate(resolve))
-      t.mock.timers.tick(8001)
-    }
-    const copied = await pending
-    assert.match(copied.error ?? "", /请求超时（8 秒）/, `a copied reason must still read as a timeout: ${copied.error}`)
+    await pinClock(() =>
+      assert.rejects(json("https://modelscope.cn", "ms-test", "/openapi/v1/probe", Date.now() + budget), (e) => {
+        assert.match(e.message, /请求超时（1 秒）/, `a copied reason must still read as a timeout: ${e.message}`)
+        return true
+      }),
+    )
   } finally {
     globalThis.fetch = real
   }
@@ -7877,31 +7919,27 @@ test("a proxy that will not connect is named as the proxy, not as a timeout", as
   }
 })
 
-test("a fetch that never listens to its signal still gives up at the cap", { timeout: 20000 }, async (t) => {
+test("a fetch that never listens to its signal still gives up at the cap", { timeout: 20000 }, async () => {
   // The host's proxy fetch dials CONNECT on its own timer and ignores the
   // signal the plugin passes in. On signal alone the hook waits on it forever:
-  // the 8-second per-request cap does not hold on this path.
-  if (!withMockTimers(t)) return
+  // the cap raced against the abort is what holds, whatever the fetch does.
+  // A 60 ms deadline runs that same race on real timers (the mocked clock
+  // cancelled on Node 18 — see the hang test).
   const real = globalThis.fetch
-  try {
-    t.mock.timers.enable({ apis: ["setTimeout"] })
-  } catch {
-    t.mock.timers.enable(["setTimeout"])
-  }
   globalThis.fetch = () => new Promise(() => {})
   try {
-    const pending = auth.usage(async () => ({ type: "api", key: "ms-test" }))
-    for (let i = 0; i < 2; i++) {
-      await new Promise((resolve) => setImmediate(resolve))
-      t.mock.timers.tick(8001)
-    }
-    const u = await pending
-    assert.match(u.error ?? "", /请求超时（8 秒）/, JSON.stringify(u))
+    const started = performance.now()
+    await pinClock(() =>
+      assert.rejects(json("https://modelscope.cn", "ms-test", "/openapi/v1/probe", Date.now() + 60), (e) => {
+        assert.match(e.message, /请求超时/, JSON.stringify(e.message))
+        return true
+      }),
+    )
+    assert.ok(performance.now() - started < 5000, "the cap held")
   } finally {
     globalThis.fetch = real
   }
 })
-
 test("an echoed token cut by an invisible character is masked whole on the card", async () => {
   // maskEchoes finds fragments as contiguous substrings; a zero-width space
   // or \x01 cuts the echoed token into two pieces, the front piece under
@@ -8084,34 +8122,27 @@ test("spending yesterday's leftover is not drawn as overspent while the balance 
   assert.equal(w.used, 60, `300 of the 500 at hand today: ${w.used}`)
 })
 
-test("a body that never arrives and ignores the signal still gives up at the cap", { timeout: 20000 }, async (t) => {
+test("a body that never arrives and ignores the signal still gives up at the cap", { timeout: 20000 }, async () => {
   // the read is raced against the abort as the request is: a response whose
-  // stream neither delivers nor listens held the hook past 8 seconds
-  if (!withMockTimers(t)) return
+  // stream neither delivers nor listens held the hook past its cap. On real
+  // timers at 60 ms (the mocked clock cancelled on Node 18 — see the hang test).
   const real = globalThis.fetch
-  try {
-    t.mock.timers.enable({ apis: ["setTimeout"] })
-  } catch {
-    t.mock.timers.enable(["setTimeout"])
-  }
   globalThis.fetch = async () => ({
     status: 200,
     headers: { get: () => null },
     body: { getReader: () => ({ read: () => new Promise(() => {}), cancel: async () => {}, releaseLock() {} }) },
   })
   try {
-    const pending = auth.usage(async () => ({ type: "api", key: "ms-test" }))
-    for (let i = 0; i < 2; i++) {
-      for (let j = 0; j < 3; j++) await new Promise((resolve) => setImmediate(resolve))
-      t.mock.timers.tick(8001)
-    }
-    const u = await pending
-    assert.match(u.error ?? "", /请求超时（8 秒）/, JSON.stringify(u))
+    await pinClock(() =>
+      assert.rejects(json("https://modelscope.cn", "ms-test", "/openapi/v1/probe", Date.now() + 60), (e) => {
+        assert.match(e.message, /请求超时/, JSON.stringify(e.message))
+        return true
+      }),
+    )
   } finally {
     globalThis.fetch = real
   }
 })
-
 test("a key echoed across a line break is still the key, and a shape does not run on past one", async () => {
   // maskEchoes recognises fragments of the real token: an echo cut in two by
   // a newline, neither half reaching MIN_ECHO, is still that token. The shape
@@ -11846,4 +11877,27 @@ test("the page cap on a scan whose numbers are proven does not fail the check-in
   assert.ok(pages.length >= 2, `the scan did read on: ${pages}`)
   assert.ok(pages.length <= 5, `the page cap holds: ${pages}`)
   assert.match(r.windows[0].display, /到期时间可能更早/, `a cut scan is a floor, not the answer: ${r.windows[0].display}`)
+})
+
+test("a page of one plain word does not spend the hook's budget on masks", () => {
+  // maskAll asks isKeyWord about the growing run at every piece, and every
+  // arm of isKeyWord needs a digit, a base64 symbol or a case mix. A body of
+  // one case and no numeral is settled by its alphabet — but before MAYKEY
+  // existed the readings asked anyway, at every piece past the floor: a 32 KiB
+  // server message of "x x x …" spent ~8 s of CPU inside a hook whose whole
+  // budget is 25 s, and a 28,000-character message delayed the check-in's
+  // answer by 36 s. Measured here as a ceiling on the work rather than on the
+  // clock: the CPU a run of the cap-length body takes has to stay well under
+  // the budget whatever else the machine is doing.
+  const body = "x ".repeat(8 * 1024)
+  const started = process.cpuUsage()
+  const masked = testables.maskAll(body, true)
+  const spent = process.cpuUsage(started)
+  const ms = (spent.user + spent.system) / 1000
+  // an unguarded walk takes ~4 s of CPU here at this size; the guarded one
+  // under 0.5 s even on a loaded machine. The ceiling is between the two
+  assert.ok(ms < 2000, `16 KiB of "x " took ${Math.round(ms)} ms of CPU`)
+  // and it is still the text it was: nothing there is a key
+  assert.equal(masked.length, body.length)
+  assert.ok(!masked.includes("…"), "no key, no mask")
 })

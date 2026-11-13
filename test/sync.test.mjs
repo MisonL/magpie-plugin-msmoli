@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, sep } from "node:path"
@@ -4721,13 +4721,32 @@ test("a reader that closes the pipe early is not a crash", async () => {
       const p = spawnSync(process.execPath, [cli, "--dir", dir, "--status"], { encoding: "utf8", timeout: 30_000 })
       resolve(p)
     })
-    // spawnSync captures all output, so EPIPE needs a reader that goes away:
-    // run it through a shell pipeline instead
-    const out = spawnSync("/bin/sh", ["-c", `"${process.execPath}" "${cli}" --dir "${dir}" --status | head -1`], {
-      encoding: "utf8",
-      timeout: 30_000,
+    // spawnSync captures all output, so EPIPE needs a reader that goes away.
+    // A shell pipeline (`… --status | head -1`) is the real world but needs
+    // /bin/sh, which a Windows runner does not have: a spawned child whose
+    // stdout pipe is closed at once is the same thing — the reader is gone
+    // before the first write, on either platform
+    const out = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [cli, "--dir", dir, "--status"], { stdio: ["ignore", "pipe", "pipe"] })
+      let stderr = ""
+      child.stderr.setEncoding("utf8")
+      child.stderr.on("data", (d) => (stderr += d))
+      // the reader leaves before the child writes anything
+      child.stdout.destroy()
+      const timer = setTimeout(() => {
+        child.kill()
+        resolve({ status: -1, stderr })
+      }, 25_000)
+      child.on("close", (code) => {
+        clearTimeout(timer)
+        resolve({ status: code, stderr })
+      })
+      child.on("error", () => {
+        clearTimeout(timer)
+        resolve({ status: -1, stderr })
+      })
     })
-    assert.equal(out.status, 0, `the pipeline failed: ${JSON.stringify(out.stderr)}`)
+    assert.equal(out.status, 0, `the run failed: ${JSON.stringify(out.stderr)}`)
     assert.ok(!/EPIPE|Unhandled 'error'/.test(out.stderr ?? ""), `the crash trace reached stderr: ${out.stderr}`)
     assert.ok(r.status === 0 || r.status === 1, "the direct run is sane")
   } finally {
@@ -5654,13 +5673,75 @@ test("the CLI's 32 KiB worst case stays fast", () => {
   // last word. The bound is loose on purpose: it guards a regression to
   // quadratic reading, not a machine's speed.
   for (const v of ["1A1 ".repeat(8192), "A ".repeat(16384)]) {
-    const t = performance.now()
+    // cpu time, not wall: another process on the machine must not fail this.
+    // "1A1 " is the worst case the walk ever produces (it is ~0.3 s of cpu;
+    // before this round it was 9 s) and "A " is skipped by the floor
+    const started = process.cpuUsage()
     arg(v)
-    const ms = performance.now() - t
-    assert.ok(ms < 1000, `${JSON.stringify(v.slice(0, 6))}… took ${ms.toFixed(0)} ms`)
+    const spent = process.cpuUsage(started)
+    const ms = (spent.user + spent.system) / 1000
+    assert.ok(ms < 1500, `${JSON.stringify(v.slice(0, 6))}… took ${ms.toFixed(0)} ms of cpu`)
   }
   // and a real cut of the same sizes is still read
   assert.ok(arg("9f8e7d6c5b4a39281706f5e4d3c2b1a0".split("").join(" ")).includes("9f8e…b1a0"))
+})
+
+test("a key the CLI joined back together prints as one mask, and the same for a value around it", () => {
+  // "NickName=[ms-F…6789·abcdefABCDEF]": the mask was joined to the word after
+  // its middot as if the middot were a cut, and the whole — frame and all — went
+  // out as one mask ("Nick…CDEF]"). A mask we wrote is not a cut, and arg is
+  // idempotent on its own output: running it twice must equal running it once
+  const inputs = [
+    "NickName=[ms-F…6789·abcdefABCDEF]",
+    "NickName=[ms-F…6789、abcdefABCDEF]",
+    "key=ms-FAKE0123456、789abcdefABCDEF.",
+    "key=ms-FAKE01234    56789abcdefABCDEF.",
+    "ms-F…6789·abcdefABCDEF",
+  ]
+  for (const v of inputs) {
+    const once = arg(v)
+    assert.equal(arg(once), once, `${JSON.stringify(v)}: ${JSON.stringify(once)} -> ${JSON.stringify(arg(once))}`)
+    assert.ok(!once.startsWith("Nick…"), `${JSON.stringify(v)}: the name went into the mask: ${once}`)
+  }
+  assert.equal(arg(inputs[0]), "NickName=[ms-F…6789·abcdefABCDEF]")
+  assert.equal(arg(inputs[1]), "NickName=[ms-F…6789、abcdefABCDEF]")
+  for (const v of inputs.slice(2, 4)) assert.ok(arg(v).endsWith("."), `the full stop is kept: ${arg(v)}`)
+})
+
+test("a title or a log line is not a key cut by spaces", () => {
+  // maskCut read the word's own tail as a key's head ("check-in" ended in
+  // "in", "failed:" in "failed") and a title-case word as a key cut inside
+  // itself ("Hello"), so a sentence's words joined into one "key": "Hello
+  // World Example 2026" went out as "Hell…2026" and a log line's timestamp
+  // took the line with it. Neither is a key, and the card keeps both
+  for (const v of [
+    "Hello World Example 2026",
+    "check-in failed: Session Started At 2026-11-13 08:30:00",
+    "ModelScope check-in released v1 2026",
+    "retry at 2026-11-13 08:30:00 please",
+  ]) {
+    assert.equal(arg(v), v, `${JSON.stringify(v)} was changed`)
+  }
+})
+
+test("a token cut by a space is still masked whole past 32 KiB of a key path", () => {
+  // splitKey stopped at 8 KiB: a key cut by a space on a 32 KiB line — a
+  // wrapped log, a pretty-printed error — was left to the per-word pass, which
+  // has neither half's join. It reads to the same 32 KiB bound the other
+  // readings use, and does it in one pass over a page that is all one word.
+  const prose = "x ".repeat(8000).trim() + " " + "x ".repeat(7900).trim()
+  for (const [key, want] of [
+    ["ghp_aB3dE5fG7hJ9kL1mN3pQ5r S7tU9vW1xY3z9", "ghp_…Y3z9"],
+    ["123e4567-e89b 12d3-a456-426614174000", "123e…4000"],
+    ["aB3dE5fG7hJ9kL1mN3pQ5r S7tU9vW1xY3z9", "aB3d…Y3z9"],
+  ]) {
+    // (32 KiB is the bound the readings share: a line longer than that is
+    // the per-word pass's, as the README says)
+    for (const line of [key + " " + prose, prose + " " + key]) {
+      const out = arg(line)
+      assert.ok(out.includes(want), `${JSON.stringify(key)} on a 32 KiB line: ${JSON.stringify(out.slice(0, 80))}…`)
+    }
+  }
 })
 
 test("a page of ordinary prose is left as it is, and read without the key paths", () => {
@@ -5673,9 +5754,10 @@ test("a page of ordinary prose is left as it is, and read without the key paths"
   // whole page must still be read quickly. The bound is loose on purpose: it
   // guards the reading from going back to per-word work, not a machine's speed.
   const page = "the quick brown fox jumps over the lazy dog. ".repeat(6000).slice(0, 262144)
-  const t0 = performance.now()
+  const t0 = process.cpuUsage()
   const out = arg(page)
-  const ms = performance.now() - t0
+  const spent = process.cpuUsage(t0)
+  const ms = (spent.user + spent.system) / 1000
   assert.equal(out, page, "ordinary prose was changed by the masker")
   assert.ok(ms < 4000, `256 KiB of prose took ${ms.toFixed(0)}ms`)
 })
@@ -6672,7 +6754,10 @@ test("an ms- shape four million characters long does not overflow the stack", ()
   const t0 = performance.now()
   assert.doesNotThrow(() => arg(long), "a long ms- shape must not throw")
   const ms = performance.now() - t0
-  assert.ok(ms < 10000, `4.3M 字符的 ms- 形状耗时 ${ms.toFixed(0)}ms`)
+  // the ceiling is the stack-overflow guard, not a speed rating: the same
+  // input takes ~5 s on Node 24 and ~15 s on Node 18, which this 10 s ceiling
+  // failed on the slow runtime while the shape itself was read fine
+  assert.ok(ms < 60000, `4.3M 字符的 ms- 形状耗时 ${ms.toFixed(0)}ms`)
 })
 
 // ── Round 51: what the review found reaching the terminal ───────────────
@@ -6813,4 +6898,25 @@ test("a vendor key written in lower case is masked whole", () => {
   for (const s of ["sk-preset-20261031 is a provider id", "the sk- prefix names the vendor", "ghp_ short"]) {
     assert.equal(arg(s), s, `ordinary text was masked: ${JSON.stringify(s)} -> ${JSON.stringify(arg(s))}`)
   }
+})
+
+test("a long line of masks is read in one pass, not one squaring pass", () => {
+  // unmark reads an ellipsis as a cut only where key material of eight or
+  // more characters follows it, and it used to ask that by joining every
+  // character after the ellipsis to the line's end — once per ellipsis, so a
+  // line of masks was read to its square. A key echoed back a few thousand
+  // times (the same mask on every line of a log) took 22 s at 4,000 copies of
+  // a value a key's length. The ahead-scan stops at the eighth key character,
+  // and the whole line is linear.
+  const s = "ms-a…bcd1 ".repeat(4000)
+  const started = process.cpuUsage()
+  const out = arg(s)
+  const spent = process.cpuUsage(started)
+  const ms = (spent.user + spent.system) / 1000
+  // the squaring version spends ~20 s of CPU here and this one well under a
+  // second; the ceiling sits between them
+  assert.ok(ms < 3000, `4,000 masks took ${Math.round(ms)} ms of CPU`)
+  // and the masks are the text they were: each is already a mask, and none
+  // of them is read as a cut
+  assert.equal(out, s)
 })

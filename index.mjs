@@ -704,7 +704,13 @@ const clock = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m 
 // claims at (fixed per day and account, so the 30-minute re-asks agree) and
 // whether that moment has passed. token only feeds the hash.
 function plan(win, token, day) {
-  const target = win.start + (fnv(day + "|" + handleOf(token)) % (win.end - win.start))
+  // A window with one bound (`["09:00"]`) is the minute itself, and its width
+  // is zero: `hash % 0` is NaN, `minuteCN() >= NaN` is false forever, and the
+  // account never claimed while the card read "NaN:NaN 后自动领取". The
+  // minute is the only target such a window names; every wider window keeps
+  // the hash that spreads its accounts out.
+  const span = win.end - win.start
+  const target = span > 0 ? win.start + (fnv(day + "|" + handleOf(token)) % span) : win.start
   return { target, due: minuteCN() >= target }
 }
 
@@ -1012,7 +1018,7 @@ const maskShaped = (m) => (keyBody.test(m) ? maskToken(m) : m)
 // (a key can be echoed upper-cased — "SK-ANT-API03-…" — and that is the same
 // key; the letters are compared without case)
 const VENDOR = /^(?:sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|akia|asia|aida|aliyun|ssh-rsa|-----begin)/i
-const keyAt = (word, letters) => isKeyWord(word, letters) || VENDOR.test(word) || /^ms-/i.test(word)
+const keyAt = (word, letters) => (MAYKEY(word) && isKeyWord(word, letters)) || VENDOR.test(word) || /^ms-/i.test(word)
 // maskSpaced is the other reading of a piece of text: a key cut by whitespace
 // is read as one key. Measured without it: a 40-character ghp_ token cut into
 // four went out whole, a foreign ms- key cut the same way, and each piece
@@ -1030,6 +1036,14 @@ const MASKED = "…"
 // the length at which a run is long enough to be a key: the floor every
 // reading asks for, and all a mask needs to show
 const RUNCUT = 20
+// Every arm of isKeyWord needs a digit or a base64 symbol, or both cases at
+// once: a run's rhythm and a digest are digits, a case mix is a capital beside
+// a lower-case letter, a vendor id's numeral is a digit, base64 padding is `=`
+// and `+` rides beside a case mix. A body of one case with no numeral is
+// never a key — and the run readings ask about the growing body at every
+// piece, so a page of "x x x …" spent the hook's whole budget in answers the
+// alphabet alone had already settled.
+const MAYKEY = (w) => /[0-9+=]/.test(w) || (/[a-z]/.test(w) && /[A-Z]/.test(w))
 // a middot or a bullet, one or two in a row, with at most one space on
 // either side: a cut's other spelling, and the separator a display draws
 // (the dot operator is a display's cut too: "1⋅0⋅0" is "100" spaced out)
@@ -1100,12 +1114,17 @@ function maskSpaced(s, letters) {
   // "Ghp_Abcd1234·Efgh5678" is one key, whatever its pieces would read as
   // alone; the separator is a cut's for a front, not the card's)
   const runGap = (k, i) => sp(k) || partsCut(k, i) || (k === i + 1 && midOf(k) && front(words[i][0]))
+  // the next piece that could be part of a key at all: a page of one plain
+  // word ("x x x …") has none, and both walks below would read it piece by
+  // piece to answer no every time. One pass up front is cheaper than either.
+  const nextMay = new Float64Array(words.length + 1).fill(Infinity)
+  for (let i = words.length - 1; i >= 0; i -= 1) nextMay[i] = MAYKEY(words[i][0]) ? i : nextMay[i + 1]
   const out = []
   let from = 0
   for (let i = 0; i < words.length; i += 1) {
     if (i > 0 && /^\r?\n$/.test(gap(i)) && end(i) - at(i - 1) >= 20) {
       const pair = words[i - 1][0] + words[i][0]
-      if (!pair.includes(MASKED) && isKeyWord(pair, letters)) {
+      if (!pair.includes(MASKED) && MAYKEY(pair) && isKeyWord(pair, letters)) {
         out.push(s.slice(from, at(i - 1)), maskToken(pair))
         from = end(i)
         i += 1
@@ -1120,7 +1139,7 @@ function maskSpaced(s, letters) {
     const w1p = w1.replace(/^[^A-Za-z0-9]+/, "")
     const pieceGap = (k) => (cutGap(k) || onlyMid(k)) && words[k][0].length === 1
     const pieceHead = /^[A-Za-z_]{1,3}$/.test(w1p) || front(keyFrontOf(w1))
-    if (w1.length === 1 || (pieceHead && i + 1 < words.length && pieceGap(i + 1))) {
+    if ((w1.length === 1 || (pieceHead && i + 1 < words.length && pieceGap(i + 1))) && nextMay[i] <= i + 96) {
       let k = i
       while (k + 1 < words.length && k - i <= 96 && pieceGap(k + 1)) k += 1
       const joined = w1p + words.slice(i + 1, k + 1).map((w) => w[0]).join("")
@@ -1132,7 +1151,7 @@ function maskSpaced(s, letters) {
         // one piece after it is the text's "· 4": the cut has two pieces more)
         (w1.length === 1 || k - i >= 2 || !front(keyFrontOf(w1))) &&
         joined.length >= 20 &&
-        (isKeyWord(joined, letters) || (joined.match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r, letters))) &&
+        ((MAYKEY(joined) && isKeyWord(joined, letters)) || (joined.match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r, letters))) &&
         (!/^[A-Z0-9]+$/.test(joined) || rhythmic || /^AKIA[0-9A-Z]{16}$/.test(joined))
       ) {
         out.push(s.slice(from, at(i)), maskToken(joined.replace(/[·•∙‧・⋅]/g, "")))
@@ -1198,7 +1217,7 @@ function maskSpaced(s, letters) {
     })()
     // (only a middot-joined run is asked: a whitespace run's "whole" reading is
     // the cut loop's own, piece by piece)
-    const wholeRun = i + 1 < words.length && midOf(i + 1) && isKeyWord(joinedCut, letters)
+    const wholeRun = i + 1 < words.length && midOf(i + 1) && MAYKEY(joinedCut) && isKeyWord(joinedCut, letters)
     const headFront = wholeRun || front(keyFrontOf(words[i][0])) || STEM.test(words[i][0])
     // (a run built of capitals and digits alone is read on only while it is no
     // key yet: a page of "A A A …" reads as one key's shape at every length)
@@ -1211,7 +1230,7 @@ function maskSpaced(s, letters) {
     // digit: a key's pieces after a front are its own)
     let capsy = (headFront || /[0-9]/.test(body)) && /^[A-Z0-9]{1,2}$/.test(body)
     let tinyCaps = capsy
-    for (let k = i + 1; !pairOfKeys && k < words.length && k - i <= 48 && runGap(k, i); k += 1) {
+    for (let k = i + 1; nextMay[i] <= i + 48 && !pairOfKeys && k < words.length && k - i <= 48 && runGap(k, i); k += 1) {
       last = k
       // a run already long enough to be a key is not extended on a guess: 20
       // characters of key material is the floor every reading below asks for.
@@ -1282,7 +1301,7 @@ function maskSpaced(s, letters) {
       // for provider" keeps its frame): the frame is not part of the mask
       // a short word after a run that already reads as a key ends it ("123e…-…
       // not found", "ms-0123 for provider")
-      if (/^[a-z]{1,3}$/.test(x) && (j > i || isKeyWord(body, letters))) break
+      if (/^[a-z]{1,3}$/.test(x) && (j > i || (body.length >= 12 && MAYKEY(body) && isKeyWord(body, letters)))) break
       // (a middot's pieces are the key's: "9f8e·7d6c·…" is one key whatever
       // case its pieces are written in, and the run goes on to its end)
       if (j === i && body.length >= 4 * RUNCUT) break
@@ -1330,7 +1349,8 @@ function maskSpaced(s, letters) {
       // every middot piece, which read a page of tiny pieces to its square)
       // (each piece's check is made when it is read — "okPieces" — so a body
       // that is no key of key length costs no second walk over its pieces)
-      const bodyKey = body.length < 40 && isKeyWord(body, letters)
+      const mayKey = MAYKEY(body)
+      const bodyKey = mayKey && body.length < 40 && isKeyWord(body, letters)
       const cut =
         (body.length >= 20 || shapedBody) &&
         !body.includes(MASKED) &&
@@ -1342,7 +1362,7 @@ function maskSpaced(s, letters) {
         // key whole once its middots are read as spaces, and does not)
         !wordPieces &&
         !(mid && !bodyKey) &&
-        (bodyKey || (body.match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r, letters)))
+        (mayKey && (bodyKey || (body.match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r, letters))))
       // an all-capitals run follows the same rule as the capitals reading
       if (cut) {
         const capRun = body
@@ -1366,12 +1386,12 @@ function maskSpaced(s, letters) {
       // (a middot every few characters is a cut's spelling, and it goes on to
       // its cap: five middots in a run is no text's "·" separator)
       if (mid && k - i >= 4) midKey = true
-      if (mid && body.length >= RUNCUT && !body.includes(MASKED)) {
+      if (mid && body.length >= RUNCUT && !body.includes(MASKED) && mayKey) {
         if (front(words[i][0])) j = k
         else {
           if (!midKey && (askedAt === 0 || body.length - askedAt >= 4)) {
             askedAt = body.length
-            midKey = isKeyWord(body, letters) || (body.match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r, letters))
+            midKey = (mayKey && isKeyWord(body, letters)) || (body.match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r, letters))
           }
           if (midKey) j = k
         }
@@ -1822,11 +1842,11 @@ function maskCut(s, letters) {
       // ("see AKIAIOSFODNN7EXAMPLE here"): the run is the key, whole
       if (/^[a-z]{3,}$/.test(x) && /^[A-Z0-9]+$/.test(body)) break
       // and after a run that already reads as a key ("ms-foreign-… for provider")
-      if (/^[a-z]{4,}$/.test(x) && isKeyWord(body, letters)) break
+      if (/^[a-z]{4,}$/.test(x) && MAYKEY(body) && body.length >= 12 && isKeyWord(body, letters)) break
       // a short word of the text's ends the run once a cut has been read, or
       // when the body already reads as a key ("ghp_…Qrst for provider" keeps
       // its "for"; the "for" of "ms-0123 for provider" too)
-      if (/^[a-z]{1,3}$/.test(x) && (j > i || isKeyWord(body, letters))) break
+      if (/^[a-z]{1,3}$/.test(x) && (j > i || (body.length >= 12 && MAYKEY(body) && isKeyWord(body, letters)))) break
       // the same piece-versus-prose split as the run reading: four lower-case
       // letters end the run unless the run starts at a key's front
       if (/^[a-z]{4,}$/.test(x) && body.length >= 4 && !/[0-9]/.test(body) && !/^[A-Z0-9]+$/.test(body) && (x.length > 4 || !(VENDOR.test(w) || /^ms-/i.test(w)))) break
@@ -1918,7 +1938,7 @@ const maskKeys = (s, letters = true) => {
     // ("SK-ANT-API03-EYAI1PKJRF_KBWT" behind a colon), and is judged whole
     const encl = start > 0 && body.length <= 512 && !/[\\/]/.test(body.slice(0, start)) && !/[A-Za-z0-9]{2,}/.test(body.slice(0, start)) ? body.slice(start) : ""
     const masked =
-      (PATHY.test(word) ? false : isKeyWord(body, letters)) || isKeyWord(word, letters) || (encl !== "" && isKeyWord(encl, letters))
+      (PATHY.test(word) ? false : MAYKEY(body) && body.length >= 12 && isKeyWord(body, letters)) || isKeyWord(word, letters) || (encl !== "" && isKeyWord(encl, letters))
         ? maskToken(body)
         : body.replace(RUN, (r) => (keyRun(r, letters) ? maskToken(r) : r)).replace(UUID_ANY, (m) => maskToken(m))
     return lead + masked + tail
@@ -3751,6 +3771,6 @@ export async function MsmoliPlugin(input) {
 // exporting them as functions: magpie's loader treats every exported function
 // as a plugin entry (see windowOf above), but an object it skips. The tests
 // are the only reader.
-export const testables = { windowOf, streakOf, onDay, CN, INTL, sites, deferred, maskAll, cardText, nameText, hostText, awaitsSignIn, gate }
+export const testables = { windowOf, plan, streakOf, onDay, CN, INTL, sites, deferred, maskAll, cardText, nameText, hostText, awaitsSignIn, gate, json }
 
 export default MsmoliPlugin
