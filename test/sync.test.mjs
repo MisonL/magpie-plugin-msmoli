@@ -5878,6 +5878,92 @@ test("a key cut by a space is masked in the CLI, whatever its shape", () => {
   }
 })
 
+test("a mark a copy puts in the cut is read as the cut", () => {
+  // A key pasted out of a chat window or a table comes cut by a mark the
+  // readings do not join ("ms-aaaa1111、bbbb2222", "…bbbb | -2222…"): the mark
+  // is where a cut was, and the key goes on after it. The walk judges the
+  // pieces on both sides by its own rules, and those are what keep a
+  // sentence's mark from becoming a cut
+  const key = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const want = "ms-a…5555"
+  for (const cut of [13, 16, 20, 25]) {
+    for (const sep of ["、", "。", "：", "；", "，", "「", "【", "—", "— ", " | ", "| ", "、 ", "、\t", "。\n", " 🐈 "]) {
+      const v = `${key.slice(0, cut)}${sep}${key.slice(cut)}`
+      assert.equal(arg(v), want, `${cut}/${JSON.stringify(sep)}: ${arg(v)}`)
+    }
+  }
+  // a sentence's mark ends the key: the piece after it is prose
+  for (const v of ["ms-9a8b7c6d5：接下来", "ms-9a8b7c6d5、for", "ms-9a8b7c6d5。note"]) {
+    assert.equal(arg(v), v, v)
+  }
+  // a mark beside a tab is one cut, not two with a key's characters between
+  assert.equal(arg("ms-aaaa1111-bbbb、\t-2222-cccc-333344445555"), want)
+})
+
+test("a tab inside a cut key is a cut, not a character the key carries", () => {
+  // The control-character guard hands such a value to the per-word pass, which
+  // reads the whole word. A tab is a cut CUT_RUN joins, and is no such
+  // character: with it, a key cut by a mark and a tab is read here (the halves
+  // joined); without it, the mark's cut is left to the per-word pass, and the
+  // first half is printed
+  const key = "ms-9a8b7c6d5e4f3a2b1c"
+  assert.equal(arg(`${key.slice(0, 12)}\t${key.slice(12)}`), "ms-9…2b1c")
+  assert.equal(arg(`${key.slice(0, 12)}、\t${key.slice(12)}`), "ms-9…2b1c")
+  assert.equal(arg(`${key.slice(0, 12)} \t${key.slice(12)}`), "ms-9…2b1c")
+})
+
+test("no more than one front is read as one key", () => {
+  const A = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  for (const v of [`${A} | ${A}`, `no key ${A} | ${A} for provider`]) {
+    assert.equal(arg(v), v.replace(A, "ms-a…5555").replace(A, "ms-a…5555"), v)
+  }
+})
+
+test("a mask already written is not read as a cut", () => {
+  // The ellipsis is a mask's spelling before it is a cut's: "ms-a…5555" is what
+  // the tool printed, and reading the mark as a cut would join it to whatever
+  // follows and change a value already masked
+  for (const v of ["ms-a…5555", "ms-a…5555、bbbb2222", "no key ms-… for provider", "ms-a…5555 ms-z…0000"]) {
+    assert.equal(arg(v), v, v)
+  }
+  // a person's elision is no cut either, unless the half after it is long
+  // enough that only a key's would be ("ms-9a8b7c6d5e…4f3a2b1c" is a key a
+  // narrow column cut; "ms-9a8b7c6d5…e4f3" is someone abbreviating one)
+  assert.equal(arg("ms-aaa…5555"), "ms-aaa…5555")
+  // a narrow column's elision is a cut ("ms-…b1c…4f3a2b1c"), and a short
+  // abbreviation is not: the second half has to carry eight key characters
+  assert.equal(arg("ms-9a8b7c6d5e…4f3a2b1c"), "ms-9…2b1c")
+  assert.equal(arg("ms-aaaa1111-bbbb…cc5555"), "ms-a…bbbb…cc5555")
+  // marks a copy left in a row are one cut, and an ellipsis anywhere in the
+  // row keeps its floor: "…|" is still a paragraph's elision, not a cut
+  const K = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  for (const row of ["、。", "、、", "「」", "|…", "…|", "、。"]) {
+    assert.equal(arg(`${K.slice(0, 20)}${row}${K.slice(20)}`), "ms-a…5555", row)
+  }
+  assert.equal(arg(`${K.slice(0, 32)}|… -${K.slice(32)}`), "ms-a…5555")
+  // two values a table put side by side read as one key, as they do across a
+  // space ("…5555 0123…"): the reading cannot tell a cut from a separator, and
+  // masking both is the side to err on
+  assert.equal(arg("ms-aaaa1111-bbbb-2222-cccc-333344445555 | 0123456789abcdef"), "ms-a…cdef")
+  // but a value that is no key is left where it stands
+  assert.equal(arg("ms-aaaa1111-bbbb-2222-cccc-333344445555 | aaaaaaaa"), "ms-a…5555 | aaaaaaaa")
+})
+
+test("a key cut on either side of its own hyphen reads as one", () => {
+  // The second half opens with the key's hyphen ("-2222-cccc-…"), and the piece
+  // walk reads a gap only where the next piece is key material: a piece that
+  // starts with "-" is not, so the cut through a pipe or a full-width comma
+  // stopped there and the key's first half went out as written.
+  const key = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  const want = "ms-a…5555"
+  for (const cut of [16, 20, 25, 30]) {
+    for (const sep of [" ", "\t", " | ", "、", ": ", "，", " · "]) {
+      const v = `${key.slice(0, cut)}${sep}${key.slice(cut)}`
+      assert.equal(arg(v), want, `${cut}/${JSON.stringify(sep)}: ${arg(v)}`)
+    }
+  }
+})
+
 test("a frame's bracket sitting right on the cut does not end the key", () => {
   // spacedKey reads across a bracket only when the body read so far already
   // reads as a key and the bracket is followed by a space. A display that

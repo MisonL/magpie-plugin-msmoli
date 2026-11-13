@@ -148,7 +148,17 @@ Three invariants to keep when touching it:
   counted punctuation was tried and reverted — it masked "said: aaaa1111-b"
   (nine characters of a token) as if it were longer. Words that already carry
   a mask (`ms-a…5555`) are not judged again: NFKC folds the ellipsis to three
-  dots, which read as key material.
+  dots, which read as key material. The CLI's cut reading also reads a mark a
+  copy or a table put where the key's cut was — a full-width comma or full
+  stop, a bracket, a dash, a bar between cells — as the cut it stands for, so
+  `ms-aaaa1111-bbbb、-2222-…` is masked whole. Each mark becomes as many
+  spaces as it has UTF-16 units, so the offsets still land on the user's
+  characters and what is printed around the mask is what they wrote; the walk
+  then judges the pieces by its own rules, which keeps a sentence's mark from
+  becoming a cut. An ellipsis is read only where eight or more key characters
+  follow it, so a mask already written and a person's abbreviation stay as
+  they are. A key cut by a mark and a tab is one key too: a tab is a cut
+  `CUT_RUN` joins, not a control character the value carries.
   The
   failure path scrubs a child command's output too: that is the path most
   likely to echo the key back. Every key a command touches is a secret, not

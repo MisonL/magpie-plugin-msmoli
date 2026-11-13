@@ -488,6 +488,45 @@ const RUNCUT = 20
 const VERNUM = /^\d{3,}$/
 const PROSE = /^[A-Za-z]{3,}$/
 const FRONT_PIECE = /^(?:m|s|k|ms|sk|s-|g|h|p|u|r|o|x|ox|a|i|l|ali|as|akia|aida|ghp|gho|ghu|ghs|ghr|xox|asia)$/i
+// a mark a copy or a table put where a cut was, which no cut the readings join
+// is: a full-width comma or full stop, a bracket, a dash, a bar between cells
+// ("…0101、e6f7…", "…-bbbb | -2222-…"). It is no letter, digit or key character
+const MARK1 = /[^\p{L}\p{N}A-Za-z0-9+/=_.\-\s]/u
+// and unmark reads it as the cut it stands for ("…bbbb、-2222…", "…bbbb | -2222…"): one mark becomes as many
+// spaces as it has UTF-16 units, so the result keeps every index of the value
+// and what is printed around a mask is what the user typed. The walk then
+// judges the pieces on both sides by its own rules, which is what keeps a
+// sentence's mark from being a cut ("no key ms-…、for provider" ends at "for" as
+// it ends there after a space). An ellipsis is read only where key material
+// of eight characters or more follows it: "ms-a…5555" is a mask already
+// written, and a person's elision is shorter than any key's second half.
+const unmark = (s) => {
+  // the indices are the value's own: a mark of two units keeps two here and a
+  // pair keeps one, so the walk's offsets land on the user's characters
+  const cps = []
+  for (let i = 0; i < s.length; ) {
+    const c = String.fromCodePoint(s.codePointAt(i))
+    cps.push(c, ..." ".repeat(c.length - 1))
+    i += c.length
+  }
+  const M = (c) => c !== undefined && MARK1.test(c)
+  const out = []
+  for (let i = 0; i < cps.length; i += 1) {
+    if (!M(cps[i])) {
+      out.push(cps[i])
+      continue
+    }
+    let j = i
+    if (cps[i] === "…" && !/^[A-Za-z0-9+/=_.-]{8}/.test(cps.slice(i + 1).join(""))) {
+      out.push(cps[i])
+      continue
+    }
+    while (j < cps.length && M(cps[j])) j += 1
+    for (let k = i; k < j; k += 1) out.push(" ")
+    i = j - 1
+  }
+  return out.join("")
+}
 
 function spacedKey(s) {
   // the reading only ever joins a value that carries an ms- or sk- front, even
@@ -507,13 +546,21 @@ function spacedKey(s) {
   // pass lets GLUE take the mark out and read the key whole. NBSP and the
   // ideographic space stay out of this list: they are cuts the join is meant to
   // read across.
-  if (/(?:(?![\n\r])[\p{Cc}\p{Cf}\p{Mn}\p{Me}\u2000-\u200A\u202F\u205F])/u.test(s)) return null
+  // (a tab is a cut CUT_RUN already reads, so it is no such character: a
+  // value cut by a mark and a tab is joined here like any other)
+  if (/(?:(?![\n\r\t])[\p{Cc}\p{Cf}\p{Mn}\p{Me}\u2000-\u200A\u202F\u205F])/u.test(s)) return null
   // an ellipsis is a masked value's spelling, not a key's: a value carrying one
   // is not read as a key cut by it ("ms-… …" is mask output, and joining across
-  // the "…" would put a key's halves back together from a digest's leftovers)
-  // the pieces, and where each starts in the value
+  // the "…" would put a key's halves back together from a digest's leftovers).
+  // unmark draws that line for a copy's ellipsis: only one with a long second
+  // half after it is a cut's
+  // the pieces, and where each starts in what the walk reads: a mark read as
+  // the cut it stands for keeps every index of the value, so "v" maps straight
+  // back to what the user typed ("s"), and what is printed around a mask is
+  // what they wrote
+  const v = unmark(s)
   const pieces = []
-  for (const m of s.matchAll(PIECE)) pieces.push({ text: m[0], at: m.index })
+  for (const m of v.matchAll(PIECE)) pieces.push({ text: m[0], at: m.index })
   if (pieces.length < 2) return null
   const joined = pieces.map((p) => p.text).join("")
   const at = joined.search(/ms-/i)
@@ -544,7 +591,7 @@ function spacedKey(s) {
   // answer. Only non-ASCII punctuation goes: an ASCII mark can be a key's own
   // body under VENDOR_SPAN's reading, and taking it would split that key.)
   const FRAME_PUNCT = /[^\x00-\x7f\p{L}\p{N}]/gu
-  const bodyFrom = (i) => s.slice(start, i).replace(CUT_RUN, "").replace(FRAME_PUNCT, "")
+  const bodyFrom = (i) => v.slice(start, i).replace(CUT_RUN, "").replace(FRAME_PUNCT, "")
   // the key's own span, not the rest of the line: a bracket, a comma or a
   // Chinese character abutting the key's end is the text's, and judging the
   // whole remainder as key material refused a valid key ("(sk-ant-…vTuH)")
@@ -566,7 +613,7 @@ function spacedKey(s) {
   // no gap ("ms-aaaa1111", "--ms-01234"): the key begins right after its
   // front, so the rest of that piece is key material, not filler
   let end = start + 3
-  while (end < s.length && !CUT_ONE.test(s[end]) && KEYCHARS.test(s[end])) end += 1
+  while (end < v.length && !CUT_ONE.test(v[end]) && KEYCHARS.test(v[end])) end += 1
   // how long the front is ("ms-", "sk-", "ghp_"), for the walk's prose rule
   const frontLen = (joined.slice(frontAt).match(/^(?:ms-|sk-|gh[pousr]_|xox[abposr]-|akia|asia|aida)/i)?.[0] ?? "").length
   let bare = false
@@ -596,13 +643,13 @@ function spacedKey(s) {
     // then only a middot's spelling ("a····b"): a run of cuts that is no
     // separator ("a---b") is the frame a display draws instead of a hidden
     // piece, and the pieces after it are printed as written
-    let gap = CUT_ONE.exec(s.slice(end))
+    let gap = CUT_ONE.exec(v.slice(end))
     // a key cut by a space with a closing frame in the cut ("…KbwtX9( ZqLmNeR2vTuH")
     // is still one key: the bracket is the cut's, and stopping at it left the
     // second half on the terminal. Read across only once the body already reads
     // as a key, so a sentence's bracket is not a cut
     if (!gap && strongNext) {
-      const bridged = /^[^\sA-Za-z0-9\p{L}\p{N}]{1,2}[ \t\r\n\u00a0\u3000]+/u.exec(s.slice(end))
+      const bridged = /^[^\sA-Za-z0-9\p{L}\p{N}]{1,2}[ \t\r\n\u00a0\u3000]+/u.exec(v.slice(end))
       if (bridged) gap = bridged
     }
     if (!gap) break
@@ -616,7 +663,7 @@ function spacedKey(s) {
     // and a bracket the next half opens with ("… (e6f7…") are both the text's,
     // and the key starts at the first key character after them
     const framed = /^[^\sA-Za-z0-9]{1,2}(?:[ \t\r\n\u00a0\u3000]+)?/.exec(pieces[idx].text)?.[0] ?? ""
-    const lead = strongNext || (strong && /^[^\sA-Za-z0-9\p{L}\p{N}]{1,2}[ \t\r\n\u00a0\u3000]+/u.test(s.slice(end))) ? framed.length : 0
+    const lead = strongNext || (strong && /^[^\sA-Za-z0-9\p{L}\p{N}]{1,2}[ \t\r\n\u00a0\u3000]+/u.test(v.slice(end))) ? framed.length : 0
     const piece = /^[A-Za-z0-9+/=_.-]*/.exec(pieces[idx].text.slice(lead))[0]
     if (!piece) break
     if (VERNUM.test(piece) && !/\d/.test(bodyFrom(end))) break
