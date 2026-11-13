@@ -1146,7 +1146,9 @@ test("a run that continues past page 1 is followed onto page 2", async () => {
     const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000034" }))
     assert.equal(r.outcome, "done")
     assert.equal(r.streak, 60, `the run runs onto page 2: ${JSON.stringify(r)}`)
-    assert.deepEqual(seen, ["1", "2"], `page 2 is read once, not once per walk step: ${seen}`)
+    // the first ask also touched login/info (the name was unknown), so the
+    // ledger was read once before and once after, then walked for the streak
+    assert.deepEqual(seen, ["1", "1", "2"], `page 2 is read once, not once per walk step: ${seen}`)
   } finally {
     globalThis.fetch = real
   }
@@ -1169,7 +1171,9 @@ test("a page whose total is its own row count is the whole ledger, and no second
   try {
     const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000035" }))
     assert.equal(r.streak, 50, `a complete ledger gives an exact run: ${JSON.stringify(r)}`)
-    assert.equal(ledgerReads, 1, "a complete page needs no second read")
+    // the baseline and the read after the touch on the first ask: the touch ran
+    // for the name, and a grant can land with it
+    assert.equal(ledgerReads, 2, "a complete page needs no second page")
   } finally {
     globalThis.fetch = real
   }
@@ -1195,7 +1199,8 @@ test("an exactly full page with no total reads one more page to learn it was who
   try {
     const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000047" }))
     assert.equal(r.streak, 50, `an empty second page says the first was whole: ${JSON.stringify(r)}`)
-    assert.equal(ledgerReads, 2, "one page more to prove the end")
+    // one baseline, one after the touch, one more to prove the end
+    assert.equal(ledgerReads, 3, "one page more to prove the end")
   } finally {
     globalThis.fetch = real
   }
@@ -1276,7 +1281,8 @@ test("a run longer than the pages the walk may read is left unsaid", async () =>
   try {
     const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000037" }))
     assert.equal(r.streak, undefined, `a run past the page cap is not a streak: ${JSON.stringify(r)}`)
-    assert.equal(ledgerReads, 8, `the walk stops at STREAK_PAGES: ${ledgerReads}`)
+    // the post-touch read plus the capped walk: the cap still stops it
+    assert.equal(ledgerReads, 9, `the walk stops at STREAK_PAGES: ${ledgerReads}`)
   } finally {
     globalThis.fetch = real
   }
@@ -1330,7 +1336,8 @@ test("a gap inside a full page still ends the run, and the count is kept", async
   try {
     const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000038" }))
     assert.equal(r.streak, 2, `today and yesterday, then a gap: ${JSON.stringify(r)}`)
-    assert.equal(ledgerReads, 1, "a gap in view needs no second read")
+    // the baseline, and the one read after the touch: no streak read needed
+    assert.equal(ledgerReads, 2, "a gap in view needs no streak read")
   } finally {
     globalThis.fetch = real
   }
@@ -2800,6 +2807,22 @@ test("windowOf caps the end at 23:00, whatever the configured end", () => {
   // README names, and its end written one minute late is invisible to every
   // test that only says "inside the window"
   assert.deepEqual(windowOf({}), { start: 8 * 60 + 30, end: 10 * 60 }, "no setting at all is the documented default")
+})
+
+test("a one-ended window claims at that minute, not at the default one", () => {
+  // ["09:00"] is one bound, not two that happen to match, and it used to be
+  // read as a bad pair: the window fell back to 08:30–10:00, and the claim
+  // went out up to an hour before the minute the user named.
+  const at = 9 * 60
+  for (const v of [["09:00"], "09:00", ["09:00", ""], ["09:00", null]]) {
+    assert.deepEqual(windowOf({ checkinWindow: v }), { start: at, end: at }, `${JSON.stringify(v)} names 09:00`)
+  }
+  // two ends that are both there and equal stay a bad window: width zero is
+  // plan()'s modulo by zero (pinned by its own test)
+  // an end before the start is still not a window
+  assert.deepEqual(windowOf({ checkinWindow: ["10:00", "08:30"] }), { start: 8 * 60 + 30, end: 10 * 60 })
+  // an inner pair is the window: a third value is not read
+  assert.deepEqual(windowOf({ checkinWindow: ["09:00", "10:00", "11:00"] }), { start: 9 * 60, end: 10 * 60 })
 })
 
 test("windowOf reads the shapes a user writes, and refuses the ones it cannot", () => {
@@ -4339,6 +4362,66 @@ test("the window reads the other separators an IME or an editor substitutes", ()
   }
   for (const sep of ["-", "–", "—", "−", "~", "～", "〜", "至", "到"]) {
     assert.equal(at(`09:15${sep}11:45`), "09:15", `separator ${JSON.stringify(sep)} was not read`)
+  }
+})
+
+test("a grant that landed between the baseline and the touch is not left off the card", async () => {
+  // The day was already in the ledger when the baseline was read, so the
+  // answer is `done` — but the name was not known yet, so this ask also
+  // touched login/info, and the touch is when a grant can land. Reporting the
+  // pre-touch total then hides whatever that touch granted: measured on the
+  // old code, a baseline of 50 with a post-touch ledger of 250 answered
+  // "今日已领取 50" and the host, seeing `done`, did not ask again that day.
+  const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10)
+  let reads = 0
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    const reply = (body) => new Response(JSON.stringify(body), { status: 200 })
+    if (u.pathname.endsWith("/login/info")) return reply({ Code: 200, Success: true, Data: { NickName: "alice" } })
+    reads += 1
+    const rows =
+      reads === 1
+        ? [{ gmt_created: today, type: "EARN", rule_key: "daily_active", title: "注册并登录", total_amount: 50, count: 1 }]
+        : [
+            { gmt_created: today, type: "EARN", rule_key: "daily_active", title: "注册并登录", total_amount: 250, count: 1 },
+            { gmt_created: today, type: "EARN", rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50, count: 1 },
+          ]
+    return reply({ success: true, data: { records: rows, total: rows.length } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-touch-growth-000-000-000000000049" }))
+    assert.equal(r.outcome, "claimed", `the touch's grant is this run's: ${JSON.stringify(r)}`)
+    assert.equal(r.credit, 250, `the growth, not the pre-touch total: ${r.message}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("an ask that touched nothing does not read the ledger twice", async () => {
+  // The post-touch read is for the ask that touched; once the name is known,
+  // a claimed day answers from the baseline alone — reading again would be a
+  // request spent on an answer the previous ask already gave.
+  const token = "ms-notouch-0000-0000-0000-000000000050"
+  const real = globalThis.fetch
+  let ledgerReads = 0
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname.endsWith("/login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    ledgerReads += 1
+    return reply({ body: { success: true, data: { records: [day()], total: 1 } } })
+  }
+  try {
+    // the first ask learns the name and touches
+    const first = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(first.outcome, "done")
+    const before = ledgerReads
+    // the second ask has the name: no touch, and no second read
+    const again = await auth.checkin(async () => ({ type: "api", key: token }))
+    assert.equal(again.outcome, "done")
+    assert.equal(ledgerReads - before, 1, `an untouching ask reads the ledger once: ${ledgerReads - before}`)
+  } finally {
+    globalThis.fetch = real
   }
 })
 
@@ -9125,7 +9208,7 @@ test("a full day's rows on page 2 do not make the streak read that page twice", 
   try {
     const c = await auth.checkin(async () => ({ type: "api", key: token }))
     assert.equal(c.streak, 3, `the three-day run was cut short: ${JSON.stringify(c)}`)
-    assert.deepEqual(pages, [1, 2, 3], `the ledger was read as ${pages.join(", ")}`)
+    assert.deepEqual(pages, [1, 2, 1, 2, 3], `the ledger was read as ${pages.join(", ")}`)
   } finally {
     globalThis.fetch = real
   }

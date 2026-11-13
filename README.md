@@ -204,7 +204,7 @@ If you added ModelScope to magpie earlier for chat, its key is already in
 `providers.json`. The bundled CLI logs the same token into the plugin:
 
 ```bash
-npx magpie-plugin-msmoli --status      # see both sides, change nothing
+npx magpie-plugin-msmoli --status      # see both sides, change nothing; exits 0 when they already agree, 1 when a login is pending
 npx magpie-plugin-msmoli --to-plugin   # copy the preset's key into the plugin
 ```
 
@@ -228,7 +228,7 @@ It syncs the **domestic site only**: the built-in preset it reads is the
 
 | Flag | What it does |
 |---|---|
-| `--status` | Report both sides and the plan; write nothing |
+| `--status` | Report both sides and the plan; write nothing. Exit code 0 when there is nothing to do, 1 when the plan would run (or is refused) |
 | `--to-plugin` | Log the preset's key into the plugin |
 | `--to-preset` | The other way round; a preset that already holds a different key needs `--force` |
 | `--force` | Replace a single existing plugin account whose key differs |
@@ -392,7 +392,7 @@ flowchart LR
 
 | Outcome | Meaning |
 |---|---|
-| `done` | already claimed today, with the day's total |
+| `done` | already claimed today, with the day's total (plus anything the touch itself granted) |
 | `claimed` | this run claimed it, with the amount; a row that was there before the touch is never counted as this run's |
 | `inactive` | the sign-in went through but nothing was granted (from noon on, checked once more 30 minutes later before it stands for the day) |
 | `failed` | nothing was claimed, including "not yet time" (see below) |
@@ -460,6 +460,7 @@ to show), so changes apply without restarting magpie.
 | Value | Effect |
 |---|---|
 | `["08:30", "10:00"]` or `"08:30-10:00"` | claim inside that window |
+| `["09:00"]` or `"09:00"` | claim at 09:00 (the host's ask lands at that minute or the next one) |
 | `false`, `"off"`, `"no"` | no window; claim whenever magpie asks |
 | an unusable value (end before start, not a clock time) | falls back to the default |
 | an end past **23:00** | capped at 23:00; a window entirely past it falls back to the default |
@@ -627,8 +628,9 @@ The terms and risks are in
 
 - **Requests per day.** A check-in is three requests (ledger, touch, ledger);
   a day already claimed answers `done` in one ledger read when the nickname
-  is known, two otherwise; a ledger that hasn't caught up takes
-  four. A run longer than one ledger page adds one read per page walked back,
+  is known, two otherwise (the second is the ledger after the touch — a grant
+  can land with it even on a day already claimed); a ledger that hasn't caught
+  up takes four. A run longer than one ledger page adds one read per page walked back,
   up to seven — only while the streak is still going at the oldest row. A day
   whose own rows fill a page (a busy account) reads the next page too, up to
   four more, for both the check-in and the card. Asks before the window send

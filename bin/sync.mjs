@@ -540,8 +540,15 @@ function spacedKey(s) {
   // the key's own span, not the rest of the line: a bracket, a comma or a
   // Chinese character abutting the key's end is the text's, and judging the
   // whole remainder as key material refused a valid key ("(sk-ant-…vTuH)")
+  // A key cut early — before its body reaches the floor — still gets the walk:
+  // the pieces after the cut are read into it, and each join is judged by
+  // isKey below. "ms-1a2b3c4d5: e6f7…" is 9 characters before its cut, short
+  // of the floor, and dropping the whole reading here printed both halves.
+  // What stays refused is a front with no digit anywhere near it ("ms-dos",
+  // "ms-cli"), which is the prose guard this floor also served.
   const headSpan = /^[A-Za-z0-9+/=_.-]*/.exec(joined.slice(frontAt + 3))[0]
-  if (headSpan.length < 11 || !/\d/.test(headSpan)) return null
+  const nearDigit = joined.slice(frontAt + 3, frontAt + 3 + headSpan.length + 96)
+  if (!/\d/.test(nearDigit)) return null
   // walk forward: a piece is part of the key while it is key characters and
   // not prose; a gap joins them only when it is a cut (one or two characters).
   // The walk starts at the end of the piece the front's own characters sit in:
@@ -563,6 +570,11 @@ function spacedKey(s) {
     // asking at the end of the loop meant the first cut was judged with the
     // answer still false — "…KbwtX9( ZqLmNeR2vTuH" lost its second half there
     strong = strong || isKey(bodyFrom(end))
+    // the body with the next piece's key span: a key cut before its cut piece
+    // reads as one only once the second half is in. Asked before the bridge so
+    // a cut just after the front ("ms-aaaa1111: bbbb…") is still spanned
+    const spanNext = /^[A-Za-z0-9+/=_.-]*/.exec((pieces[idx + 1]?.text ?? "").replace(/^[^\sA-Za-z0-9]{1,2}/, ""))?.[0] ?? ""
+    const strongNext = strong || (spanNext.length >= 8 && isKey(bodyFrom(end) + spanNext))
     // the gap before the next piece: one cut joins, a short run of cuts joins
     // too (the card's own separator is a middot with a space either side,
     // " · ", three characters, and a key cut by one is still one key), and a
@@ -577,18 +589,22 @@ function spacedKey(s) {
     // is still one key: the bracket is the cut's, and stopping at it left the
     // second half on the terminal. Read across only once the body already reads
     // as a key, so a sentence's bracket is not a cut
-    if (!gap && strong) {
+    if (!gap && strongNext) {
       const bridged = /^[^\sA-Za-z0-9]{1,2}[ \t\r\n\u00a0\u3000]+/.exec(s.slice(end))
       if (bridged) gap = bridged
     }
     if (!gap) break
-    if (gap[0].length > 3 && (!strong || gap[0].length > 5)) break
+    if (gap[0].length > 3 && (!strongNext || gap[0].length > 5)) break
     idx += 1
     // the piece's own key span: what follows it inside the piece ("vTuH)" ,
     // "abc," , "…无效") is the text's frame, not the key
     // a bracket opened inside the cut ("…Kbwt (X9ZqLmNeR2vTuH") is the cut's
     // too, once the body reads as a key; the piece's key span starts after it
-    const lead = strong ? (/^[^\sA-Za-z0-9]{1,2}/.exec(pieces[idx].text)?.[0].length ?? 0) : 0
+    // the next piece's own frame: the pause in the cut ("…KbwtX9( ", "a ; ")
+    // and a bracket the next half opens with ("… (e6f7…") are both the text's,
+    // and the key starts at the first key character after them
+    const framed = /^[^\sA-Za-z0-9]{1,2}(?:[ \t\r\n\u00a0\u3000]+)?/.exec(pieces[idx].text)?.[0] ?? ""
+    const lead = strongNext || (strong && /^[^\sA-Za-z0-9]{1,2}[ \t\r\n\u00a0\u3000]+/.test(s.slice(end))) ? framed.length : 0
     const piece = /^[A-Za-z0-9+/=_.-]*/.exec(pieces[idx].text.slice(lead))[0]
     if (!piece) break
     if (VERNUM.test(piece) && !/\d/.test(bodyFrom(end))) break
@@ -2619,10 +2635,13 @@ export async function main({
 
   // --status means "report only", and it comes before the direction check: with
   // only --status it should say "this is the plan", not tell the user to pick
-  // a direction — a report is exactly what they asked for
+  // a direction — a report is exactly what they asked for. Its exit code is the
+  // report's verdict, the same one the noop/non-noop branch above carries: 0
+  // when the two sides already agree, 1 when there is something to run, so a
+  // script does not have to parse the text.
   if (args.status) {
     log(`(--status：以上是计划，未执行)`)
-    return 0
+    return 1
   }
   // Without --to-* it only reports the plan: a bare npx run must not silently
   // write a credential

@@ -355,6 +355,21 @@ versions. It is not submitted to the community marketplace.
   their sign-in. The test is on the spelling alone (`scheme://`, `?%#&` or
   whitespace, a leading `/`), and not one character of the value is echoed.
   A real key (`SENDABLE`, printable ASCII) can carry none of the three.
+- **A claimed day's answer includes what the touch granted.** The site grants
+  nothing on a repeat sign-in, but a grant already on its way can be written
+  between the baseline read and the touch, and `done` settles the day — the
+  host does not ask again. So an ask that *touched* reads the ledger once more
+  and reports the growth as this run's; an ask that did not touch (claimed and
+  the name known) answers from the baseline alone. The extra read is the first
+  ask's only, once per process.
+- **A window with one bound means that minute.** `["09:00"]`, `"09:00"` and
+  `"09:00-"` all read as 09:00 itself; a bound that is *there* and unreadable
+  (`["09:00", "24:30"]`) is still a bad pair and falls back to the default, and
+  two ends that meet are still refused (a width of zero is plan()'s modulo by
+  zero).
+- **`--status` exits with its verdict.** 0 when there is nothing to do, 1 when
+  the plan would run or is refused — the same codes as a real run, so a script
+  does not have to parse the text.
 - **`mask` answers its own output unchanged.** Its two shapes — four
   characters, `…`, four characters, and `（N 字符）` — are returned as they
   stand. Masked a second time, "ms-1…5c6d" became "（9 字符）" and lost the

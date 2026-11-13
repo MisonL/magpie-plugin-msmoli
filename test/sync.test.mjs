@@ -940,7 +940,9 @@ test("a providers.json with a BOM reads as JSON, not as nothing", () => {
 
     // and the whole tool sees it: a BOM'd config is not "not configured"
     const r = run(["--dir", dir, "--status"])
-    assert.equal(r.status, 0, r.stderr)
+    // --status carries the verdict: nothing to do yet (the plugin has no
+    // account) is a 1; what this test is about is the preset being seen
+    assert.equal(r.status, 1, r.stderr)
     assert.doesNotMatch(r.stdout, /未配置/, "a BOM must not hide the preset")
     assert.match(r.stdout, /modelscope/)
 
@@ -1742,12 +1744,47 @@ test("--status on a runnable plan reports it and stops short of running", async 
         return { status: 0, stdout: "", stderr: "" }
       },
     })
-    assert.equal(code, 0)
+    // a runnable plan is something to do: --status reports it and says 1
+    assert.equal(code, 1)
     assert.equal(spawned, false, "--status must not run anything")
     const text = out.join("\n")
     assert.match(text, /plugin login msmoli/, "the plan is still stated")
     assert.match(text, /--status：以上是计划，未执行/)
     assert.doesNotMatch(text, /✓ 完成/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("--status answers with its verdict, not with a constant", async () => {
+  // --status wrote nothing and said so, but it exited 0 whatever it found: a
+  // script could not tell "the two sides already agree" from "there is a login
+  // to run", and had to parse the text. The exit code is the verdict the rest
+  // of the tool already uses: 0 only when there is nothing to do.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-status-verdict-"))
+  try {
+    const runStatus = async (providers, auth) => {
+      writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers }))
+      writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify(auth))
+      const out = []
+      const code = await main({
+        argv: ["--dir", dir, "--to-plugin", "--status", "--magpie", "/nonexistent"],
+        log: (s) => out.push(s),
+        spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+      })
+      return { code, text: out.join("\n") }
+    }
+    // nothing to do: the sides already share the token
+    const same = await runStatus([presetOf(A)], { msmoli: { type: "api", key: A } })
+    assert.equal(same.code, 0, `in sync is a 0: ${same.text}`)
+    // something to do: the plugin has no account yet
+    const todo = await runStatus([presetOf(A)], {})
+    assert.equal(todo.code, 1, `a pending login is not a 0: ${todo.text}`)
+    assert.match(todo.text, /--status：以上是计划，未执行/)
+    // a refusal is still a 1, and --status alone carries the same verdict
+    const out = []
+    const bare = await main({ argv: ["--dir", dir, "--status"], log: (s) => out.push(s), spawn: () => ({ status: 0, stdout: "", stderr: "" }) })
+    assert.equal(bare, todo.code, `--status alone answers the same thing: ${out.join("\n")}`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -1768,7 +1805,8 @@ test("--status beats --dry-run when both are given, and neither runs", async () 
         return { status: 0, stdout: "", stderr: "" }
       },
     })
-    assert.equal(code, 0)
+    // a runnable plan is something to do: --status says 1
+    assert.equal(code, 1)
     assert.equal(spawned, false)
     assert.match(out.join("\n"), /未执行/)
   } finally {
@@ -1964,7 +2002,8 @@ test("--status alone reports the plan instead of asking for a direction", async 
     const out = []
     const code = await main({ argv: ["--dir", dir, "--status"], log: (s) => out.push(s), spawn: () => ({ status: 0, stdout: "", stderr: "" }) })
     const text = out.join("\n")
-    assert.equal(code, 0)
+    // the fixture's plugin has no account: a login is pending, so 1
+    assert.equal(code, 1)
     assert.match(text, /--status：以上是计划，未执行/)
     assert.doesNotMatch(text, /要执行请显式指定方向/)
   } finally {
@@ -4724,7 +4763,8 @@ test("a value flag given twice is refused, and --flag=value is read", async () =
   try {
     const out = []
     const code = await main({ argv: [`--dir=${dir}`, "--status"], log: (s) => out.push(s) })
-    assert.equal(code, 0, out.join("\n"))
+    // the empty fixture has a login to run, so the verdict is 1
+    assert.equal(code, 1, out.join("\n"))
     assert.match(out.join("\n"), new RegExp(`magpie 配置目录：.*${dir.split(sep).pop()}`))
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -5819,6 +5859,38 @@ test("a key cut by a space is masked in the CLI, whatever its shape", () => {
   for (const [cut, want] of cases) {
     assert.equal(arg(`no key ${cut} for provider`), `no key ${want} for provider`, `arg kept the cut: ${cut}`)
     assert.equal(scrub(`no key ${cut} for provider`), `no key ${want} for provider`, `scrub kept the cut: ${cut}`)
+  }
+})
+
+test("a frame's bracket sitting right on the cut does not end the key", () => {
+  // spacedKey reads across a bracket only when the body read so far already
+  // reads as a key and the bracket is followed by a space. A display that
+  // quotes each half, closes one and opens the next ("(ms-…5) (e6f7…)", a
+  // JSON list, a sentence's "…: …") puts the bracket between the space and the
+  // second half instead, and the walk stopped there: the key's whole first half
+  // went out as written.
+  const key = "ms-1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"
+  const want = "ms-1…5c6d"
+  const a = key.slice(0, 12)
+  const b = key.slice(12)
+  const halved = [
+    [`${a} ${b}`, want],
+    ...[[":", ";", ",", "|", "!"].map((mark) => [`${a}${mark} ${b}`, want])].flat(),
+  ]
+  // once a bracket touches the key, the halves are one key and the whole
+  // value takes the key's own mask (the bracket is inside it); the frame
+  // around the outside stays
+  for (const [open, close] of [["(", ")"], ["[", "]"], ["{", "}"], ["<", ">"], ["'", "'"], ['"', '"'], ["`", "`"]]) {
+    halved.push([`${a}${close} ${open}${b}`, want])
+    halved.push([`${a}${close} ${b}`, want])
+    halved.push([`${a} ${open}${b}`, want])
+    halved.push([`${open}${a}${close} ${open}${b}${close}`, `${open}${want}${close}`])
+    halved.push([`${open}${a} ${b}${close}`, `${open}${want}${close}`])
+  }
+  for (const [input, expected] of halved) {
+    const out = arg(input)
+    assert.equal(out, expected, `${JSON.stringify(input)}: ${out}`)
+    assert.ok(!out.includes(a) && !out.includes(b.slice(0, 12)), `${JSON.stringify(input)} leaked: ${out}`)
   }
 })
 

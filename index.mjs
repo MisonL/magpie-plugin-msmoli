@@ -643,11 +643,13 @@ function minuteOf(text) {
   return h < 24 && mi < 60 ? h * 60 + mi : null
 }
 
-// windowOf is the check-in window as [start, end) minutes after Beijing
+// windowOf is the check-in window as [start, end] minutes after Beijing
 // midnight, or null when it is off. Both `["08:30", "10:00"]` and
-// `"08:30-10:00"` are read; an unworkable value (bad clock time, start not
-// before end) is not honoured, the documented default applying instead of a
-// window that would never come due.
+// `"08:30-10:00"` are read, and a single bound (`["09:00"]`, `"09:00"`) names
+// the minute itself; an unworkable value (bad clock time, an end before the
+// start) is not honoured, the documented default applying instead of a window
+// that would never come due. A window of one minute is claimable: the host's
+// ask lands on or after the minute.
 //
 // Kept out of the module's exports on purpose. magpie's plugin loader takes
 // *every* function a module exports as a plugin entry (host.js's servers():
@@ -672,7 +674,16 @@ function windowOf(cfg) {
   const pair = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(/[-–—−~～〜至到]/) : WINDOW_DEFAULT
   const start = minuteOf(pair[0])
   let end = minuteOf(pair[1])
-  if (start === null || end === null || start >= end) return { start: DEFAULT_START, end: DEFAULT_END }
+  if (start === null) return { start: DEFAULT_START, end: DEFAULT_END }
+  // One bound names the minute itself: ["09:00"], "09:00", "09:00-" — the
+  // second value missing, not unreadable — is a user asking for 09:00. Read as
+  // a bad pair it fell back to 08:30–10:00, and the claim could go out an hour
+  // before the minute named. A bound that is there and cannot be read
+  // (["09:00", "24:30"]) is still a bad pair: the user wrote a time the parser
+  // does not honour, and guessing what they meant is worse than the default.
+  const missing = pair[1] === undefined || pair[1] === null || (typeof pair[1] === "string" && !pair[1].trim())
+  if (missing) end = start
+  else if (end === null || end <= start) return { start: DEFAULT_START, end: DEFAULT_END }
   if (end > LAST) {
     end = LAST
     if (start >= end) return { start: DEFAULT_START, end: DEFAULT_END }
@@ -3209,6 +3220,9 @@ export async function MsmoliPlugin(input) {
           // empty string then), or the touch would repeat for exactly the
           // accounts whose nickname is unusable.
           const known = names.has(token)
+          // whether login/info was reached on this ask: only then can the
+          // ledger have grown under us, and only then is a second read worth it
+          let touched = false
           if (claimed && known) {
             name = names.get(token)
           } else if (claimed) {
@@ -3234,6 +3248,7 @@ export async function MsmoliPlugin(input) {
               // answers for alone (see runsThrough)
               name = unusableName(raw, token) || unusableName(candidate, token) ? "" : candidate
               rememberName(token, name)
+              touched = true
             } catch (e) {
               // no name this ask; the day still stands as done — but a 401 the
               // gate confirmed is the token refused, and the host is told
@@ -3316,7 +3331,35 @@ export async function MsmoliPlugin(input) {
           // then. From the page after the touch, a ledger that changed between
           // the two reads (rows pushed to the next page, or the day's total
           // recomputed) would make the card say today's claim is 0 credits.
+          // Both claimed exits answer the same way; the streak is computed in
+          // one place so a change to it cannot land in one branch only. (Declared
+          // before the branches: the claimed one below answers through it too.)
+          const claimedNow = async (page, gain) => {
+            const streak = await streakOf(page.all, page.day, page.total, ledgerReader(profile, token, deadline, page.pages, page.last, page.seenPages, page.seenRows, marks), deadline)
+            return withStreak({
+              outcome: "claimed",
+              credit: gain.credit,
+              message: `领取 ${gain.credit} 魔粒：${gain.which}` + (page.complete ? "" : "；账单未读完，数字偏低"),
+              ...(marks.expired ? { signIn: "expired" } : {}),
+            }, streak, marks)
+          }
+
           if (claimed) {
+            // The touch ran on this ask (it was read for the name), and a grant
+            // can land with it: the site grants nothing on a repeat, but a
+            // grant already on its way can be written between the baseline and
+            // the touch. The pre-touch total would then be the card's answer
+            // for the whole day, and the host — seeing `done` — does not ask
+            // again. One more read, only on an ask that actually touched, says
+            // what the ledger holds now; with no growth it is the same total.
+            // (An ask that touched nothing — claimed and the name known —
+            // skips this, and stays at the baseline.)
+            const after = touched ? noted(await todayEarn(token, deadline, { expiry: false })) : null
+            if (after) {
+              probe = after.profile
+              const grewNow = gained(after.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)), after.day)
+              if (grewNow) return await claimedNow(after, grewNow)
+            }
             const credit = sumOf(beforeDaily)
             // each title is cut and stringified as before, and the join is
             // masked once at the end: two titles that each carry a piece of the
@@ -3345,18 +3388,6 @@ export async function MsmoliPlugin(input) {
               message: `今日已领取 ${shown} 魔粒` + (which ? `（${which}）` : "") + (before.complete ? "" : "；账单未读完，数字偏低"),
               ...(marks.expired ? { signIn: "expired" } : {}),
             }, await streakOf(before.all, before.day, before.total, ledgerReader(profile, token, deadline, before.pages, before.last, before.seenPages, before.seenRows, marks), deadline), marks)
-          }
-
-          // Both claimed exits answer the same way; the streak is computed in
-          // one place so a change to it cannot land in one branch only.
-          const claimedNow = async (page, gain) => {
-            const streak = await streakOf(page.all, page.day, page.total, ledgerReader(profile, token, deadline, page.pages, page.last, page.seenPages, page.seenRows, marks), deadline)
-            return withStreak({
-              outcome: "claimed",
-              credit: gain.credit,
-              message: `领取 ${gain.credit} 魔粒：${gain.which}` + (page.complete ? "" : "；账单未读完，数字偏低"),
-              ...(marks.expired ? { signIn: "expired" } : {}),
-            }, streak, marks)
           }
 
           const fresh = noted(await todayEarn(token, deadline, { expiry: false }))
