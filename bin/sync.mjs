@@ -345,8 +345,17 @@ export function readJson(file, exists = existsSync) {
 // from a file, and a token pasted with a trailing newline (or a poisoned file)
 // would otherwise print that control character to the terminal — the ends are
 // the only part of it this tool ever displays, so they are where it matters.
+//
+// A mask read back in is not a key: a masked value copied into a second run
+// was masked again ("ms-1…5c6d" became "（9 字符）") and lost its ends. The
+// two shapes this function prints are answered unchanged. Neither can be a
+// key's own text — SENDABLE keys are printable ASCII, and "…" and the
+// full-width brackets are not — so the shapes cannot stand for one.
+const MASKED_SHAPE = /^[\s\S]{4}…[\s\S]{4}$/
+const MASKED_SHORT = /^（\d+ 字符）$/
 export const mask = (t) => {
   if (typeof t !== "string" || !t) return "（不可用）"
+  if (MASKED_SHAPE.test(t) || MASKED_SHORT.test(t)) return t
   if (t.length < 12) return `（${t.length} 字符）`
   return `${show(t.slice(0, 4))}…${show(t.slice(-4))}`
 }

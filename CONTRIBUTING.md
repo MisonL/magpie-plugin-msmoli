@@ -341,6 +341,33 @@ versions. It is not submitted to the community marketplace.
   the token — or its front, after the cut to 40 — is not written back.
 - **ModelScope's times are parsed as Beijing time.** They carry no zone, and
   `new Date()` would read them in the host's own zone.
+- **An expiry the scan never read is not named at all.** The card's
+  "到期时间可能更早" is a floor for a time it shows, so it is printed only
+  when there is an expiry to be earlier than. A cut scan that read no
+  `expire_at` row carries no `resetsAt` and no hint.
+- **A 200 carrying `Code: 401` is the sign-in refused.** The login layer
+  answers some refusals inside a 200 envelope. Only an explicit 401 code
+  counts — a 200 whose words merely mention an expiry ("积分已过期") is the
+  ledger talking, and signing the account out over it is wrong.
+- **A key that is spelled like an address is said to be one.** A URL or a
+  path pasted into the key field is refused as a key; the 401 message then
+  leads with "填的像是地址或路径" so the user checks the field instead of
+  their sign-in. The test is on the spelling alone (`scheme://`, `?%#&` or
+  whitespace, a leading `/`), and not one character of the value is echoed.
+  A real key (`SENDABLE`, printable ASCII) can carry none of the three.
+- **`mask` answers its own output unchanged.** Its two shapes — four
+  characters, `…`, four characters, and `（N 字符）` — are returned as they
+  stand. Masked a second time, "ms-1…5c6d" became "（9 字符）" and lost the
+  ends. A key cannot spell either shape (keys are printable ASCII).
+- **Not changed, on purpose.** Three boundary behaviours were reviewed and
+  left as they are: a walk that crosses midnight between two page reads
+  reports each read against the day it happened on (diffing both reads
+  against one day failed a claim that landed); a ledger whose printed
+  `total` contradicts its rows stops the walk incomplete rather than guess
+  which number is right (the card says "账单未读完，数字偏低"); and every
+  redirect is refused (`redirect: "error"`, the site's own included), at the
+  price of a site that ever moves its API behind one — that reports as a
+  transport failure — against never handing the token to another host.
 - **Before the check-in window's moment, the hook answers `failed`.** magpie
   always re-asks `failed`; `done`/`inactive`/`ineligible` only get re-asked
   while the day is unproven (before noon Beijing, and only if no claim was

@@ -680,7 +680,7 @@ The terms and risks are in
 |---|---|
 | `没有登录信息，请先登录` | `printf 'ms-token\n' \| magpie plugin login msmoli` |
 | No credit window on the card, or no check-in | Restart magpie; the plugin host caches. |
-| `failed` with HTTP 401 | The token was revoked, or belongs to the other site; `modelscope.cn` and `modelscope.ai` don't share tokens. The message names the site that refused (国内站 / 国际站), or 任一站点 when both did. Make a new token there and sign in again. |
+| `failed` with HTTP 401 | The token was revoked, or belongs to the other site; `modelscope.cn` and `modelscope.ai` don't share tokens. The message names the site that refused (国内站 / 国际站), or 任一站点 when both did. When the key is spelled like a URL or a path, the message says so first — check the field, not the sign-in. Make a new token there and sign in again. |
 | `failed` with HTTP 403 | ModelScope's risk control refused the request; the token is fine. A check-in is asked again in 30 minutes; a usage read shows the 403 on the card until the next poll. |
 | Before the window: failed, with `09:56 后自动领取（北京时间，magpie 每半小时问一次，无需操作）` | Expected. See [When it claims](#when-it-claims-the-check-in-window). |
 | Check in now before the target minute answers failed with the same line | Expected. A manual press and the host's half-hourly ask reach the plugin the same way, so only the target minute starts the claim. |

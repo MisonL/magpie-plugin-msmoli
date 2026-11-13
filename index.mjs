@@ -336,7 +336,7 @@ async function siteRead(token, path, deadline = Infinity) {
   if (answer) return answer
   if (said) return said.answer
   if (down) throw down.error
-  throw deadToken("任一站点")
+  throw deadToken("任一站点", token)
 }
 
 async function json(site, token, path, deadline = Infinity) {
@@ -2346,12 +2346,19 @@ const whyOf = (e) => {
 // it — which only two of the three carried. `where` is the profile's CN site /
 // INT site, and stays in the one wording so the card says which site refused
 // the token.
-const expired = (where) => `令牌失效或不属于${where}（HTTP 401）`
-
+//
 // deadToken is what every 401 becomes: the token is revoked, and magpie only
-// signs the account out when the hook says so. Both call sites guard
-// `status === 401` before throwing this, so there is no other status to name.
-const deadToken = (where) => Object.assign(new Error(expired(where)), { signIn: "expired" })
+// signs the account out when the hook says so. Every call site is a 401 (a
+// status or a code) before throwing this, so there is no other status to name.
+//
+// A key that is really an address or a path — a page URL pasted into the key
+// field — is refused as a key, and the plain sentence leaves the user checking
+// their sign-in. The message names the shape it saw, without echoing a
+// character of it. The test is on the spelling only: nothing is sent to find
+// out, and the address' contents stay out of the message.
+const addressShaped = (token) => typeof token === "string" && (/^[a-z]+:\/\//i.test(token) || /[?%#&\s]/.test(token) || token.startsWith("/"))
+const expired = (where, token) => `${addressShaped(token) ? "填的像是地址或路径，不是令牌；" : ""}令牌失效或不属于${where}（HTTP 401）`
+const deadToken = (where, token) => Object.assign(new Error(expired(where, token)), { signIn: "expired" })
 
 // RISK is what every 403 says — ModelScope's risk control, not a bad token:
 // the account may be perfectly fine and only the request was refused. The
@@ -2395,7 +2402,7 @@ const gate = (profile, res, body, parsed, token, what, risk = RISK) => {
   // challenge JSON said the sign-in expired, and a proxy's HTML 403 was
   // reported as ModelScope's risk control
   if (res.status === 401 && parsed && !awaitsSignIn(body)) throw new Error(`${what}：HTTP 401（响应不是魔搭的）`)
-  if (res.status === 401 && parsed) throw deadToken(profile.where)
+  if (res.status === 401 && parsed) throw deadToken(profile.where, token)
   // a 403 is ModelScope's risk control only when it answers in its own shape
   // (the success envelope, words in it); a proxy's "proxy denied" page or its
   // "authentication required" JSON is the path, and is reported as a plain
@@ -2412,6 +2419,12 @@ const gate = (profile, res, body, parsed, token, what, risk = RISK) => {
   if (res.status === 403 && riskShaped(body)) throw new Error(risk)
   if (res.status === 403) throw new Error(`${what}：响应不是魔搭的（HTTP 403）`)
   if (!parsed) throw new Error(`${what}：响应不是 JSON（HTTP ${res.status}）`)
+  // the login layer answers some refusals with HTTP 200 and the code inside
+  // the envelope. Read as a plain failed read, the host kept the account
+  // signed in and polled the same dead token again. Only an explicit 401 code
+  // counts: a 200 whose words merely mention an expiry ("积分已过期") is the
+  // ledger talking, not the sign-in, and signing out over it would be wrong.
+  if (res.status === 200 && !okOf(body) && String(body?.Code ?? body?.code ?? "") === "401") throw deadToken(profile.where, token)
   if (res.status !== 200 || !okOf(body)) throw new Error(`${what}：${saidOf(body, token) || `HTTP ${res.status}`}`)
 }
 
@@ -2638,7 +2651,7 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
         refused = true
         break
       }
-      throw deadToken(profile.where)
+      throw deadToken(profile.where, token)
     }
     if (!got.parsed || res.status !== 200 || !okOf(got.body)) {
       if (dayDone) complete = true
@@ -3206,7 +3219,6 @@ export async function MsmoliPlugin(input) {
             name = ""
             try {
               const { res, body, parsed } = await json(profile.site, token, LOGIN_INFO, deadline)
-              if (res.status === 401 && parsed && awaitsSignIn(body)) throw deadToken(profile.where)
               gate(profile, res, body, parsed, token, "登录接口失败", `${RISK}，稍后会自动重试`)
               const me = dataOf(body)
               // A name is a string. Anything else — a number, an object, a list —

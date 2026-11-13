@@ -11546,6 +11546,63 @@ test("a courtesy page that fails leaves the countdown a floor, not the answer", 
   }
 })
 
+test("a 200 carrying Code 401 is the sign-in refused, not a read that failed", async () => {
+  // The login layer answers some refusals with HTTP 200 and the code inside
+  // the envelope. Read as a plain 200, the card said the read failed and the
+  // host kept the account signed in, polling the same dead token. Only an
+  // explicit 401 code counts: a 200 that merely mentions an expiry is a
+  // ledger sentence, not the sign-in.
+  const refused = { body: { success: false, Code: 401, Message: "unauthorized" } }
+  const u = await withFetch({ [BALANCE_PATH]: refused, [TX_PATH]: refused }, () =>
+    auth.usage(async () => ({ type: "api", key: "ms-code401-0000-0000-0000-000000000041" })),
+  )
+  assert.equal(u.signIn, "expired", JSON.stringify(u))
+  assert.match(u.error, /令牌失效/, u.error)
+  const other = { body: { success: false, message: "积分已过期" } }
+  const v = await withFetch({ [BALANCE_PATH]: other, [TX_PATH]: other }, () =>
+    auth.usage(async () => ({ type: "api", key: "ms-code401-0000-0000-0000-000000000042" })),
+  )
+  assert.notEqual(v.signIn, "expired", `a 200 mentioning an expiry is not the sign-in: ${JSON.stringify(v)}`)
+  assert.match(v.error, /积分已过期/, v.error)
+})
+
+test("a key that is really an address says so when it is refused", async () => {
+  // An address pasted into the key field is refused as a key, and "令牌失效或
+  // 不属于魔搭" leaves the user checking their sign-in. The message names the
+  // shape it saw — without echoing a character of it.
+  const url = "https://modelscope.cn/my/settings"
+  const u = await withFetch({ [BALANCE_PATH]: { status: 401, body: {} } }, () =>
+    auth.usage(async () => ({ type: "api", key: url })),
+  )
+  assert.equal(u.signIn, "expired", JSON.stringify(u))
+  assert.match(u.error, /地址或路径/, u.error)
+  assert.ok(!u.error.includes("modelscope"), `the address is not echoed: ${u.error}`)
+  const key = "ms-address-0000-0000-0000-000000000043"
+  const v = await withFetch({ [BALANCE_PATH]: { status: 401, body: {} } }, () =>
+    auth.usage(async () => ({ type: "api", key })),
+  )
+  assert.match(v.error, /令牌失效/, v.error)
+  assert.doesNotMatch(v.error, /地址或路径/, `a key is not an address: ${v.error}`)
+})
+
+test("a check-in with a claimed day still reports a refused name read", async () => {
+  // The login/info read that only fetches the name once the day is claimed used
+  // to check the 401 itself, in a narrower spelling than gate's. gate now
+  // answers every 401 as the token refused, and the catch here turns that into
+  // the expired mark — the check is gone, and this pins that nothing was lost
+  // with it.
+  const r = await withFetch(
+    {
+      "/api/v1/users/login/info": { status: 401, body: { Code: 401, Message: "unauthorized" } },
+      [BALANCE_PATH]: { body: { success: true, data: { available_balance: 1 } } },
+      [TX_PATH]: { body: { success: true, data: { records: [day()] } } },
+    },
+    async () => auth.checkin(async () => ({ type: "api", key: "ms-claimed-401-0000-0000-000000000048" })),
+  )
+  assert.equal(r.outcome, "done", JSON.stringify(r))
+  assert.equal(r.signIn, "expired", `the refused name read is the token's: ${JSON.stringify(r)}`)
+})
+
 test("a token refused on a courtesy page is reported expired", async () => {
   // The courtesy page's 401 is not thrown (the numbers stand) — and it was
   // then swallowed whole: the card kept the account looking signed in, and

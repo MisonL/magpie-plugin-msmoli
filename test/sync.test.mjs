@@ -38,6 +38,19 @@ test("mask keeps only the ends, as magpie's own display does", () => {
   assert.equal(mask(undefined), "（不可用）")
 })
 
+test("a mask read back as a key keeps its ends", () => {
+  // mask() is the only place a key's ends are shown, and its own output is
+  // what gets read again — a masked value copied into a second run, a log of
+  // a log. Masked a second time it became "（9 字符）" and the ends were gone.
+  // Its own shapes are answered unchanged; a real key cannot carry the "…"
+  // (not ASCII) or the full-width brackets, so the shapes cannot collide.
+  for (const key of ["ms-1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d", "ghp_abcdefghijklmnopqrstuvwx"]) {
+    const shown = mask(key)
+    assert.equal(mask(shown), shown, `a mask is not a key: ${shown}`)
+  }
+  assert.equal(mask("（9 字符）"), "（9 字符）", "the short form is already the answer")
+})
+
 test("presetCandidates finds the preset by id or by preset name", () => {
   const ps = [
     { id: "openai", key: "sk-x" },
