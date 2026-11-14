@@ -2021,8 +2021,15 @@ const maskKeys = (s, letters = true) => {
     // (the span is the key's own: the mask keeps four characters at each end,
     // and a word that is the whole key spends them on the key, not on the
     // frame around it)
+    // Only a key that *starts* inside a larger word is the span's: with the
+    // front at the word's own first character, the walk below already reads
+    // the whole word, and it reads what the span stops at — a key cut by a
+    // comma, a semicolon, a bar or a full-width stop is one key there
+    // ("ghp_vxaCT1MRVfTp,xiVroh…" came out "ghp_…VfTp,xiVroh…": six
+    // characters behind the mask's head stayed, and a zero-width space did the
+    // same).
     const vspan = vendorSpanOf(word)
-    if (vspan) return word.slice(0, vspan.at) + maskToken(vspan.text) + word.slice(vspan.at + vspan.text.length)
+    if (vspan && vspan.at > 0) return word.slice(0, vspan.at) + maskToken(vspan.text) + word.slice(vspan.at + vspan.text.length)
     const masked =
       (PATHY.test(word) ? false : MAYKEY(body) && body.length >= 12 && isKeyWord(body, letters)) || isKeyWord(word, letters) || (encl !== "" && isKeyWord(encl, letters))
         ? maskToken(body)

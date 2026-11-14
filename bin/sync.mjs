@@ -1855,10 +1855,16 @@ function joinFramed(s) {
     // between the key's halves ("NickName=[AKIAiXYDw=v/tSw…"), through its own
     // "=" — so the per-word pass gets the word whole, and a join from here
     // would cut the key in two
+    // ...and the "=" has to be a frame's, not a value's: key material in front
+    // of it alone is a variable's name too ("SESSIONID=AKIAI OSFODNN7EXAMPLE",
+    // "MY_AWS_KEY_ID=…"), and reading that as one value stopped a cut key from
+    // being joined — the whole id went out as written. A frame character
+    // somewhere in front of the "=" ("--token=", "NickName=[") is what makes it
+    // a value's own.
     if (cut >= 0 && head.length < 8) {
       const front = t0.slice(0, cut)
       const tail = (front.match(/[A-Za-z0-9+/=_.-]+$/) ?? [""])[0]
-      if (tail.length >= 8) {
+      if (tail.length >= 8 && /[=:([{"'`<>]/.test(front)) {
         const q = Math.max(front.lastIndexOf("["), front.lastIndexOf("("), front.lastIndexOf("{"))
         const from = q >= 0 ? q + 1 : front.length - tail.length
         const whole = t0.slice(from).replace(/[^A-Za-z0-9]+$/, "")
@@ -1930,8 +1936,27 @@ const argWords = (x) =>
     // "t9u5Rf7OkgBfsAWbncAefz0n1zsOHrH=…"), and masking only what follows
     // left the front of the key on the terminal
     const left = eq > 0 ? w.slice(0, eq) : ""
-    if (eq > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(left) && (left.match(/[A-Za-z]/g) ?? []).length >= 2 && !VENDOR.test(left) && !keyRun(left) && !isKey(left, false)) {
-      const value = w.slice(eq + 1)
+    // ...and a half of a key is key material, not a name: the ":" has to have
+    // two pieces of the key alphabet on both sides of it — the left one is
+    // where the key's run began, and the right one is key material long enough
+    // to be a key's own — and the value may carry no frame in it. A generated
+    // key written "head:body" ("ZlibmV9ovZJYMm:pT3b7KKnQw2glZ443XcrFnhPYi")
+    // is one key, and masking the right half alone left 14 characters as
+    // written. A variable's name is a word, and its value is the key; a name in
+    // front keeps its name ("token=ghp_…", "key=ms-…"), and a name or a frame
+    // in the value ("Authorization: Bearer xoxb-…", "token: xoxb-…") is the
+    // value's own business, not a half of anything.
+    const valueAt = eq + 1
+    const value = w.slice(valueAt)
+    if (
+      eq > 0 &&
+      /^[A-Za-z_][A-Za-z0-9_]*$/.test(left) &&
+      (left.match(/[A-Za-z]/g) ?? []).length >= 2 &&
+      !VENDOR.test(left) &&
+      !keyRun(left) &&
+      !isKey(left, false) &&
+      !(w[eq] === ":" && (/^[A-Za-z0-9]{12,}$/.test(value) || /^[A-Za-z]+\s+[A-Za-z]+[-_]/.test(value)))
+    ) {
       if (!value.includes("…") && isKey(value)) return `${w.slice(0, eq + 1)}${mask(value)}`
     }
     // the word as written and its lowercase fold; a full-width key with no

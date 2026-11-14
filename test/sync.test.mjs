@@ -6906,6 +6906,45 @@ test("a key whose own = sits inside its body is masked whole", () => {
   }
 })
 
+test("a key written with a separator between its halves is masked whole", () => {
+  // argWords read anything on the left of "=" or ":" as a variable's name and
+  // masked only the value: a generated key whose own front half sits there
+  // ("ZlibmV9ovZJYMm:pT3b7KKnQw2glZ443XcrFnhPYi") kept its first 14 characters,
+  // which the published build masked whole. Two runs of a key's length with a
+  // single separator, whose whole reads as one key once the separator is out,
+  // is a key's cut, not a name and its value. A name in front still keeps its
+  // name.
+  for (const [v, want] of [
+    ["ZlibmV9ovZJYMm:pT3b7KKnQw2glZ443XcrFnhPYi", "Zlib…hPYi"],
+    ["token=ghp_Abcd1234Efgh5678Ijkl9012Mnop3456", "token=ghp_…3456"],
+    ["key=ms-aaaa1111-bbbb-2222-cccc-333344445555", "key=ms-a…5555"],
+    ["Authorization: Bearer ms-aaaa1111-bbbb-2222-cccc-333344445555", "Authorization: Bearer ms-a…5555"],
+    ["abcdefghijklmN:pqrstuvwxyz01", "abcdefghijklmN:pqrstuvwxyz01"],
+  ]) {
+    assert.equal(arg(v), want, `arg ${JSON.stringify(v)}`)
+    assert.equal(scrub(v), want, `scrub ${JSON.stringify(v)}`)
+  }
+  // a name written in camelCase in front of the key keeps its name, as a
+  // short one does: the key's own half is a generated string, not a word
+  assert.equal(arg("sessionTokenValue:ghp_Abcd1234Efgh5678Ijkl9012Mnop3456"), "sess…3456")
+})
+
+test("a variable's name is not a key's own =, and a key cut by a space behind it is masked", () => {
+  // joinFramed stopped reading from behind a "=" when key material stood in
+  // front of it — but a variable's name is key material too ("SESSIONID",
+  // "MY_AWS_KEY_ID"), and the word was then no value with a cut in it: an AWS
+  // key id written with a space in it went out whole (20 characters). A frame
+  // character in front of the "=" is what makes the "=" a value's.
+  for (const [v, want] of [
+    ["SESSIONID=AKIAI OSFODNN7EXAMPLE", "SESSIONID=AKIA…MPLE"],
+    ["SESSION_TOKEN=AKIAI OSFODNN7EXAMPLE", "SESSION_TOKEN=AKIA…MPLE"],
+    ["MY_AWS_KEY_ID=AKIAI OSFODNN7EXAMPLE", "MY_AWS_KEY_ID=AKIA…MPLE"],
+  ]) {
+    assert.equal(arg(v), want, `arg ${JSON.stringify(v)}`)
+    assert.equal(scrub(v), want, `scrub ${JSON.stringify(v)}`)
+  }
+})
+
 test("a key cut at its first letter by a slash is masked whole", () => {
   // splitKey skips a one-character piece (a page of them was quadratic), and
   // the skip took the first letter of a key a display cut after it: the letter

@@ -158,7 +158,19 @@ Three invariants to keep when touching it:
   punctuation through its own `=` (`--token=F5cYjKRtCxkl=K9m1+…`,
   `NickName=[AKIAiXYDw=v/tSw…`), and a one-letter piece before a slash is a
   key's front rather than the text's (`token: O/F46xsMfa-…`), while a letter
-  before a path (`x /Users`) stays the text's.
+  before a path (`x /Users`) stays the text's. Two boundaries on that reading,
+  both measured after it existed: the "=" has to be a frame's — a variable's
+  name is key material too (`SESSIONID=AKIAI OSFODNN7EXAMPLE` went out whole
+  when it was not) — and a word that is itself a key in any case is not read
+  from behind a frame at all (`--token=…`, `NickName=[AKIA…`). The card reads a
+  vendor front from the front to its end only when the front starts inside a
+  larger word; a word that is the key from its first character is read whole by
+  the word's own pass, which is what masks a key cut by a comma, a bar or a
+  full-width stop. And a key whose front half sits on the left of a ":" is one
+  key (`ZlibmV9ovZJYMm:pT3b7KKn…`), not a name and its value — only a ":" with
+  two pieces of the key alphabet on both sides and a value of key material
+  qualifies, so `token: ghp_…` and `Authorization: Bearer xoxb-…` keep their
+  names.
   Any change to these thresholds has to keep both suites
   green: both carry a table of cut shapes (one, three, four, six, eight,
   twelve characters, line breaks, no-break and ideographic spaces, middots)

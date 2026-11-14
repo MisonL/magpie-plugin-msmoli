@@ -11921,6 +11921,31 @@ test("a vendor's front is evidence whatever the body's case or numerals", () => 
     assert.equal(testables.maskAll(prose, true), prose, `prose was masked: ${testables.maskAll(prose, true)}`)
   }
 })
+test("a vendor key cut by a mark, a bar or an invisible character is masked whole on the card too", () => {
+  // The vendor span the card reads stops at a punctuation mark no key carries
+  // (a comma, a semicolon, a bar, a full-width stop) and at an invisible
+  // character, and returning the span as the answer kept the rest of the word
+  // as written: 220 of 600 fronts x separators x cut points went out with a
+  // dozen characters behind the mask's head where HEAD masked the whole key.
+  // With the front at the word's first character the word's own reading is
+  // the answer; the span is for a key that starts *inside* a larger word.
+  const body = "vxaCT1MRVfTpxiVrohH6YrdZtsR7sRSmSEzYhzEmhW"
+  const fronts = ["ghp_", "sk-", "xoxb-", "AKIA", "sk-ant-api03-", "github_pat_"]
+  const seps = [",", ";", "|", "、", "。", ":", "，", "\u200b", "\u00ad", "\u2060", "!", "?", "'", "#"]
+  for (const front of fronts) {
+    for (const sep of seps) {
+      for (const at of [6, 10, 14, 18, 22]) {
+        const key = front + body.slice(0, at) + sep + body.slice(at)
+        const flat = key.replace(/[^A-Za-z0-9]/g, "")
+        const kept = longestKeptIn(testables.maskAll(key, true), flat)
+        assert.ok(kept.length < 12, `${JSON.stringify(key)} 原样保留了 ${kept.length} 个字符 ${JSON.stringify(kept)}：${testables.maskAll(key, true)}`)
+      }
+    }
+  }
+  // a key that starts inside a larger word is still the span's, and the frame
+  // and the text in front of it stay as printed
+  assert.equal(testables.maskAll('not found"sk-ant-api03-RIHSNURJ9W49P"the key is', true), 'not found"sk-a…W49P"the key is')
+})
 
 test("a page of numerals is not searched for keys it cannot hold", () => {
   // Every arm of isKeyWord needs a letter: a case mix, a digit beside one, a
