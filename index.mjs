@@ -1036,14 +1036,14 @@ const MASKED = "…"
 // the length at which a run is long enough to be a key: the floor every
 // reading asks for, and all a mask needs to show
 const RUNCUT = 20
-// Every arm of isKeyWord needs a digit or a base64 symbol, or both cases at
-// once: a run's rhythm and a digest are digits, a case mix is a capital beside
-// a lower-case letter, a vendor id's numeral is a digit, base64 padding is `=`
-// and `+` rides beside a case mix. A body of one case with no numeral is
-// never a key — and the run readings ask about the growing body at every
-// piece, so a page of "x x x …" spent the hook's whole budget in answers the
-// alphabet alone had already settled.
-const MAYKEY = (w) => /[0-9+=]/.test(w) || (/[a-z]/.test(w) && /[A-Z]/.test(w))
+// Every arm of isKeyWord asks for a key's length (12 is the shortest floor),
+// and for a letter, a base64 "=" or a UUID's hyphens: a case mix is letters, a
+// digest and a vendor key's numeral come beside their letters, base64 padding
+// is `=` and `+` rides beside a case mix. Digits alone are never a key (a UUID
+// of digits still has its hyphens), and the run readings ask about the growing
+// body at every piece, so a page of "x x x …" or a page of "0 0 0 …" spent the
+// hook's budget in answers the alphabet alone had already settled.
+const MAYKEY = (w) => w.length >= 12 && /[A-Za-z=-]/.test(w)
 // a middot or a bullet, one or two in a row, with at most one space on
 // either side: a cut's other spelling, and the separator a display draws
 // (the dot operator is a display's cut too: "1⋅0⋅0" is "100" spaced out)
@@ -1114,11 +1114,22 @@ function maskSpaced(s, letters) {
   // "Ghp_Abcd1234·Efgh5678" is one key, whatever its pieces would read as
   // alone; the separator is a cut's for a front, not the card's)
   const runGap = (k, i) => sp(k) || partsCut(k, i) || (k === i + 1 && midOf(k) && front(words[i][0]))
-  // the next piece that could be part of a key at all: a page of one plain
-  // word ("x x x …") has none, and both walks below would read it piece by
-  // piece to answer no every time. One pass up front is cheaper than either.
-  const nextMay = new Float64Array(words.length + 1).fill(Infinity)
-  for (let i = words.length - 1; i >= 0; i -= 1) nextMay[i] = MAYKEY(words[i][0]) ? i : nextMay[i + 1]
+  // what a run needs before it can be a key: a letter (or a base64 "=" or a
+  // UUID's hyphen), and a digit or both cases beside it. A page of one plain
+  // word ("x x x …") has no digit and no capital; a page of numerals
+  // ("0 0 0 …") has no letter. Both walks below would read either piece by
+  // piece to answer no every time, so one pass up front answers for the whole
+  // window and the walk is skipped.
+  const nextHas = (re) => {
+    const next = new Float64Array(words.length + 1).fill(Infinity)
+    for (let i = words.length - 1; i >= 0; i -= 1) next[i] = re.test(words[i][0]) ? i : next[i + 1]
+    return next
+  }
+  const nextLet = nextHas(/[A-Za-z=-]/)
+  const nextDig = nextHas(/[0-9]/)
+  const nextLow = nextHas(/[a-z]/)
+  const nextUp = nextHas(/[A-Z]/)
+  const mayRun = (i, n) => nextLet[i] <= i + n && (nextDig[i] <= i + n || (nextLow[i] <= i + n && nextUp[i] <= i + n))
   const out = []
   let from = 0
   for (let i = 0; i < words.length; i += 1) {
@@ -1139,7 +1150,7 @@ function maskSpaced(s, letters) {
     const w1p = w1.replace(/^[^A-Za-z0-9]+/, "")
     const pieceGap = (k) => (cutGap(k) || onlyMid(k)) && words[k][0].length === 1
     const pieceHead = /^[A-Za-z_]{1,3}$/.test(w1p) || front(keyFrontOf(w1))
-    if ((w1.length === 1 || (pieceHead && i + 1 < words.length && pieceGap(i + 1))) && nextMay[i] <= i + 96) {
+    if ((w1.length === 1 || (pieceHead && i + 1 < words.length && pieceGap(i + 1))) && mayRun(i, 96)) {
       let k = i
       while (k + 1 < words.length && k - i <= 96 && pieceGap(k + 1)) k += 1
       const joined = w1p + words.slice(i + 1, k + 1).map((w) => w[0]).join("")
@@ -1230,7 +1241,7 @@ function maskSpaced(s, letters) {
     // digit: a key's pieces after a front are its own)
     let capsy = (headFront || /[0-9]/.test(body)) && /^[A-Z0-9]{1,2}$/.test(body)
     let tinyCaps = capsy
-    for (let k = i + 1; nextMay[i] <= i + 48 && !pairOfKeys && k < words.length && k - i <= 48 && runGap(k, i); k += 1) {
+    for (let k = i + 1; mayRun(i, 48) && !pairOfKeys && k < words.length && k - i <= 48 && runGap(k, i); k += 1) {
       last = k
       // a run already long enough to be a key is not extended on a guess: 20
       // characters of key material is the floor every reading below asks for.
@@ -1633,6 +1644,44 @@ const randomish = (r) => {
 // a list: no key's word is a word, and a middot run of them was asked at every
 // piece)
 const LISTY = /^(?:[A-Za-z]+\d+)+$/
+// The vendor fronts the CLI reads as evidence on their own, unanchored (a key
+// can sit behind a frame or inside a URL). The span runs over key characters;
+// what it stops at is whitespace or a character no key carries.
+const VSPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida|aiza|aliyun)[\p{L}\p{N}\p{M}_+\/=.\-]*/iu
+// vendorSpanOf is the CLI's test, word for word where it can be: the body
+// behind a vendor's front has to read as key material, not as a name's words.
+// What it returns is the key's own span — from the front to the last key
+// character — so a frame or a word in front of it ("key=…", "no key \"…\"")
+// keeps as printed. A path keeps its shape (README: /tmp/ghp_16C7… leaves the
+// folder readable), so a value that starts like a path is not read here either.
+const vendorSpanOf = (w) => {
+  if (PATHY.test(w) || /^[\\/]/.test(w)) return null
+  const m = VSPAN.exec(w)
+  if (!m) return null
+  const span = m[0]
+  const body = span.slice(span.search(/[-_]/) + 1).replace(/[^A-Za-z0-9]+$/, "")
+  if (!body) return null
+  const pieces = body.split(/[-_.\/]/).filter(Boolean)
+  if (!pieces.length) return null
+  // one unbroken run of 16+ is a key's length in one piece; 20+ of key
+  // alphabet is a key whose pieces are short; 12+ mixing both cases with a
+  // numeral is a body copied with its tail cut off
+  const key =
+    pieces.some((p) => p.length >= 16) ||
+    (body.length >= 20 && pieces.length >= 3 && pieces.every((p) => /^[A-Za-z0-9]+$/.test(p)) && pieces.some((p) => /[0-9]/.test(p))) ||
+    (pieces.length === 1 && body.length >= 12 && /[0-9]/.test(body) && /[a-z]/.test(body) && /[A-Z]/.test(body))
+  if (key) return { at: m.index, text: span }
+  // a body cut by slashes is one key once the slashes are out
+  // ("sk-CSyDHp9VEk/RgjNpwI"): a name carries no slash inside it, so the
+  // reading is only taken for a body that has one, and only when the whole
+  // reads as a key
+  if (span.includes("/")) {
+    const whole = w.replace(/[^A-Za-z0-9]+/g, "")
+    if (whole.length >= 20 && isKeyWord(whole, true)) return { at: m.index, text: span }
+  }
+  return null
+}
+const vendorBodyKey = (w) => vendorSpanOf(w) !== null
 const isKeyWord = (w, letters = true) => {
   if (w.length < 12) return false
   // (a word followed by its numeral — "d8e3a6f0b5c9" — is no match: the
@@ -1644,6 +1693,18 @@ const isKeyWord = (w, letters = true) => {
   // (its letters and digits must alternate, as "SK-ANT-API03-EYAI1PKRF_KBWT"
   // does; a sentence in capitals has words without digits between them)
   if (VENDOR.test(w) && w === w.toUpperCase() && /[0-9]/.test(w) && !/[A-Z]{6,}/.test(w.toUpperCase().replace(/^[A-Z]+_[A-Z]+_/, ""))) return true
+  // a key whose front is a vendor's is a key whatever its body's case and
+  // whether or not the body carries a numeral: the front is the evidence. The
+  // CLI has read the shape for a while (its vendor-span pass); the card read
+  // only the upper-cased body with a digit, and printed
+  // "ghp_ABCDEFGHIJKLMNOPQRSTUVWX" and "ghp_abcdefghijklmnopqrstu" whole
+  // while the terminal masked them. A name behind the same front keeps its
+  // words: the body has to be key material — one unbroken run of 16+, or 20+
+  // of key alphabet with a numeral in it, or 12+ mixing both cases with a
+  // numeral — so "sk-anti-fraud-review-team" stays. A body cut by slashes is
+  // read with them out, as the CLI's spaced reading does: a key cut by its own
+  // separator is still one key ("sk-ant-api03-Eyai1pkJrF/KbwtX9").
+  if (vendorBodyKey(w)) return true
   // a run with no word in it (a slash of a key a host printed with no key in
   // hand) is judged by shape; the caller that knows a name from a key skips
   // this arm by passing `letters: false` (nameText, when a name is being shown)
@@ -1787,10 +1848,25 @@ function maskCut(s, letters) {
     }
     return /^(?:[A-Za-z]+#)+$/.test(t)
   }
+  // the same run-level condition the space reading asks (see maskSpaced): a
+  // key needs a letter and a digit or both cases within the pieces a head
+  // reads on, and a page of numerals has none of the first. One pass up
+  // front, and the walk skips what cannot be one instead of reading every
+  // start of it (32 KiB of "0 " spent 2 s here)
+  const nextHas = (re) => {
+    const next = new Float64Array(words.length + 1).fill(Infinity)
+    for (let q = words.length - 1; q >= 0; q -= 1) next[q] = re.test(words[q][0]) ? q : next[q + 1]
+    return next
+  }
+  const nextLet = nextHas(/[A-Za-z=-]/)
+  const nextDig = nextHas(/[0-9]/)
+  const nextLow = nextHas(/[a-z]/)
+  const nextUp = nextHas(/[A-Z]/)
   const out = []
   let from = 0
   for (let i = 0; i < words.length; i += 1) {
     const w = words[i][0]
+    if (nextLet[i] > i + 64 || (nextDig[i] > i + 64 && !(nextLow[i] <= i + 64 && nextUp[i] <= i + 64))) continue
     // a key written one character per word starts at a piece of one or two
     // characters inside such a run (five or more one-character words); the
     // join decides whether the pieces are one key
@@ -1852,7 +1928,9 @@ function maskCut(s, letters) {
       if (/^[a-z]{4,}$/.test(x) && body.length >= 4 && !/[0-9]/.test(body) && !/^[A-Z0-9]+$/.test(body) && (x.length > 4 || !(VENDOR.test(w) || /^ms-/i.test(w)))) break
       body += x
       if (body.length < 20 || body.includes(MASKED)) continue
-      const whole = body.length >= 16 && (body.match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r, letters)) // every keyRun arm floors at 16
+      // every keyRun arm needs a letter (see MAYKEY), so a body of numerals
+      // has no key in it and the join is not asked of it
+      const whole = body.length >= 16 && MAYKEY(body) && (body.match(/[A-Za-z0-9]+/g) ?? []).some((r) => keyRun(r, letters)) // every keyRun arm floors at 16
       const flips = body.match(/[a-z][A-Z]/g) ?? []
       // (only asked once both is on the table; most of a run's words carry one case)
       let pairMix = -1
@@ -1937,6 +2015,14 @@ const maskKeys = (s, letters = true) => {
     // run of capitals and digits before the key is the key's own front
     // ("SK-ANT-API03-EYAI1PKJRF_KBWT" behind a colon), and is judged whole
     const encl = start > 0 && body.length <= 512 && !/[\\/]/.test(body.slice(0, start)) && !/[A-Za-z0-9]{2,}/.test(body.slice(0, start)) ? body.slice(start) : ""
+    // a vendor's front inside a larger word ("key=sk-ant-…", "no key \"xoxb-…\"")
+    // is masked from the front to its end, and the frame and the words in front
+    // of it stay as printed
+    // (the span is the key's own: the mask keeps four characters at each end,
+    // and a word that is the whole key spends them on the key, not on the
+    // frame around it)
+    const vspan = vendorSpanOf(word)
+    if (vspan) return word.slice(0, vspan.at) + maskToken(vspan.text) + word.slice(vspan.at + vspan.text.length)
     const masked =
       (PATHY.test(word) ? false : MAYKEY(body) && body.length >= 12 && isKeyWord(body, letters)) || isKeyWord(word, letters) || (encl !== "" && isKeyWord(encl, letters))
         ? maskToken(body)

@@ -128,22 +128,37 @@ Three invariants to keep when touching it:
   and no mixed-case word (it can become no key), at 4×20 on one piece, and
   when it finds no key at all the next start is its end. The run readings
   stop at 32 KiB: past that only the per-word pass runs. Measured on
-  one-character words (the worst case): 32 KiB costs about 0.5 s on the card
-  (`"A " × 16384`) and the same in the CLI — all passes together — against a
-  25 s hook and a 120 s child; ordinary text of 32 KiB costs about 0.2 s (the
+  32 KiB pages of one- and two-character words: the card costs 0.09–0.30 s
+  (`"12 34 "`, `"x "`, `"0 "`, `"1·"`, `"A "`; before the numeral page was
+  guarded it took 3–4 s of CPU on `"0 "` and 2.6 s on `"1 "`), the CLI
+  0.2–0.8 s — all passes together — against a 25 s hook and a 120 s child
+  (the CLI pays one more whole-text reading, and its per-word pass judges a
+  numeral page with `isKey`); ordinary text of 32 KiB costs about 0.2 s (the
   card's readings ask `isKeyWord` of the growing run at every piece, and every
   arm of it needs a digit, a base64 symbol or a case mix: a body of one case
   with no numeral is skipped by that test alone — before it, 28,000 characters
   of `"x "` delayed a check-in by 36 s). A run that found nothing hands the
   scan on to the last word it read, unless it saw a digit or a front on the
   way (the CLI: before that, `"1A1 " × 8192` took 9 s and 32 KiB of `"A "`
-  1.8 s). The CLI's split reading reads to the same 32 KiB, and skips a head
-  with no digit or letter within the 48 pieces it reads on in one pre-pass:
+  1.8 s; `"1A1 " × 8192` now measures 0.2 s on the card and 1.1–1.8 s in the
+  CLI, and the CLI's own test bounds it at 4 s). The CLI's split reading reads
+  to the same 32 KiB, and skips a head with no digit or letter within the 48
+  pieces it reads on in one pre-pass:
   a key cut by a space on a long line is joined (`ghp_ 1234 AbCd …`), a page
   of one plain word is passed over. A sentence's word is no longer read as a
   cut's head — `check-in failed: …` and `Hello World Example 2026` were masked
   whole before — and a mask the CLI wrote is not joined across (`arg` is
-  idempotent: `NickName=[ms-F…6789·abcdefABCDEF]` is left as it is).
+  idempotent: `NickName=[ms-F…6789·abcdefABCDEF]` is left as it is). A mask
+  the CLI wrote is opaque to every reading: a mask's head is a vendor front
+  (`AKIA…XDKO/L3,`) and a body cut at the ellipsis is an ms- body
+  (`…K1jlMS-6…7`), so both were masked a second time — into a length
+  (`（4 字符）`) or a shorter span. The frame a key's own `=` looked like is
+  read the same way: material of eight or more characters in front of the
+  frame is key material, and the key runs from behind the frame's
+  punctuation through its own `=` (`--token=F5cYjKRtCxkl=K9m1+…`,
+  `NickName=[AKIAiXYDw=v/tSw…`), and a one-letter piece before a slash is a
+  key's front rather than the text's (`token: O/F46xsMfa-…`), while a letter
+  before a path (`x /Users`) stays the text's.
   Any change to these thresholds has to keep both suites
   green: both carry a table of cut shapes (one, three, four, six, eight,
   twelve characters, line breaks, no-break and ideographic spaces, middots)

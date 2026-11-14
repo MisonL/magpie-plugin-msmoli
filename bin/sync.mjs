@@ -687,11 +687,19 @@ function spacedKey(s) {
     // by the reading that masks the whole body ("sk-a nt-a pi03", below)
     // a front's own letters ("ant", "sk", "ghp") are not prose: the walk
     // reads past them while the front has not been completed yet
-    if (PROSE.test(piece) && (frontLen === 0 || bodyFrom(end).length >= frontLen)) break
+    // a slash is a key's own separator (an AWS secret is written
+    // wJalr…/K7MDENG/…), and its pieces are key material even when a lower-case
+    // word sits in them ("RgjNpwI" has "gj"): at a slash the run goes on while
+    // the body so far reads as a key, and the prose rule is the space's
+    if (PROSE.test(piece) && (frontLen === 0 || bodyFrom(end).length >= frontLen) && !(/^\/+$/.test(v.slice(end, pieces[idx].at)) && bodyFrom(end).length >= 12 && isKey(bodyFrom(end)))) break
     end = pieces[idx].at + lead + piece.length
     bare = bare || FRONT_PIECE.test(piece)
   }
+  // a body that stops at our own mask's ellipsis is a mask's front half, not
+  // a key. Masking it again printed a length where the first mask's ends were:
+  // "(ysUUqH=lMS-5…w+6N)" went out as "lMS-（4 字符）…w+6N" on the second pass
   const body = bodyFrom(end)
+  if (v[end] === MASKED) return null
   if (body.length <= 3 || !/\d/.test(body)) return null
   // a vendor front that carries more than a front ("sk-preset-20261031") is a
   // provider id, not a key cut up: the per-word and cut readings judge it
@@ -765,7 +773,11 @@ const show = (s) =>
     })
     // an upper-cased vendor key is the same key, and its pieces are too short
     // for the per-word floors ("SK-ANT-API03-EYAI1PKJRF_KBWT")
-    .replace(/[^\s]+/g, (w) => (isKey(w) && VENDOR.test(w) && w === w.toUpperCase()) || (w.startsWith("--") && w.includes("=") && isKey(w.slice(w.indexOf("=") + 1))) ? mask(w) : w)
+    // a word carrying our ellipsis is one of the masks this tool wrote, not a
+    // key: read back as an upper-cased vendor word (a mask's tail can carry a
+    // digit) it was masked again into a length ("AKIA…H98." became
+    // "（8 字符）"), losing the ends the first mask kept
+    .replace(/[^\s]+/g, (w) => (!w.includes("…") && ((isKey(w) && VENDOR.test(w) && w === w.toUpperCase()) || (w.startsWith("--") && w.includes("=") && isKey(w.slice(w.indexOf("=") + 1))))) ? mask(w) : w)
     .replace(/[\p{Cc}\p{Cf}]/gu, " ")
 
 // arg is show() for a value the user typed: --from, a stray argument, a bare
@@ -913,7 +925,11 @@ const isKey = (word, runs = true) => {
   // an upper-cased vendor key is the same key, and its pieces are too short
   // for the run floors ("SK-ANT-API03-EYAI1PKJRF_KBWT"); the rhythm a key has
   // (a capital beside a digit) tells it from a sentence in capitals
-  if (VENDOR.test(word) && word === word.toUpperCase() && /[0-9]/.test(word) && !/[A-Z]{6,}/.test(word.replace(/^[A-Z]+_[A-Z]+_/, ""))) return true
+  // (a word carrying our ellipsis is a mask this tool wrote, and a mask's
+  // head is a front like "AKIA": read as an upper-cased key it was masked
+  // again into a length, and its own ends were lost — "AKIA…XDKO/L3," went out
+  // "AKIA…/L3," on the second pass)
+  if (VENDOR.test(word) && !word.includes("…") && word === word.toUpperCase() && /[0-9]/.test(word) && !/[A-Z]{6,}/.test(word.replace(/^[A-Z]+_[A-Z]+_/, ""))) return true
   // a vendor front and a body whose piece mixes case and carries a digit is a
   // key even when every piece is short of the run floors: "ghp_Abcd1234Ef" (a
   // token copied with its tail cut off) went out whole, and no word of prose
@@ -1112,8 +1128,12 @@ function splitKey(s) {
     // a single-character piece is skipped: the character pass reads a run of
     // them whole ("9f8e 7d6c … b a 1 0"), and joining one to a key's tail took
     // the road's own prose with it ("… Y3z9 x x x x" read "Y3z9x" into the
-    // key, and the next window read on from there)
-    if (pieces[from].text.length === 1) continue
+    // key, and the next window read on from there). A slash after the letter
+    // is the key's own cut, not the text's ("token: O/F46xsMfa-…",
+    // "key=K9ymj/xp9-…": the letter and the segment after it are one value),
+    // and a letter of that shape is one word in a walk of nine — the skip
+    // still holds for a run of them
+    if (pieces[from].text.length === 1 && !SLASH.test(s.slice(pieces[from].at + 1, pieces[from + 1].at))) continue
     if (!piece(pieces[from].text) || framed(pieces[from].text)) continue
     // a middot before the piece is a cut the other readings own: their walk
     // starts at the key's front, and starting a second one here took the
@@ -1823,6 +1843,31 @@ function joinFramed(s) {
     // a head that is a key already is the passes' own business: joining it to
     // the next word would move the four characters a mask is allowed to show
     if (isKey(head)) continue
+    // the same for the whole piece: a "=" inside a key's body is the key's own
+    // ("--token=F5cYjKRtCxkl=K9m1+/lBV8ZjCPs6the", "NickName=[AKIAiXYDw=v/…"),
+    // and reading from behind it masked the tail only and then left the front
+    // as written — the per-word pass owns the word whole
+    if (isKey(t0)) continue
+    // and a frame with key material in front of it is not that value's frame:
+    // eight characters of it is longer than any word a name is, and a short
+    // head behind it is the key's own next character, not a new value's start.
+    // The key runs from behind the frame's punctuation, which may itself sit
+    // between the key's halves ("NickName=[AKIAiXYDw=v/tSw…"), through its own
+    // "=" — so the per-word pass gets the word whole, and a join from here
+    // would cut the key in two
+    if (cut >= 0 && head.length < 8) {
+      const front = t0.slice(0, cut)
+      const tail = (front.match(/[A-Za-z0-9+/=_.-]+$/) ?? [""])[0]
+      if (tail.length >= 8) {
+        const q = Math.max(front.lastIndexOf("["), front.lastIndexOf("("), front.lastIndexOf("{"))
+        const from = q >= 0 ? q + 1 : front.length - tail.length
+        const whole = t0.slice(from).replace(/[^A-Za-z0-9]+$/, "")
+        if (from < cut && /[A-Za-z0-9]/.test(t0[from]) && whole.length >= 12 && /\d/.test(whole) && isKey(whole, false)) {
+          return s.slice(0, words[i].at + from) + mask(whole) + s.slice(words[i].at + from + whole.length)
+        }
+        continue
+      }
+    }
     let joined = head
     let best = ""
     let bestEnd = 0
@@ -1852,8 +1897,15 @@ function joinFramed(s) {
 // and inside a word that is not, its key-like runs and UUIDs are masked. The
 // word in the other spellings a key is printed in — full-width characters,
 // mostly — is judged by its folded copy and masked as written.
+// a word that is one of this tool's own masks — four characters, the
+// ellipsis, one to four more, and the frame's punctuation around them — is
+// not a word to judge: its tail can read as a numeral beside capitals
+// ("AKIA…H98" is an upper-cased vendor word to isKey), and masking it again
+// printed a length instead of the ends the first mask kept
+const OUR_MASK = /^[^A-Za-z0-9]*[A-Za-z0-9]{4}…[A-Za-z0-9]{1,4}[^A-Za-z0-9]*$/
 const argWords = (x) =>
   show(x).replace(/[^\s]+/g, (w) => {
+    if (OUR_MASK.test(w)) return w
     const f = w.normalize("NFKC").toLowerCase()
     // the word as written and its fold. The capitals need no third call: a
     // word that is already all capitals is judged whole by isKey (its slashed
@@ -1873,7 +1925,12 @@ const argWords = (x) =>
     // name (letters, digits, underscores, two or more letters) so "retry=true"
     // and "code=ENOENT" are left alone, and the value is still a key on its own.
     const eq = Math.max(w.indexOf("="), w.indexOf(":"))
-    if (eq > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(w.slice(0, eq)) && (w.slice(0, eq).match(/[A-Za-z]/g) ?? []).length >= 2) {
+    // the left of the "=" has to be a name, not the key's own first half: a
+    // generated body is letters and digits too ("ghp_BjG8b9JVqbhuYqvQ=…",
+    // "t9u5Rf7OkgBfsAWbncAefz0n1zsOHrH=…"), and masking only what follows
+    // left the front of the key on the terminal
+    const left = eq > 0 ? w.slice(0, eq) : ""
+    if (eq > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(left) && (left.match(/[A-Za-z]/g) ?? []).length >= 2 && !VENDOR.test(left) && !keyRun(left) && !isKey(left, false)) {
       const value = w.slice(eq + 1)
       if (!value.includes("…") && isKey(value)) return `${w.slice(0, eq + 1)}${mask(value)}`
     }
@@ -1932,7 +1989,12 @@ const argWords = (x) =>
       // a single piece of 12+ that carries a digit and both cases is a key's
       // head cut by a space ("ghp_Abcd1234Efgh567 8Ijk…"): a word of prose has
       // no digit, or is all one case.
-      return pieces.some((piece) => piece.length >= 16) ||
+      // a body cut by its own slashes is one key once they are out
+      // ("AKIAABCDEFGH/RgjNpwI" is 19 characters without the slash, and a
+      // key): a name carries no slash inside it, so the reading is only taken
+      // for a span that has one, and only when the whole reads as a key
+      const slashed = span.includes("/") && pieces.join("").length >= 16 && isKey(pieces.join(""), false)
+      return slashed || pieces.some((piece) => piece.length >= 16) ||
         (body.length >= 20 && pieces.length >= 3 && pieces.every((piece) => /^[A-Za-z0-9]+$/.test(piece)) && pieces.some((piece) => /[0-9]/.test(piece))) ||
         (pieces.length === 1 && body.length >= 12 && /[0-9]/.test(body) && /[a-z]/.test(body) && /[A-Z]/.test(body))
     })

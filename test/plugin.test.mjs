@@ -11879,6 +11879,70 @@ test("the page cap on a scan whose numbers are proven does not fail the check-in
   assert.match(r.windows[0].display, /到期时间可能更早/, `a cut scan is a floor, not the answer: ${r.windows[0].display}`)
 })
 
+test("a vendor's front is evidence whatever the body's case or numerals", () => {
+  // The card read only the upper-cased body with a numeral in it, and the
+  // terminal reads every vendor body that is long enough: measured on the
+  // shapes below, `arg()` masked all of them and the card printed them whole.
+  // A front is a vendor's own, and no word of prose carries one; the body's
+  // case is not evidence either way (a token copied out of a log can be
+  // upper-cased, and one written in one alphabet is still a key).
+  const keys = [
+    "ghp_ABCDEFGHIJKLMNOPQRSTUVWX",
+    "ghp_abcdefghijklmnopqrstu",
+    "ghp_Abcd1234Efgh",
+    "AKIAIOSFODNNEXAMPLE",
+    "xoxb-ABCDEFGHIJKLMNOPQRSTUVWX",
+    "sk-live_ABCDEFGHIJKLMNOPQRSTUV",
+    "no key ghp_abcdefghijklmnopqrstu for provider",
+  ]
+  for (const v of keys) {
+    const out = testables.maskAll(v, true)
+    // the body must not survive in a readable run: a mask spends four
+    // characters at each end and the rest is "…"
+    const body = (v.match(/(?:ghp_|akia|xoxb-|sk-live_)([A-Za-z0-9]+)/i)?.[1] ?? "")
+    assert.ok(!out.includes(body.slice(4, 12)), `${JSON.stringify(v)} put ${JSON.stringify(body.slice(4, 12))} on the card: ${out}`)
+  }
+  // the front inside a larger word is masked from the front to its end, and
+  // the frame and the words in front of it stay: masking the word whole gave
+  // the mask's ends to the frame and the text after the key (measured on 6,000
+  // generated values: "not found\"sk-ant-…\"the key is" went out
+  // "not found\"sk-a…ekey is", and the key's own end "W49P" was lost)
+  for (const [v, want] of [
+    ['not found"sk-ant-api03-RIHSNURJ9W49P"the key is', 'not found"sk-a…W49P"the key is'],
+    ['the key is "xoxb-vdaqcr6cmqn5f85awj71jgdn"no key', 'the key is "xoxb…jgdn"no key'],
+    ["key=sk-CSyDHp9VEk/RgjNpwI", "key=sk-C…NpwI"],
+    ["https://h/v1?token=ghp_16C7e42F292c6912E7710c838347Ae178B4a&x=1", "https://h/v1?token=ghp_…8B4a&x=1"],
+  ]) {
+    assert.equal(testables.maskAll(v, true), want, `span of ${JSON.stringify(v)}`)
+  }
+  // a name behind the same front keeps its words: the body's pieces are short
+  // words, and it has no long run to be a key with
+  for (const prose of ["sk-anti-fraud-review-team", "sk-preset-20261031", "ms-word and ms-dos are programs"]) {
+    assert.equal(testables.maskAll(prose, true), prose, `prose was masked: ${testables.maskAll(prose, true)}`)
+  }
+})
+
+test("a page of numerals is not searched for keys it cannot hold", () => {
+  // Every arm of isKeyWord needs a letter: a case mix, a digit beside one, a
+  // hex digest, a base64 body's padding — digits alone are never a key. The
+  // numeral pages below carry no letter at all, so no run of them can be one,
+  // but both run readings used to walk them piece by piece: 32 KiB of "0 "
+  // spent 3.2 s of CPU and 32 KiB of "1·" 4.3 s inside a hook whose whole
+  // budget is 25 s. The ceiling is on the work, and the text must come out as
+  // it went in.
+  for (const unit of ["0 ", "1·", "12 34 "]) {
+    let page = ""
+    while (page.length < 32 * 1024) page += unit
+    page = page.slice(0, 32 * 1024)
+    const started = process.cpuUsage()
+    const masked = testables.maskAll(page, true)
+    const spent = process.cpuUsage(started)
+    const ms = (spent.user + spent.system) / 1000
+    assert.equal(masked, page, `${JSON.stringify(unit)}: a numeral page was changed by the masker`)
+    assert.ok(ms < 1500, `${JSON.stringify(unit)} of 32 KiB took ${Math.round(ms)} ms of CPU`)
+  }
+})
+
 test("a page of one plain word does not spend the hook's budget on masks", () => {
   // maskAll asks isKeyWord about the growing run at every piece, and every
   // arm of isKeyWord needs a digit, a base64 symbol or a case mix. A body of
