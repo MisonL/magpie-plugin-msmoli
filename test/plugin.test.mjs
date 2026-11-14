@@ -11947,6 +11947,38 @@ test("a vendor key cut by a mark, a bar or an invisible character is masked whol
   assert.equal(testables.maskAll('not found"sk-ant-api03-RIHSNURJ9W49P"the key is', true), 'not found"sk-a…W49P"the key is')
 })
 
+test("a mask on the card is not read as a key again", () => {
+  // The card's own output is what a user pastes back, and a word carrying the
+  // mask was judged again: the fold spells the ellipsis as three dots, the
+  // dot is key material, and the vendor span rebuilt a key out of the mask and
+  // the text round it — "not foundNickName=[sk-a…g4/M]not found" printed
+  // "not foun…]not found" on the second pass, the name in front of the "["
+  // going with it (296 of 20,000 generated values did the same). A mask is
+  // opaque to every reading.
+  const once = [
+    "not foundNickName=[sk-a…g4/M]not found",
+    "for providerNickName=[ghp_…UhTg]",
+    "x=[ghp_…UhTg]",
+    "(ghp_…Qrst)",
+    'not found"sk-a…W49P"the key is',
+    "AKIA…XDKO/L3,",
+    "x ms-a…5555 y",
+  ]
+  for (const v of once) {
+    assert.equal(testables.maskAll(v, true), v, `${JSON.stringify(v)} was judged again`)
+  }
+  // and the pass that wrote the mask keeps its first answer: masking a key
+  // cut by a mark is not undone by the guard
+  assert.equal(testables.maskAll("ghp_vxaCT1MRVfTp、xiVrohH6YrdZtsR7sRSmSEzYhzEmhW", true), "ghp_…EmhW")
+  assert.equal(testables.maskAll("not found\"sk-ant-api03-RIHSNURJ9W49P\"the key is", true), 'not found"sk-a…W49P"the key is')
+  // a title of 200,000 punctuation characters still does not stall the pass
+  // that now looks for the ellipsis first
+  const t0 = performance.now()
+  testables.maskAll("a" + "!".repeat(200_000) + "a", true)
+  const ms = performance.now() - t0
+  assert.ok(ms < 2000, `病态标点标题耗时 ${ms.toFixed(0)}ms`)
+})
+
 test("a page of numerals is not searched for keys it cannot hold", () => {
   // Every arm of isKeyWord needs a letter: a case mix, a digit beside one, a
   // hex digest, a base64 body's padding — digits alone are never a key. The

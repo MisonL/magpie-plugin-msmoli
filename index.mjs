@@ -1969,6 +1969,22 @@ const maskKeys = (s, letters = true) => {
     // host error carrying "no key ｍｓ－… for provider" printed the whole
     // token, and NFKC put it back together. The folded copy is what the shape
     // tests judge, and the word as written is what is masked.
+    // a word carrying one of this tool's own masks is not a word to judge
+    // again: its ellipsis stands where key material was, and every reading
+    // below — the fold that spells the ellipsis as three dots, the vendor span,
+    // the stripped body — rebuilds a "key" out of the mask and the text round
+    // it ("not foundNickName=[sk-a…g4/M]not found" printed
+    // "not foun…]not found" on the second pass, the name in front of the "["
+    // going with it; 296 of 20,000 generated values did the same). The mask's
+    // own spelling is four characters, the ellipsis, one to four more, with the
+    // frame's punctuation outside it; a larger word holding one is left as
+    // written. (The ellipsis alone gates it: a word without one walks to the
+    // stripped form by the same two linear moves below, and an
+    // anchored-then-global strip twice over on a title of 200,000 punctuation
+    // characters was 39 s.)
+    const maskOwn = word.includes("…") ? word.replace(/^[^A-Za-z0-9]+/, "").replace(/[^A-Za-z0-9]+$/, "") : word
+    if (/^[A-Za-z0-9]{4}…[A-Za-z0-9]{1,4}$/.test(maskOwn)) return word
+    if (maskOwn.includes("…")) return word
     const folded = word.normalize("NFKC").replace(/\uFF0D/g, "-")
     // (the word as written is what is masked, and the folded copy is what is
     // judged \u2014 but only the key's own span of it: a word's prose is the
