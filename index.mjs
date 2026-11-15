@@ -1077,6 +1077,11 @@ const FRONT_PART = /^(?:sk|gh|ghp|gho|ghs|ghu|ghr|ms|xox|xoxa|xoxb|xoxp|xoxo|xox
 const startProse = (w) => /^[a-z]{2,}$/.test(w) && !VENDOR.test(w) && !/^ms-/.test(w) && !STEM.test(w) && !FRONT_PART.test(w)
 function maskSpaced(s, letters) {
   if (s.length > 32 * 1024) return s
+  // (the ellipsis stays outside the word class: as a word character it glued a
+  // mask to its neighbour and the second pass read them as one key —
+  // "hereghp_…32pX:mTQKEUu09r7U here" printed "hereghp_…32pX…here" — and it
+  // also stopped the pass from finding the run around a mask at all, where
+  // "token: U38…6TO9" had been one run)
   const words = [...s.matchAll(/[\x21-\x7e]+/g)]
   if (words.length < 2) return s
   const at = (i) => words[i].index
@@ -1647,7 +1652,7 @@ const LISTY = /^(?:[A-Za-z]+\d+)+$/
 // The vendor fronts the CLI reads as evidence on their own, unanchored (a key
 // can sit behind a frame or inside a URL). The span runs over key characters;
 // what it stops at is whitespace or a character no key carries.
-const VSPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida|aiza|aliyun)[\p{L}\p{N}\p{M}_+\/=.\-]*/iu
+const VSPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida|aiza|aliyun|ms-)[\p{L}\p{N}\p{M}_+\/=.\-]*/iu
 // vendorSpanOf is the CLI's test, word for word where it can be: the body
 // behind a vendor's front has to read as key material, not as a name's words.
 // What it returns is the key's own span — from the front to the last key
@@ -1658,16 +1663,37 @@ const vendorSpanOf = (w) => {
   if (PATHY.test(w) || /^[\\/]/.test(w)) return null
   const m = VSPAN.exec(w)
   if (!m) return null
-  const span = m[0]
+  let span = m[0]
+  // a colon inside a key ("sk-2OHPYFCORWVX0:MR0MACVP0D7Z", "ms-jr5cd8:q4x0a65…")
+  // is not in VSPAN's alphabet — it frames a value more often than it joins one
+  // — and the span stopped at it. The tail is the key's when the two halves
+  // together read as one: a scheme ("https:") and a time ("12:30") have no
+  // key-shaped whole behind the colon.
+  const after = w.slice(span.length)
+  if (after.startsWith(":")) {
+    const tail = after.slice(1).match(/^[A-Za-z0-9_+\/=.\-]*/)[0].replace(/[^A-Za-z0-9]+$/, "")
+    const body = span.slice(span.search(/[-_]/) + 1) + tail
+    if (tail.length >= 12 && /[0-9]/.test(tail) && /[A-Za-z]/.test(tail) && /[0-9A-Z]/.test(body)) span += ":" + tail
+  }
   const body = span.slice(span.search(/[-_]/) + 1).replace(/[^A-Za-z0-9]+$/, "")
   if (!body) return null
   const pieces = body.split(/[-_.\/]/).filter(Boolean)
   if (!pieces.length) return null
+  // "ms-" is the shortest front in the list and a common prefix on ordinary
+  // words, so a 16+ run behind it is still a key only with a numeral or a
+  // case mix in it. The card joins words across a space or a line break to
+  // read a cut key, and the test that says a shape does not run on past one
+  // hands it "ms-shortone" and "abcdefghijklmnop" on the next line: with the
+  // plain 16+ floor the join was masked whole ("ms-shortoneabcdefghijklmnop"
+  // came out "ms-s…mnop"). The CLI reads word by word and never saw the join.
+  const shortFront = /^ms-/i.test(span)
+  const runKey = (p) =>
+    p.length >= 16 && (!shortFront || /[0-9]/.test(p) || /[A-Z]/.test(p))
   // one unbroken run of 16+ is a key's length in one piece; 20+ of key
   // alphabet is a key whose pieces are short; 12+ mixing both cases with a
   // numeral is a body copied with its tail cut off
   const key =
-    pieces.some((p) => p.length >= 16) ||
+    pieces.some(runKey) ||
     (body.length >= 20 && pieces.length >= 3 && pieces.every((p) => /^[A-Za-z0-9]+$/.test(p)) && pieces.some((p) => /[0-9]/.test(p))) ||
     (pieces.length === 1 && body.length >= 12 && /[0-9]/.test(body) && /[a-z]/.test(body) && /[A-Z]/.test(body))
   if (key) return { at: m.index, text: span }
@@ -1678,6 +1704,12 @@ const vendorSpanOf = (w) => {
   if (span.includes("/")) {
     const whole = w.replace(/[^A-Za-z0-9]+/g, "")
     if (whole.length >= 20 && isKeyWord(whole, true)) return { at: m.index, text: span }
+    // the slashes out, a lower-case body with a numeral in it is one still
+    // ("ghp_04ae1b2a74bb/d1a9a6faa5", "ms-abcdefghijklmnopqrstuvwx/abcdefghijklmnop"
+    // were printed whole while the CLI masked both): isKeyWord can only answer
+    // "no" here — the separators are already out and it has no case mix to
+    // read — and a path's parts carry words, not alternating numerals
+    if (whole.length >= 20 && /[0-9]/.test(whole)) return { at: m.index, text: span }
   }
   return null
 }

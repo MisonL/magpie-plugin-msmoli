@@ -8228,6 +8228,71 @@ test("masking a long echo keeps every character in place, invisible ones include
 
 // the longest contiguous substring that appears verbatim in the text; the 12
 // shares mask's threshold
+test("a vendor key cut by its own slashes is masked to its end on the card", () => {
+  // vendorSpanOf stops its span at the first "/" — VSPAN's alphabet has no
+  // slash — so the key's tail stood printed: "ms-AbCdEf12GhIjKl34/RgjNpwI"
+  // came out "ms-AbCd…Kl34/RgjNpwI" on the card while the CLI masked it whole.
+  // The slash arm under the span only takes a body of 3+ pieces, so a key cut
+  // once or twice fell through to the run reading, and one written all in
+  // lower case was not read at all.
+  const cases = [
+    ["ms-AbCdEf12GhIjKl34/RgjNpwI", "ms-AbCdEf12GhIjKl34/RgjNpwIxyz"],
+    ["ghp_04ae1b2a74bb/d1a9a6faa5", "ms-abcdefgh4jklmnopqrstuvwxyz/ab7890"],
+    ["ms-xEHc1gIAuf9/eGK5rkxEj/m44VwZ4C/r4WtAW", "ms-44r9p40d2s3corn62fl7dn/81t60uaabysumsog"],
+  ].flat()
+  for (const v of cases) {
+    const out = testables.maskAll(v, true)
+    const kept = longestKeptIn(out, v)
+    assert.ok(kept.length < 12, `${JSON.stringify(v)} kept ${JSON.stringify(kept)}: ${JSON.stringify(out)}`)
+  }
+})
+
+test("a mask on the card is not read as a key again", () => {
+  // A second pass over masked text must not put key material back on the card,
+  // and must not take the words around a mask with it. Reading the run twice
+  // found what the word-level guard could not cover: the ellipsis was outside
+  // the word class, so the run readings saw the two sides of a mask as two
+  // words and joined them across it.
+  //
+  // It is not a strict fixed point and cannot be made one: the words around a
+  // mask are ordinary prose, and the run around them is read again on a second
+  // pass (that is the pass that finds a key there at all). What is owed is
+  // that the second pass masks no less of the key than the first, and that the
+  // mask itself survives.
+  const cases = [
+    "hereghp_BSr1uKULc5mw32pX:mTQKEUu09r7U here",
+    "no key --token=sk-ant-api03-n32hdtobb4mmvdkcf:g3wl3qgtxietxlt412b7the key is",
+    'no key "sk-ant-api03-9H0269ydUCMF:NbBI28bsSZ"the key is',
+    "not foundNickName=[sk-a…g4/M]not found",
+    "ghp_…EmhW",
+    "x ms-a…5555 y",
+  ]
+  for (const v of cases) {
+    const once = testables.maskAll(v, true)
+    // the mask itself is never re-read as key material
+    assert.ok(once.includes("…"), `a key went unmasked: ${JSON.stringify(once)}`)
+    const twice = testables.maskAll(once, true)
+    for (const mask of once.match(/[A-Za-z0-9]{0,4}…[A-Za-z0-9]{0,4}/g) ?? [])
+      assert.ok(twice.includes(mask), `the second pass changed the mask ${JSON.stringify(mask)}: ${JSON.stringify(twice)}`)
+  }
+})
+
+test("a vendor key cut by a colon is masked whole on the card", () => {
+  // VSPAN has no colon — it frames a value more often than it joins one — and
+  // the span stopped at it, printing the key's tail: "sk-2OHPYFCORWVX0:MR0MACVP0D7Z"
+  // came out whole on the card while the CLI masked it. A scheme and a time
+  // behind the colon are not key tails.
+  const cases = [
+    ["sk-2OHPYFCORWVX0:MR0MACVP0D7Z", "ms-jr5cd8:q4x0a65dbyo1m1hwvyjvm66"],
+  ].flat()
+  for (const v of cases) {
+    const out = testables.maskAll(v, true)
+    assert.ok(longestKeptIn(out, v).length < 12, `${JSON.stringify(v)}: ${JSON.stringify(out)}`)
+  }
+  for (const prose of ["https://example.com:8080/path", "ssh://git@h:22/repo", "time 12:30:45", "server:port is 8080"])
+    assert.equal(testables.maskAll(prose, true), prose)
+})
+
 const longestKeptIn = (text, secret) => {
   let best = ""
   for (let i = 0; i < secret.length; i++)

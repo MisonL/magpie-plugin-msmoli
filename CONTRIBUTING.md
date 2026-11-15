@@ -150,7 +150,16 @@ Three invariants to keep when touching it:
   whole before — and a mask the CLI wrote is not joined across (`arg` is
   idempotent: `NickName=[ms-F…6789·abcdefABCDEF]` is left as it is). A mask
   the CLI wrote is opaque to every reading: a mask's head is a vendor front
-  (`AKIA…XDKO/L3,`) and a body cut at the ellipsis is an ms- body
+  (`AKIA…XDKO/L3,`) and a body cut at the ellipsis is an ms- body.
+  A vendor's span runs to the key's own end: a slash inside it is part of the
+  key (`ms-AbCdEf12GhIjKl34/RgjNpwI` is masked whole, not to the first `/`),
+  and so is a colon when both halves together read as one
+  (`sk-2OHPYFCORWVX0:MR0MACVP0D7Z`) — a scheme and a time do not
+  (`https://h:8080/x` and `12:30:45` stay as printed). `ms-` is in the front
+  list itself, so a ModelScope key is read by its front like every other
+  vendor's; behind that short front a 16+ run still needs a numeral or a
+  capital, because a card joins words across a space to read a cut key and
+  "ms-shortone" and "abcdefghijklmnop" on the next line are not one token.
   (`…K1jlMS-6…7`), so both were masked a second time — into a length
   (`（4 字符）`) or a shorter span. The frame a key's own `=` looked like is
   read the same way: material of eight or more characters in front of the
