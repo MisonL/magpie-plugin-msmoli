@@ -2076,6 +2076,45 @@ const maskKeys = (s, letters = true) => {
     // ("ghp_vxaCT1MRVfTp,xiVroh…" came out "ghp_…VfTp,xiVroh…": six
     // characters behind the mask's head stayed, and a zero-width space did the
     // same).
+    // NAME=value, and NAME=[value]: the name in front is the user's, the value
+    // behind it is the secret. The whole word is not a key by shape — a body
+    // behind "=" is not "letters and digits alone", which is what the
+    // randomish arm asks — so "key=<body>", "k:<body>" and "NickName=[<body>]"
+    // went out whole on the card while the CLI masked them. The name has to
+    // read as a name (two or more letters, no vendor front, not itself a key)
+    // so "retry=true" and "code=ENOENT" are left alone.
+    const eqAt = Math.max(word.indexOf("="), word.indexOf(":"))
+    if (eqAt > 0) {
+      // a flag's own dashes ("--token=…", "--bad=SK-ANT-…") are the frame, not the
+      // name; the name is what follows them
+      const left = word.slice(0, eqAt).replace(/^-+/, "")
+      const raw = word.slice(eqAt + 1)
+      const bracketed = /^[\[(\{"'`]/.test(raw)
+      const value = raw.replace(/^[\[(\{"'`]+/, "").replace(/[\])\}»”’]+$/, "")
+      if (
+        /^[A-Za-z_][A-Za-z0-9_]*$/.test(left) &&
+        (left.match(/[A-Za-z]/g) ?? []).length >= 2 &&
+        !VENDOR.test(left) &&
+        // the left is a name only when it reads like one: a bare "X=…" needs a
+        // word in front of it (no numeral, one case), because "hereAKIAomcD=…"
+        // and "t2s58z04c3fs2lrv4mvyp2=…" are key material on both sides of the
+        // "=" and the whole word is the key. A bracket round the value frames
+        // it on its own, so a name of any case ("NickName=[…]") is fine there.
+        (bracketed || (!/[0-9]/.test(left) && (left === left.toLowerCase() || left === left.toUpperCase()))) &&
+        // the left has to be a name, not the key's own first half: a generated
+        // body is letters and digits too ("JvC5uUAckfdFhOTTrwaU8Xt4YuxE084=…",
+        // "W43RWJGVCGE4MZ4HO8=…"), and masking only the value left the front of
+        // the key as written. The run reading is asked with the case-mix arm off,
+        // as the CLI asks it.
+        !keyRun(left) &&
+        !isKeyWord(left, false) &&
+        !value.includes("…") &&
+        isKeyWord(value, letters)
+      ) {
+        const at = word.indexOf(value, eqAt + 1)
+        return word.slice(0, at) + maskToken(value) + word.slice(at + value.length)
+      }
+    }
     const vspan = vendorSpanOf(word)
     if (vspan && vspan.at > 0) return word.slice(0, vspan.at) + maskToken(vspan.text) + word.slice(vspan.at + vspan.text.length)
     const masked =

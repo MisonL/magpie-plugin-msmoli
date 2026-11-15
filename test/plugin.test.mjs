@@ -8293,6 +8293,40 @@ test("a vendor key cut by a colon is masked whole on the card", () => {
     assert.equal(testables.maskAll(prose, true), prose)
 })
 
+test("a key passed as a variable's value is masked, and the name stays", () => {
+  // The card judged the whole word: "key=<body>" is not a key by shape — the
+  // body's randomish arm needs the word to be letters and digits alone — so a
+  // key handed as a variable's value went out whole while the CLI masked it
+  // ("key=mnezicjmv7l0l4rgno", "NickName=[<body>]", "k:<body>"). The value is
+  // the secret and the name in front of it is not.
+  const body = "mnezicjmv7l0l4rgno"
+  // (a colon is read as a key's own half, not a name's, so the card matches the
+  // CLI there and neither masks "k:<18 alphanumerics>")
+  const frames = [`key=${body}`, `NickName=[${body}]`, `token=[${body}]`, `id=${body}`]
+  for (const v of frames) {
+    const out = testables.maskAll(v, true)
+    assert.ok(!out.includes(body), `${JSON.stringify(v)}: ${JSON.stringify(out)}`)
+  }
+  // a name in front keeps its name, and prose is still prose
+  for (const prose of ["key=hello", "NickName=[MisonLiang]", "code=ENOENT", "retry=true", "id=1234567890"])
+    assert.equal(testables.maskAll(prose, true), prose)
+  // a colon works the same way, and the card reads no colon as a key's own
+  // half: the whole word is judged first, so "ZlibmV9ovZJYMm:pT3b7KKn…" is one
+  // key and is masked whole, while "id:<18 alphanumerics>" is a name and its
+  // value and only the value goes. (A guard that skipped the name:value
+  // reading for a colon was tried and removed: the whole-word reading above
+  // already answers the key's own colon, so the guard only stopped the card
+  // from masking "id:<value>" at all — a leak the CLI has and the card does
+  // not need to keep.)
+  assert.equal(testables.maskAll("ZlibmV9ovZJYMm:pT3b7KKnQw2glZ443XcrFnhPYi", true), "Zlib…hPYi")
+  assert.ok(!testables.maskAll("id:mnezicjmv7l0l4rgno", true).includes("mnezicjmv7l0l4rgno"))
+  // a header's own name is not promised: the card has masked "Authorization:
+  // Bearer xoxb-1234567890" whole ("Auth…7890") since before this round,
+  // because that token is under every vendor floor and the word reads as one
+  // key. What is owed is that the token does not survive.
+  assert.ok(!testables.maskAll("Authorization: Bearer xoxb-1234567890", true).includes("xoxb-1234567890"))
+})
+
 const longestKeptIn = (text, secret) => {
   let best = ""
   for (let i = 0; i < secret.length; i++)
@@ -11196,7 +11230,9 @@ test("a separated key in a sentence is masked up to its own end, and the sentenc
     ["ledger entry 123e4567-e89b-12d3-a456-426614174000 not found", /^ledger entry 123e…4000 not found$/],
     ["trace wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY done", /^trace wJal…EKEY done$/],
     ["see ms-foreign-0123456789abcdef0123456789abcdef here", /^see ms-f…cdef here$/],
-    ["key=123e4567-e89b-12d3-a456-426614174000", /^key=…4000$/],
+    // the name in front of a value is the user's and the value is the secret:
+    // a UUID behind "key=" is the value, so the card masks it as the CLI does
+    ["key=123e4567-e89b-12d3-a456-426614174000", /^key=123e…4000$/],
   ]
   for (const [v, want] of masked) {
     const out = testables.maskAll(v, true)

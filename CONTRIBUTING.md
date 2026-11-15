@@ -180,6 +180,17 @@ Three invariants to keep when touching it:
   two pieces of the key alphabet on both sides and a value of key material
   qualifies, so `token: ghp_…` and `Authorization: Bearer xoxb-…` keep their
   names.
+  The card reads `NAME=value` the same way, and it had to learn to: the whole
+  word was judged first, and a body behind "=" is not "letters and digits
+  alone", which is what the card's randomish arm asks — so `key=<body>`,
+  `token=[<body>]` and `NickName=[<body>]` went out whole while the CLI masked
+  them. The name has to read as a name (two or more letters, no vendor front,
+  not itself key material by the run reading with the case-mix arm off), the
+  value has to be key-shaped on its own, and a flag's own dashes are the frame
+  (`--bad=SK-ANT-…` masks the key, not the flag). No special case is needed for
+  a colon: the whole word is judged before this reading, so a key's own
+  `head:body` is masked whole and `id:<18 alphanumerics>` is a name and its
+  value. `retry=true`, `code=ENOENT` and `id=1234567890` are left alone.
   Any change to these thresholds has to keep both suites
   green: both carry a table of cut shapes (one, three, four, six, eight,
   twelve characters, line breaks, no-break and ideographic spaces, middots)
