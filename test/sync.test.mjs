@@ -5078,6 +5078,24 @@ test("an id that is another vendor's key is masked in the ambiguity, bare and re
 // The criterion uses 12, from the same source as mask/min's floor: an overlap
 // shorter than 12 is accidental and not a leak; 12 or more is real material
 // someone could get.
+test("a key inside a variable's brackets is masked, and the name and the bracket stay", () => {
+  // The variable reading took the value as written, brackets and all, and isKey
+  // cannot read through a "[" — so "NickName=[<key>]" went out whole while a
+  // bare "[<key>]" was masked on the same line. Only the inner span is masked.
+  const key = "mnezicjmv7l0l4rgno"
+  for (const v of [`NickName=[${key}]`, `token=[${key}]`, `key=[${key}]`]) {
+    const out = arg(v)
+    assert.ok(!out.includes(key), `${JSON.stringify(v)}: ${JSON.stringify(out)}`)
+    assert.ok(out.startsWith(v.slice(0, v.indexOf("[")) + "["), `the frame went with the mask: ${JSON.stringify(out)}`)
+  }
+  // a key's own "=" inside the brackets is not a name's, and the vendor span
+  // still owns it
+  assert.equal(arg("NickName=[AKIAiXYDw=v/tSw8BeGLwd8t9C5XxBff49lAUXVDs=khD/G]"), "NickName=[AKI…D/G]")
+  // and a name of any case stays a name
+  for (const prose of ["NickName=[MisonLiang]", "retry=true", "code=ENOENT"])
+    assert.equal(arg(prose), prose)
+})
+
 const longestKept = (text, secret) => {
   let best = ""
   for (let i = 0; i < secret.length; i++)

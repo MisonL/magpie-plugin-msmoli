@@ -1958,6 +1958,16 @@ const argWords = (x) =>
       !(w[eq] === ":" && (/^[A-Za-z0-9]{12,}$/.test(value) || /^[A-Za-z]+\s+[A-Za-z]+[-_]/.test(value)))
     ) {
       if (!value.includes("…") && isKey(value)) return `${w.slice(0, eq + 1)}${mask(value)}`
+      // a bracketed value frames its key and isKey cannot read through the
+      // brackets: "NickName=[<key>]" went out whole while a bare "[<key>]" was
+      // masked. Only the inner span is masked, and only when the value as
+      // written is not itself a key (an "=" inside the key is the key's own,
+      // "NickName=[AKIAiXYDw=v/tSw…]", and the vendor span below owns that).
+      const inner = value.replace(/^[\[(\{"'`]+/, "").replace(/[\])}»”’]+$/, "")
+      if (!value.includes("…") && inner !== value && !isKey(value) && !inner.includes("…") && isKey(inner)) {
+        const at = w.indexOf(inner, valueAt)
+        return `${w.slice(0, at)}${mask(inner)}${w.slice(at + inner.length)}`
+      }
     }
     // the word as written and its lowercase fold; a full-width key with no
     // ASCII at all is the whole-value NFKC reading's business (above), which
