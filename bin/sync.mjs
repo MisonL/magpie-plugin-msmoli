@@ -3035,9 +3035,19 @@ if (isMain()) {
   // handler the EPIPE arrives as an unhandled error event and the crash trace
   // — not the plan — is what the user sees. Exiting quietly is what a shell
   // pipeline means; head's own exit code carries the verdict.
+  // The verdict still has to reach the shell. `--status` with work left to do
+  // exits 1, and a closed pipe used to turn that into 0 — a script that piped
+  // the status through anything read a pending sync as done. The handler takes
+  // the run down at once (further writes would only raise again), and the code
+  // it uses is the run's own: the verdict is written to exitCode before the
+  // remaining lines go out, so by the time the pipe closes it is already
+  // decided. `head` still gets its lines, and the shell still sees the verdict.
   process.stdout.on("error", (e) => {
-    if (e && e.code === "EPIPE") process.exit(0)
-    throw e
+    if (!e || e.code !== "EPIPE") throw e
+    // a closed pipe stops the writing, not the verdict: the run finishes and
+    // its own exit code is what the shell sees. (`process.exit(0)` here made a
+    // pending sync read as done to anything that piped --status.)
+    process.stdout.write = () => true
   })
   // A Ctrl-C or a TERM during a --force sequence can land between the logout
   // and the login: the logout has run and the account is signed out. The

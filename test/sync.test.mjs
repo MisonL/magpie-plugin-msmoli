@@ -4746,9 +4746,11 @@ test("a reader that closes the pipe early is not a crash", async () => {
         resolve({ status: -1, stderr })
       })
     })
-    assert.equal(out.status, 0, `the run failed: ${JSON.stringify(out.stderr)}`)
+    // the verdict is the run's own, not "0 because the pipe closed": this
+    // fixture has work left to do, and `--status` exits 1 for that. Exiting 0
+    // on EPIPE made a pending sync read as done to anything that piped it.
+    assert.equal(out.status, r.status, `a closed pipe changed the verdict: pipe=${out.status} direct=${r.status}`)
     assert.ok(!/EPIPE|Unhandled 'error'/.test(out.stderr ?? ""), `the crash trace reached stderr: ${out.stderr}`)
-    assert.ok(r.status === 0 || r.status === 1, "the direct run is sane")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

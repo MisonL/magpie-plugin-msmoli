@@ -8293,6 +8293,67 @@ test("a slashed key of lower-case pieces is masked on the card, and a path is no
   }
 })
 
+test("a key right after an ellipsis the text wrote is masked, not read as a mask", () => {
+  // The second-pass guard waved through any word carrying an ellipsis, on the
+  // reading that the ellipsis was one of this tool's own masks. A message that
+  // carries a "…" of its own — a truncation marker in front of a key,
+  // "余额查询失败：x…<key>" — then took the whole key with it: a 40-character
+  // ghp_ token came out on the card, in the name and in the log line. A mask
+  // this tool writes is one to four key characters either side of the
+  // ellipsis; anything else carrying one is the text's own and the word is
+  // read as any other.
+  const key = "ghp_" + "abcdefghijklmnopqrstuvwxyzabcdefghij"
+  for (const v of [`x…${key}`, `余额查询失败：x…${key}`]) {
+    const out = testables.maskAll(v, true)
+    assert.ok(!out.includes(key.slice(8)), `${JSON.stringify(v)} kept the key: ${JSON.stringify(out)}`)
+    assert.ok(out.includes("…"), `the mask went missing: ${JSON.stringify(out)}`)
+  }
+  // a mask this tool wrote is still left alone, its frames and fragments with it
+  for (const m of ["ms-a…5555", "[sk-a…g4/M]", "AKIA…XDKO/L3,", "not foundNickName=[sk-a…g4/M]not found", "ghp_…EmhW"]) {
+    const once = testables.maskAll(m, true)
+    assert.ok(once.includes(m.match(/…[A-Za-z0-9]{1,4}/)[0]), `${JSON.stringify(m)} lost its mask: ${JSON.stringify(once)}`)
+  }
+})
+
+test("a long run of punctuation behind a key front is read in linear time", { timeout: 30_000 }, () => {
+  // keyBody's second arm was a greedy [\x21-\x7e]*\d with a lookahead: at
+  // every candidate start it ate to the end of the run and backtracked for a
+  // digit, which is quadratic in the run. Measured before the fix on a 32 KB
+  // "ms-" + "a!" page: 2.7 s. The run ends and the digit count are carried in
+  // two linear passes now, and the question each start asks is a lookup.
+  const page = "ms-" + "a!".repeat(16383)
+  const started = performance.now()
+  testables.cardText(page, "")
+  const ms = performance.now() - started
+  assert.ok(ms < 1000, `a 32 KB punctuation page took ${ms.toFixed(0)} ms`)
+
+  // the arm still answers the same way it did: a front followed by a run of
+  // punctuation with a numeral in it is a key; the same run without one is not
+  assert.ok(testables.maskAll("ms-aaaaaaaaaaa1aaaaaaaaaa", true).includes("…"), "a key body with a digit stopped being read")
+  assert.ok(!testables.maskAll("ms-aaaaaaaaaaaaaaaaaaaaaaa", true).includes("…"), "a body with no digit was masked")
+})
+
+test("a page of capitals is read in linear time, not cubic", { timeout: 60_000 }, () => {
+  // maskCaps joined a run of capitals-and-digits by re-testing the whole grown
+  // body with ^[A-Z0-9]+$ at every step and rebuilding it with +=: a page of
+  // "ABCD EFGH " cost O(W²·L). Measured before the fix, a 20 KB page took 71 s
+  // and the hook's budget is 25, so one such message spent the whole budget;
+  // an ordinary 8 KB HTTP-header echo ("CONTENT TYPE TEXT PLAIN " repeated)
+  // took 9.4 s. The join now carries its answer as a boolean and stops at the
+  // longest a key written without its spaces can be (4*RUNCUT).
+  const page = "ABCD EFGH ".repeat(4096)
+  const started = performance.now()
+  testables.cardText(page, "")
+  const ms = performance.now() - started
+  assert.ok(ms < 1000, `a 40 KB capitals page took ${ms.toFixed(0)} ms`)
+
+  // a body a key could actually be still joins: "AKIAIOSFODNN 7EXAMPLE" is one
+  // key, and the cap must not have taken that away
+  const key = "AKIAIOSFODNN7EXAMPLE"
+  const joined = testables.maskAll(`AKIAIOSFODNN${" ".repeat(1)}7EXAMPLE`, true)
+  assert.ok(!joined.includes(key), `the upper-cased key stopped being read: ${JSON.stringify(joined)}`)
+})
+
 test("a mask on the card is not read as a key again", () => {
   // A second pass over masked text must not put key material back on the card,
   // and must not take the words around a mask with it. Reading the run twice

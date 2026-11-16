@@ -1005,7 +1005,37 @@ const tokenShaped = new RegExp(
     String.raw`(?:(?:\s*[·•∙‧・⋅]\s*|\s+)(?!(?:m${INV}*s${INV}*-))(?![\x21-\x7e]*\.)(?=[\x21-\x7e]{5,})(?=[\x21-\x7e]*\d)[\x21-\x7e]+)*`,
   "gu",
 )
-const keyBody = new RegExp(String.raw`(?:[0-9a-f]{11,}(?![0-9a-z])|(?=[\x21-\x7e]{11,})(?!\w)[\x21-\x7e]*\d)`)
+const HEX_RUN = /[0-9a-f]{11,}(?![0-9a-z])/
+// The second arm — "a run of 11+ printable characters starting at a non-word
+// character, with a digit somewhere in it" — was a greedy `[\x21-\x7e]*\d`
+// with a lookahead: at every start it ate to the end of the run and
+// backtracked looking for a digit, so the whole test was quadratic in the run.
+// Measured on a 32 KB "ms-"+"a!" page: 2.7 s. The same question asked once,
+// left to right, finds the first qualifying stretch in a single pass.
+const PRINTABLE = (c) => c >= "\x21" && c <= "\x7e"
+const hasDigitInPrintableRun = (m) => {
+  // The arm's three parts are at different positions: the start has to be a
+  // non-word character, the 11+ printable characters run on from there, and
+  // the digit may be anywhere in that stretch — including before the start,
+  // which the greedy form could reach by backtracking. So each non-word
+  // character is a candidate start, and the stretch from it is measured once
+  // (the run ends are precomputed, so the whole test is linear).
+  const endOfRun = new Int32Array(m.length + 1)
+  let i = m.length
+  endOfRun[m.length] = m.length
+  while (i-- > 0) endOfRun[i] = PRINTABLE(m[i]) ? endOfRun[i + 1] : i
+  // the digits before each position, so "a digit anywhere in the stretch" is
+  // one lookup rather than a scan
+  const digitsBefore = new Int32Array(m.length + 1)
+  for (let k = 0; k < m.length; k += 1) digitsBefore[k + 1] = digitsBefore[k] + (m[k] >= "0" && m[k] <= "9" ? 1 : 0)
+  for (let p = 0; p < m.length; p += 1) {
+    if (/\w/.test(m[p])) continue
+    const end = endOfRun[p]
+    if (end - p >= 11 && digitsBefore[end] > digitsBefore[p]) return true
+  }
+  return false
+}
+const keyBody = { test: (m) => HEX_RUN.test(m) || hasDigitInPrintableRun(m) }
 // maskShaped is the replace both passes share: the shape finds a run that
 // begins like a key; keyBody asks whether the run after the front reads as
 // one. A run that does not is ordinary text and is handed back as written,
@@ -1033,6 +1063,12 @@ const keyAt = (word, letters) => (MAYKEY(word) && isKeyWord(word, letters)) || V
 // joined; a narrow run of words that are all short pieces (a key written one
 // character per word). A word already carrying a mask is not judged again.
 const MASKED = "…"
+// the shape of a mask this tool wrote, as it sits inside a word: up to four
+// key characters either side of the ellipsis. A word carrying one is left
+// alone on the second pass (reading across it rebuilds key material out of
+// the mask and the text round it). An ellipsis the text itself wrote is not
+// this shape — "x…<key>" has a whole key after it — and the word is read.
+const WORD_MASK = /[A-Za-z0-9_+\/=-]{1,4}…[A-Za-z0-9]{1,4}(?![A-Za-z0-9_])/
 // the length at which a run is long enough to be a key: the floor every
 // reading asks for, and all a mask needs to show
 const RUNCUT = 20
@@ -1841,11 +1877,33 @@ const maskCaps = (s, letters) => {
     const w = words[i][0]
     if (!VENDOR.test(w) && !(/^[A-Z0-9]{4,}$/.test(w) && /[A-Z]/.test(w))) continue
     let j = i
-    let body = w
-    while (j + 1 < words.length && s.slice(end(j), at(j + 1)).length <= 2 && /^[A-Z0-9]{2,}$/.test(words[j + 1][0]) && /^[A-Z0-9]+$/.test(body)) {
+    // `allCaps` is the same question `^[A-Z0-9]+$` asked of the grown body,
+    // carried along as a boolean: re-testing the whole body at every join made
+    // this cubic in the page length (a 20 KB page of "ABCD EFGH " took 71 s,
+    // and the hook's budget is 25), and the answer only ever goes from true to
+    // false as pieces are added.
+    const pieces = [w]
+    let allCaps = /^[A-Z0-9]+$/.test(w)
+    // a key written without its spaces is never longer than 4*RUNCUT, and the
+    // cap is what keeps a page of capitals from being one body: without it the
+    // walk joined the whole page from every start. (the same cap the CLI's
+    // capsRun carries)
+    let joined = w.length
+    while (
+      j + 1 < words.length &&
+      allCaps &&
+      joined < 4 * RUNCUT &&
+      s.slice(end(j), at(j + 1)).length <= 2 &&
+      /^[A-Z0-9]{2,}$/.test(words[j + 1][0])
+    ) {
       j += 1
-      body += words[j][0]
+      const piece = words[j][0]
+      pieces.push(piece)
+      joined += piece.length
+      if (!/^[A-Z0-9]+$/.test(piece)) allCaps = false
     }
+    // the join is the pieces with the gap between them taken out, as before
+    const body = pieces.length === 1 ? w : pieces.join("")
     if (j === i || body.length < 16 || /[a-z]/.test(body)) continue
     // an upper-cased vendor shape ("AKIAIOSFODNN7 EXAMPLE") carries a piece of
     // an id's rhythm: a capital, a digit, short pieces. A word written out in
@@ -2051,7 +2109,14 @@ const maskKeys = (s, letters = true) => {
     // characters was 39 s.)
     const maskOwn = word.includes("…") ? word.replace(/^[^A-Za-z0-9]+/, "").replace(/[^A-Za-z0-9]+$/, "") : word
     if (/^[A-Za-z0-9]{4}…[A-Za-z0-9]{1,4}$/.test(maskOwn)) return word
-    if (maskOwn.includes("…")) return word
+    // A mask this tool wrote is one to four key characters, the ellipsis, one
+    // to four more. Anything else carrying an ellipsis is the text's own — a
+    // truncation marker, a sentence's "…" — and the word must still be read:
+    // "x…<key>" and "余额查询失败：x…<key>" went out whole, with the key
+    // after the ellipsis printed on the card, in the name and in the log.
+    // (the piece a mask leaves is under five characters on both sides, and
+    // the frame's punctuation around it is not key material)
+    if (WORD_MASK.test(word)) return word
     const folded = word.normalize("NFKC").replace(/\uFF0D/g, "-")
     // (the word as written is what is masked, and the folded copy is what is
     // judged \u2014 but only the key's own span of it: a word's prose is the
