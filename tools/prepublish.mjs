@@ -17,11 +17,25 @@
 // the binary is missing, and the skip is printed loudly — never silently.
 
 import { spawnSync } from "node:child_process"
+import { existsSync } from "node:fs"
 
-// Today's suite is 722 tests (the plain run); the floor leaves room for a
+// Today's suite is 726 tests (the plain run); the floor leaves room for a
 // legitimate consolidation while still catching a whole file that vanished.
 // (Keep this number current: a stale one reads as a suite that shrank.)
 const MIN_TESTS = 600
+
+// The count floor alone does not catch one file going missing: sync.test.mjs is
+// ~300 tests and style.test.mjs is 7, so dropping either still clears 600, and
+// the runner reports a green mode for what is left. (Measured: with
+// test/style.test.mjs deleted the gate printed "every mode passed".) The three
+// files are named here so a publish cannot go out with one of them gone.
+const FILES = ["test/plugin.test.mjs", "test/sync.test.mjs", "test/style.test.mjs"]
+
+const missing = FILES.filter((f) => !existsSync(f))
+if (missing.length) {
+  process.stdout.write(`FAILED: ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} missing; the suite would run short and still pass its floor.\n`)
+  process.exit(1)
+}
 
 const modes = [
   { name: "node --test", cmd: "node", args: ["--test"] },
