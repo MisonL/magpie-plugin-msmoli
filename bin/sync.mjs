@@ -1947,7 +1947,9 @@ const argWords = (x) =>
     // in the value ("Authorization: Bearer xoxb-…", "token: xoxb-…") is the
     // value's own business, not a half of anything.
     const valueAt = eq + 1
-    const value = w.slice(valueAt)
+    // a doubled "=" ("key==<body>") is the frame's too
+    const rawValue = w.slice(valueAt).replace(/^=+/, "")
+    const value = rawValue
     if (
       eq > 0 &&
       /^[A-Za-z_][A-Za-z0-9_]*$/.test(left) &&
@@ -1957,7 +1959,10 @@ const argWords = (x) =>
       !isKey(left, false) &&
       !(w[eq] === ":" && (/^[A-Za-z0-9]{12,}$/.test(value) || /^[A-Za-z]+\s+[A-Za-z]+[-_]/.test(value)))
     ) {
-      if (!value.includes("…") && isKey(value)) return `${w.slice(0, eq + 1)}${mask(value)}`
+      if (!value.includes("…") && isKey(value)) {
+        const at = w.indexOf(value, valueAt)
+        return `${w.slice(0, at)}${mask(value)}${w.slice(at + value.length)}`
+      }
       // a bracketed value frames its key and isKey cannot read through the
       // brackets: "NickName=[<key>]" went out whole while a bare "[<key>]" was
       // masked. Only the inner span is masked, and only when the value as
@@ -1967,6 +1972,17 @@ const argWords = (x) =>
       if (!value.includes("…") && inner !== value && !isKey(value) && !inner.includes("…") && isKey(inner)) {
         const at = w.indexOf(inner, valueAt)
         return `${w.slice(0, at)}${mask(inner)}${w.slice(at + inner.length)}`
+      }
+      // a quote or a full stop round the value is the text's, and isKey saw it:
+      // "key=\"<body>\"" and "key=<body>." went out whole while the same body
+      // behind "=" with nothing after it was masked. The key is the value's
+      // leading key-alphabet run, and only that run is masked — the quote or
+      // the full stop stays. (The bracket arm above is not enough: its tail set
+      // has no quote in it, and a trailing "." is not a bracket at all.)
+      const bounded = rawValue.replace(/^[\[(\{"'`]+/, "").match(/^[A-Za-z0-9_+\/=.-]*/)[0].replace(/[^A-Za-z0-9]+$/, "")
+      if (!rawValue.includes("…") && bounded !== value && bounded.length >= 12 && !isKey(rawValue) && isKey(bounded)) {
+        const at = w.indexOf(bounded, valueAt)
+        return `${w.slice(0, at)}${mask(bounded)}${w.slice(at + bounded.length)}`
       }
     }
     // the word as written and its lowercase fold; a full-width key with no

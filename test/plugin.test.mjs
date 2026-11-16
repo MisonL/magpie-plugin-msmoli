@@ -8327,6 +8327,47 @@ test("a key passed as a variable's value is masked, and the name stays", () => {
   assert.ok(!testables.maskAll("Authorization: Bearer xoxb-1234567890", true).includes("xoxb-1234567890"))
 })
 
+test("a colon inside a key's frame is read to the key's end, not from the word's start", () => {
+  // The colon extension sliced by the span's *length*, not its end, so a front
+  // that starts inside a larger word took the wrong tail and kept the colon:
+  // "key=sk-2OHPYFCORWVX0:MR0MACVP0D7Z" went out whole — the same key masked
+  // whole when it stood alone. A URL and a time are still not key tails.
+  const cases = ["key=sk-2OHPYFCORWVX0:MR0MACVP0D7Z", "key=ghp_abcdefgh1234:1234567890abcdef"]
+  // a key whose own body carries several colons is still one key: the tail has
+  // to run over them, or the span covers only the first piece and the rest
+  // ("…:PF3S3E67WA85:9E2BJ8KAS7") is printed as written
+  const many = "AKIAL6R2JW0QL:E5OOD6IIHD6KN2P5Z2W2:PF3S3E67WA85:9E2BJ8KAS7"
+  for (const v of [many, `--token=${many}`, `not found--token=${many}for provider`]) {
+    const out = testables.maskAll(v, true)
+    assert.ok(longestKeptIn(out, many).length < 12, `${JSON.stringify(v)}: ${JSON.stringify(out)}`)
+  }
+  for (const v of cases) {
+    const out = testables.maskAll(v, true)
+    assert.ok(longestKeptIn(out, v.slice(v.indexOf("=") + 1)).length < 12, `${JSON.stringify(v)}: ${JSON.stringify(out)}`)
+  }
+  for (const prose of ["https://example.com:8080/path", "time 12:30:45", "v1.2.3:2024-01-01T12:00:00Z"])
+    assert.equal(testables.maskAll(prose, true), prose)
+})
+
+test("a value's own quote and trailing mark do not hide the key", () => {
+  // The variable reading judged the value with its punctuation on, so
+  // 'key="<body>"' and "key=<body>." went out whole while "key=<body>" was
+  // masked. The key is the value's leading key-alphabet run.
+  //
+  // (What this does not cover is "id=<body>:x". The card and the CLI both read
+  // the word's separators right to left, so a colon after the value makes the
+  // name "id=<body>" and neither reads the assignment — older than this round,
+  // and left alone. A key whose own body carries colons is the span's to mask,
+  // and that is covered above.)
+  const key = "mnezicjmv7l0l4rgno"
+  for (const v of [`key="${key}"`, `key=${key}.`, `key=${key},`, `key=${key};`, `key==${key}`]) {
+    const out = testables.maskAll(v, true)
+    assert.ok(!out.includes(key), `${JSON.stringify(v)}: ${JSON.stringify(out)}`)
+  }
+  for (const prose of ["key=hello", "a==b", "retry=true", "code=ENOENT"])
+    assert.equal(testables.maskAll(prose, true), prose)
+})
+
 const longestKeptIn = (text, secret) => {
   let best = ""
   for (let i = 0; i < secret.length; i++)

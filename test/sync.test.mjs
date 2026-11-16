@@ -5096,6 +5096,22 @@ test("a key inside a variable's brackets is masked, and the name and the bracket
     assert.equal(arg(prose), prose)
 })
 
+test("a value's own quote and trailing mark do not hide the key in the CLI", () => {
+  // The variable reading took the value with its punctuation on, so
+  // 'key="<body>"' and "key=<body>." went out whole. The key is the value's
+  // leading key-alphabet run; the frame and the mark stay.
+  const key = "mnezicjmv7l0l4rgno"
+  for (const v of [`key="${key}"`, `key=${key}.`, `key=${key},`, `key=${key};`, `key==${key}`]) {
+    const out = arg(v)
+    assert.ok(!out.includes(key), `${JSON.stringify(v)}: ${JSON.stringify(out)}`)
+    // the frame is kept character for character, a doubled "=" included
+    const frame = v.slice(0, v.indexOf(key))
+    assert.ok(out.startsWith(frame), `the frame went with the mask (want ${JSON.stringify(frame)}): ${JSON.stringify(out)}`)
+  }
+  for (const prose of ["key=hello", "a==b", "retry=true", "code=ENOENT"])
+    assert.equal(arg(prose), prose)
+})
+
 const longestKept = (text, secret) => {
   let best = ""
   for (let i = 0; i < secret.length; i++)

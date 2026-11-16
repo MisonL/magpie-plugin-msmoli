@@ -1669,9 +1669,15 @@ const vendorSpanOf = (w) => {
   // — and the span stopped at it. The tail is the key's when the two halves
   // together read as one: a scheme ("https:") and a time ("12:30") have no
   // key-shaped whole behind the colon.
-  const after = w.slice(span.length)
+  // (the span's own end, not its length: the front may start inside a larger
+  // word — "key=sk-2OHPYFCORWVX0:MR0MACVP0D7Z" — and slicing by the length read
+  // from the word's start took "YFCORWVX0:" for the tail and kept the colon)
+  const after = w.slice(m.index + span.length)
   if (after.startsWith(":")) {
-    const tail = after.slice(1).match(/^[A-Za-z0-9_+\/=.\-]*/)[0].replace(/[^A-Za-z0-9]+$/, "")
+    // the tail runs over the key's own colons too ("AKIA…:…:…:…" is one key):
+    // stopping at the second one left the rest as written, since the span
+    // covers only what it matched
+    const tail = after.slice(1).match(/^[A-Za-z0-9_+\/=.:-]*/)[0].replace(/[^A-Za-z0-9]+$/, "")
     const body = span.slice(span.search(/[-_]/) + 1) + tail
     if (tail.length >= 12 && /[0-9]/.test(tail) && /[A-Za-z]/.test(tail) && /[0-9A-Z]/.test(body)) span += ":" + tail
   }
@@ -2083,14 +2089,22 @@ const maskKeys = (s, letters = true) => {
     // went out whole on the card while the CLI masked them. The name has to
     // read as a name (two or more letters, no vendor front, not itself a key)
     // so "retry=true" and "code=ENOENT" are left alone.
+    // the "=" first: "id=<body>:x" is a variable and its value, and the colon
+    // inside the value is the value's — taking the right-most of the two made
+    // the name "id=<body>" and skipped the reading altogether
     const eqAt = Math.max(word.indexOf("="), word.indexOf(":"))
     if (eqAt > 0) {
       // a flag's own dashes ("--token=…", "--bad=SK-ANT-…") are the frame, not the
       // name; the name is what follows them
       const left = word.slice(0, eqAt).replace(/^-+/, "")
-      const raw = word.slice(eqAt + 1)
+      // a doubled "=" ("key==<body>") is the frame's too
+      const raw = word.slice(eqAt + 1).replace(/^=+/, "")
       const bracketed = /^[\[(\{"'`]/.test(raw)
-      const value = raw.replace(/^[\[(\{"'`]+/, "").replace(/[\])\}»”’]+$/, "")
+      // the value is its leading key-alphabet run: a quote or a bracket round
+      // it is the frame's, and a full stop, a comma or a second separator after
+      // it is the text's — "key=\"<body>\"" and "key=<body>." went out whole
+      // because isKeyWord saw the punctuation
+      const value = raw.replace(/^[\[(\{"'`]+/, "").match(/^[A-Za-z0-9_+\/=.-]*/)[0].replace(/[^A-Za-z0-9]+$/, "")
       if (
         /^[A-Za-z_][A-Za-z0-9_]*$/.test(left) &&
         (left.match(/[A-Za-z]/g) ?? []).length >= 2 &&

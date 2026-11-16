@@ -191,6 +191,14 @@ Three invariants to keep when touching it:
   a colon: the whole word is judged before this reading, so a key's own
   `head:body` is masked whole and `id:<18 alphanumerics>` is a name and its
   value. `retry=true`, `code=ENOENT` and `id=1234567890` are left alone.
+  The value is its leading key-alphabet run: a quote or a bracket round it is
+  the frame's and a full stop, a comma or a second separator after it is the
+  text's, so `key="<key>"` and `key=<key>.` are masked and keep their marks,
+  and a doubled `=` (`key==<key>`) is the frame's too. A key whose own body
+  carries a colon is the vendor span's: the span runs from its front over the
+  key's own colons to its end (`AKIA…:…:…:…`), and the span is measured from
+  the match's own index, not from the word's start, or a front inside a larger
+  word (`key=sk-2OHP…:MR0M…`) takes the wrong tail and keeps the colon.
   Any change to these thresholds has to keep both suites
   green: both carry a table of cut shapes (one, three, four, six, eight,
   twelve characters, line breaks, no-break and ideographic spaces, middots)
