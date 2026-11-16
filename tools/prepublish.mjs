@@ -18,8 +18,9 @@
 
 import { spawnSync } from "node:child_process"
 
-// Today's suite is 703 tests (the plain run); the floor leaves room for a
+// Today's suite is 722 tests (the plain run); the floor leaves room for a
 // legitimate consolidation while still catching a whole file that vanished.
+// (Keep this number current: a stale one reads as a suite that shrank.)
 const MIN_TESTS = 600
 
 const modes = [
