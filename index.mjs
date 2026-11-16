@@ -630,8 +630,18 @@ function configOf(dir) {
   try {
     const raw = JSON.parse(readFileSync(configPath(dir), "utf8").replace(/^\uFEFF/, ""))
     return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}
-  } catch {
-    return {}
+  } catch (e) {
+    // "no file" and "a file with nothing readable in it" are both no
+    // overrides, and so is a hand-edit that is still half-written: the default
+    // is what a person fixing one expects to see. A file that is there and
+    // cannot be read at all is a different answer — the user wrote
+    // `checkinWindow: false` and meant it, and replacing it with the default
+    // window moved the claim to a time they never named, with nothing said, on
+    // every ask, for as long as the permission stayed wrong. `undefined` says
+    // "not known", and the caller keeps the window off rather than inventing
+    // one.
+    const denied = e && typeof e === "object" && (e.code === "EACCES" || e.code === "EPERM")
+    return denied ? undefined : {}
   }
 }
 
@@ -665,6 +675,14 @@ function minuteOf(text) {
 // per-plugin try/catch and the whole package is listed as failed to load. It
 // is reachable for tests through `testables` below, which is an object and so
 // not a plugin entry.
+// windowIn is the window as the config file names it. A file that is there
+// and cannot be read is not "no window configured": the claim is off until the
+// file can be read, because moving it to a time the user never wrote — with
+// nothing said, on every ask — is the worse of the two.
+const windowIn = (dir) => {
+  const cfg = configOf(dir)
+  return cfg === undefined ? null : windowOf(cfg)
+}
 function windowOf(cfg) {
   const raw = cfg.checkinWindow
   if (raw === false) return null
@@ -3407,7 +3425,7 @@ export async function MsmoliPlugin(input) {
             message: unusableKey(auth) ? "令牌内容无法识别（含空格、换行或非 ASCII 字符），请重新登录" : "没有登录信息，请先登录",
           }
         const today = todayCN()
-        const win = windowOf(configOf(configDir))
+        const win = windowIn(configDir)
         if (win) {
           const p = plan(win, token, today)
           if (!p.due) {
@@ -3960,7 +3978,7 @@ export async function MsmoliPlugin(input) {
             // few minutes per account should not pay for it to be thrown away.
             // `win` is null when earnedToday is non-zero, so `ahead` is null
             // exactly where `win && earnedToday === 0` used to make it so.
-            const win = earnedToday === 0 ? windowOf(configOf(configDir)) : null
+            const win = earnedToday === 0 ? windowIn(configDir) : null
             const ahead = win ? plan(win, token, day) : null
             // the minute is Beijing's (minuteCN), while the card's reset time is
             // the machine's zone: say which one this is, or a reader elsewhere

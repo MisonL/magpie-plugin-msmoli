@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict"
 import { after, test } from "node:test"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -2207,6 +2207,46 @@ test("the window is read from the folder magpie reports, not a guessed one", asy
       globalThis.fetch = realFetch
     }
   } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a config that is there but cannot be read keeps the claim off, not on a made-up window", async () => {
+  // `checkinWindow: false` is the user saying "claim whenever". The read
+  // failure path was a catch-all `{}`, so a file whose permission was wrong
+  // read as "no setting", and the claim moved to the default 08:30-10:00 —
+  // a time the user never wrote, said to them on every ask, for as long as
+  // the permission stayed wrong. `EACCES` is not "no file".
+  const dir = tmpDir("msmoli-unreadable-")
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  const cfg = join(dir, "msmoli.json")
+  writeFileSync(cfg, JSON.stringify({ checkinWindow: false }))
+  chmodSync(cfg, 0o000)
+  try {
+    // a privileged runner can read it anyway; the test says so rather than
+    // passing for the wrong reason
+    let readable = false
+    try {
+      readFileSync(cfg, "utf8")
+      readable = true
+    } catch {}
+    if (readable) {
+      assert.ok(true, "running with permission to read the file; the case cannot be staged here")
+      return
+    }
+    const p = await MsmoliPlugin({ directory: dir })
+    const r = await p.auth.checkin(async () => ({ type: "api", key: "ms-unreadable" }))
+    // the window is off, so the ask goes out now instead of being deferred to
+    // a default the user never named — whatever the answer, it is not the
+    // countdown line
+    assert.ok(
+      !/后自动领取/.test(r.message ?? ""),
+      `an unreadable config invented a window: ${JSON.stringify(r.message)}`,
+    )
+  } finally {
+    chmodSync(cfg, 0o600)
     if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
     else process.env.MAGPIE_MSMOLI_CONFIG = saved
   }
