@@ -6823,7 +6823,10 @@ test("a long line of ms- punctuation is read in one pass", () => {
   }
 })
 
-test("an ms- shape four million characters long does not overflow the stack", () => {
+// a runner's own default timeout (Bun's is 5 s) is not this test's ceiling: the
+// input takes ~5 s here and the assertion below allows 60, so the mode fell
+// over on the runner's clock instead of on the shape
+test("an ms- shape four million characters long does not overflow the stack", { timeout: 120_000 }, () => {
   // tokenShaped's body is (?:INV*[\x21-\x7e]){11,}; the {11,} loop puts one
   // frame on V8's regexp stack per character, and a single line of 4,194,304
   // characters threw RangeError: Maximum call stack size exceeded. spawnSync
