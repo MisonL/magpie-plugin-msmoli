@@ -1778,12 +1778,41 @@ const isKeyWord = (w, letters = true) => {
   // the front's own letters are not a word ("ghp_" opens a key)
   const frontLen = (core.match(/^(?:ms-|sk-|gh[pousr]_|xox[abposr]-|akia|asia|aida)/i)?.[0] ?? "").length
   const wordy = (seg, i) => /[a-z]{2,}/.test(i === 0 ? seg.slice(frontLen) : seg)
+  if (!coreSegs.every((seg) => /^[A-Za-z0-9_+=.-]+$/.test(seg))) return false
+  // a key's pieces are generated runs and a path's are words, and the vowel is
+  // what tells them apart: "tkx5y0cs2vrn4bpsktexha" carries one in twenty-two,
+  // "SomeFolderName2024" or "typescript" carries a word's share. Measured on
+  // the card against the CLI, "9e2kd5vvkku3fiz9a1qbmx/tkx5y0cs2vrn4bpsktexha/
+  // kz353ed/8nq6rpz707" went out whole — every piece tripped `wordy` — while
+  // the CLI masked it. A piece has to be 12+ here (a folder name like "src"
+  // carries no vowel either), and the key still has to be long enough to be
+  // one: a run of such pieces is a key, a page of short ones is not. The
+  // two-piece arm below takes its own floor of 10 — a key cut once leaves
+  // halves of the same length as the key's pieces, and "395564d0b4a" is 11.
+  const vowelLow = (seg, i, floor = 12) => {
+    const s = i === 0 ? seg.slice(frontLen) : seg
+    // a key's run is letters and digits; a path's file name carries its own
+    // separators ("report_2024_quarterly", "app-bundle-2024"), which dilute the
+    // vowel share a word has and read as key material once they are out
+    return (
+      /^[A-Za-z0-9]+$/.test(s) &&
+      s.length >= floor &&
+      (s.match(VOWELS) ?? []).length / s.length < 0.24
+    )
+  }
   return (
     coreSegs.length >= 3 &&
-    coreSegs.every((seg) => /^[A-Za-z0-9_+=.-]+$/.test(seg)) &&
-    !coreSegs.some((seg, i) => wordy(seg, i)) &&
-    isKeyWord(compact(core), letters)
-  )
+    ((!coreSegs.some((seg, i) => wordy(seg, i)) && isKeyWord(compact(core), letters)) ||
+      (compact(core).length >= 20 && coreSegs.some((seg, i) => vowelLow(seg, i)) && /[0-9]/.test(core)))
+  ) ||
+    // a key cut once is two pieces, and both of them are runs without a word's
+    // vowels in them ("395564d0b4a/90568cf0dc87a2a4cfa25", 32 characters; the
+    // first piece is 11). A path's two pieces carry a word's vowels, and a
+    // file the card names ("SomeFolderName2024/report") has one of them a word.
+    (coreSegs.length === 2 &&
+      coreSegs.every((seg) => /^[A-Za-z0-9]+$/.test(seg)) &&
+      coreSegs.every((seg, i) => vowelLow(seg, i, 10)) &&
+      compact(core).length >= 24)
 }
 
 // maskAll is the three readings a card's text gets, in order: the run reading

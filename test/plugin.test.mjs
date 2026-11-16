@@ -8247,6 +8247,52 @@ test("a vendor key cut by its own slashes is masked to its end on the card", () 
   }
 })
 
+test("a slashed key of lower-case pieces is masked on the card, and a path is not", () => {
+  // isKeyWord's slash arm gives up at the first piece with two lower-case
+  // letters in a row (`wordy`), which is right for a path's folder names and
+  // wrong for a key whose pieces are generated lower-case runs. Measured on
+  // the card against the CLI: "9e2kd5vvkku3fiz9a1qbmx/tkx5y0cs2vrn4bpsktexha/
+  // kz353ed/8nq6rpz707" went out whole while the CLI masked it, and the same
+  // key behind "key=" went out whole the same way. A path's pieces carry a
+  // word's vowels (Documents, components, typescript) and a key's do not
+  // (tkx5y0cs2vrn4bpsktexha is one vowel in twenty-two).
+  const keys = [
+    "9e2kd5vvkku3fiz9a1qbmx/tkx5y0cs2vrn4bpsktexha/kz353ed/8nq6rpz707",
+    "key=9e2kd5vvkku3fiz9a1qbmx/tkx5y0cs2vrn4bpsktexha/kz353ed/8nq6rpz707",
+    "the key is 9e2kd5vvkku3fiz9a1qbmx/tkx5y0cs2vrn4bpsktexha",
+    // two pieces, both of them long runs with no word's vowels in them
+    "395564d0b4a/90568cf0dc87a2a4cfa25",
+    "92686d7539/dd89f2bd8395a07a66f",
+  ]
+  // the two-piece arm is what takes them: three or more pieces are the other
+  // arm's, and a single piece is not this arm's at all
+  for (const v of ["395564d0b4a/90568cf0dc87a2a4cfa25", "92686d7539/dd89f2bd8395a07a66f"]) {
+    const out = testables.maskAll(v, true)
+    assert.ok(out.length < v.length, `${JSON.stringify(v)} was not masked: ${JSON.stringify(out)}`)
+    assert.ok(!out.includes(v.split("/")[0]), `the first piece stayed whole: ${JSON.stringify(out)}`)
+  }
+  for (const v of keys) {
+    const out = testables.maskAll(v, true)
+    const secret = v.match(/[A-Za-z0-9]+(?:\/[A-Za-z0-9]+)+/)?.[0] ?? v
+    const kept = longestKeptIn(out, secret)
+    assert.ok(kept.length < 12, `${JSON.stringify(v)} kept ${JSON.stringify(kept)}: ${JSON.stringify(out)}`)
+  }
+  // a path keeps its folders: the word pieces are not read as key material,
+  // and the path's shape (its slashes and its words) is still on the card
+  for (const [v, keep] of [
+    ["Documents/Projects/SomeFolderName2024/report", "Documents/Projects/"],
+    ["/Users/mison/Documents/SomeLongDirectoryName", "/Users/mison/Documents/"],
+    ["src/components/SomeLongComponentName2024/File", "src/components/"],
+    ["node_modules/typescript/lib/typescript.js", "node_modules/typescript/"],
+    // a two-piece path whose first piece is long and carries a numeral is the
+    // two-piece arm's nearest neighbour: its words have a word's vowels, so the
+    // arm has to turn it down (it read the file name as part of the path)
+    ["SomeFolderName2024/report", "/report"],
+  ]) {
+    assert.ok(testables.maskAll(v, true).includes(keep), `${JSON.stringify(v)} lost its path: ${JSON.stringify(testables.maskAll(v, true))}`)
+  }
+})
+
 test("a mask on the card is not read as a key again", () => {
   // A second pass over masked text must not put key material back on the card,
   // and must not take the words around a mask with it. Reading the run twice

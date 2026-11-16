@@ -155,7 +155,14 @@ Three invariants to keep when touching it:
   key (`ms-AbCdEf12GhIjKl34/RgjNpwI` is masked whole, not to the first `/`),
   and so is a colon when both halves together read as one
   (`sk-2OHPYFCORWVX0:MR0MACVP0D7Z`) — a scheme and a time do not
-  (`https://h:8080/x` and `12:30:45` stay as printed). `ms-` is in the front
+  (`https://h:8080/x` and `12:30:45` stay as printed). A key cut into pieces
+  by slashes with no front of its own is read by its pieces: three or more
+  where one is 12+ characters of letters and digits with under a quarter of
+  them vowels, or exactly two that both are (`9e2kd5vvkku3fiz9a1qbmx/
+  tkx5y0cs2vrn4bpsktexha/kz353ed/8nq6rpz707`), and a path is not — its
+  pieces are words (`SomeFolderName2024`, `typescript`) or carry their own
+  separators (`report_2024_quarterly`, which dilutes the vowel share without
+  being key material). `ms-` is in the front
   list itself, so a ModelScope key is read by its front like every other
   vendor's; behind that short front a 16+ run still needs a numeral or a
   capital, because a card joins words across a space to read a cut key and
