@@ -217,7 +217,12 @@ const pathWords = /proxy|gateway|www-authenticate|re-?authenticate|\bbasic\b/i
 // name ("proxy": "upstream"). The 401's words and the 403's envelope both ask.
 // an upstream's "Upstream returned status 401" is not a path naming itself: a
 // site reads the body above it, and what a proxy puts there is its own words
-const PATH_MARK = /(?<![a-z])(?:proxy|gateway|re-?authenticate)(?![a-z])/i
+// (a 403's envelope can name the challenge instead of the path: a proxy that
+// answers "WWW-Authenticate: Basic realm=corp" said the path is refusing, and
+// the card then told the user ModelScope's risk control had blocked them.
+// "basic" is matched only as the scheme of such a challenge, not as a word of
+// prose: "basic plan" is ModelScope's own)
+const PATH_MARK = /(?<![a-z])(?:(?:proxy|gateway|re-?authenticate)(?![a-z])|www-authenticate|(?<![a-z])basic realm)/i
 const signInWords = /unauthori[sz]ed|invalid (?:access )?token|token (?:is )?(?:invalid|expired|revoked)|invalid authentication|authorization header|not (?:logged|signed) in|unauthenticated|auth(?:entication)? (?:failed|required)|\b(?:expired|revoked)\b|\b401\b|登录|未登录|失效|过期|令牌|凭证|鉴权|认证/i
 const awaitsSignIn = (body) => {
   if (body === null || typeof body !== "object") return false
@@ -2743,7 +2748,11 @@ const gate = (profile, res, body, parsed, token, what, risk = RISK) => {
   // signed in and polled the same dead token again. Only an explicit 401 code
   // counts: a 200 whose words merely mention an expiry ("积分已过期") is the
   // ledger talking, not the sign-in, and signing out over it would be wrong.
-  if (res.status === 200 && !okOf(body) && String(body?.Code ?? body?.code ?? "") === "401") throw deadToken(profile.where, token)
+  // (the code alone is not the site refusing the token: a proxy in front of
+  // it answers 200 with its own envelope, and a "proxy": "upstream" field or
+  // a "proxy authentication required" message is the path's, not the
+  // sign-in's — awaitsSignIn is the test HTTP 401 already goes through)
+  if (res.status === 200 && !okOf(body) && String(body?.Code ?? body?.code ?? "") === "401" && awaitsSignIn(body)) throw deadToken(profile.where, token)
   if (res.status !== 200 || !okOf(body)) throw new Error(`${what}：${saidOf(body, token) || `HTTP ${res.status}`}`)
 }
 

@@ -38,6 +38,19 @@ test("mask keeps only the ends, as magpie's own display does", () => {
   assert.equal(mask(undefined), "（不可用）")
 })
 
+test("a mask never prints a control character, even one stored in the key", () => {
+  // The value mask() hands back unchanged when it already reads as a mask is
+  // whatever the file holds: "abcd…" followed by an ESC sequence went to the
+  // terminal whole, and a terminal that reads ESC [ 2 J clears the screen over
+  // the output the user was reading.
+  const esc = "abcd…" + "\u001b" + "[2J"
+  const out = mask(esc)
+  assert.ok(!/[\u0000-\u001f\u007f]/.test(out), `a control character reached the terminal: ${JSON.stringify(out)}`)
+  assert.ok(out.includes("…"), `the mask was lost: ${JSON.stringify(out)}`)
+  // an ordinary mask still reads as itself
+  assert.equal(mask("ms-a…5555"), "ms-a…5555")
+})
+
 test("a mask read back as a key keeps its ends", () => {
   // mask() is the only place a key's ends are shown, and its own output is
   // what gets read again — a masked value copied into a second run, a log of

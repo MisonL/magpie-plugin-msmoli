@@ -355,7 +355,11 @@ const MASKED_SHAPE = /^[\s\S]{4}…[\s\S]{4}$/
 const MASKED_SHORT = /^（\d+ 字符）$/
 export const mask = (t) => {
   if (typeof t !== "string" || !t) return "（不可用）"
-  if (MASKED_SHAPE.test(t) || MASKED_SHORT.test(t)) return t
+  // a value that already reads as a mask is handed back as written — and a
+  // stored key can be anything a file holds, an ESC sequence included: "abcd…"
+  // followed by "\u001b[2J" went to the terminal whole and cleared the screen
+  // over the output. Nothing a mask prints may carry a control character.
+  if (MASKED_SHAPE.test(t) || MASKED_SHORT.test(t)) return show(t)
   if (t.length < 12) return `（${t.length} 字符）`
   return `${show(t.slice(0, 4))}…${show(t.slice(-4))}`
 }
@@ -2891,6 +2895,10 @@ export async function main({
   if (!args.to) {
     log(`(要执行请显式指定方向：--to-plugin 或 --to-preset)`)
     if (args.dryRun) log(`(--dry-run：未执行)`)
+    // A bare run is a report, and the README says so: 0 here means the tool
+    // did what it was asked (show the plan), not that the sync happened. Only
+    // --status carries "there is work" as a verdict, and that is what --status
+    // is for — a script that wants the verdict asks for it.
     return 0
   }
   // --dry-run spawns nothing, so it must not be gated on finding a binary:

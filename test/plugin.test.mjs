@@ -987,6 +987,65 @@ test("a 401 after the site is known names that site", async () => {
   assert.match(u.error, /令牌失效或不属于国际站（HTTP 401）/, u.error)
 })
 
+test("a 200 whose envelope names a proxy is not read as the token being refused", async () => {
+  // The login layer answers some refusals with HTTP 200 and the code inside
+  // the envelope, and that code is read as the sign-in being dead. A proxy in
+  // front of the site answers 200 with an envelope of its own, and its
+  // "proxy": "upstream" field or "proxy authentication required" message said
+  // the path was refusing, not the token — the card told the user to sign in
+  // again and a re-login would not have changed it. The 200 path asks the same
+  // question the HTTP 401 path asks (awaitsSignIn) before it says "expired".
+  const token = "ms-test-200proxy-0001"
+  const u = await withFetch(
+    {
+      [BALANCE_PATH]: { status: 200, body: { success: false, code: 401, message: "proxy authentication required", proxy: "upstream" } },
+      [TX_PATH]: { status: 200, body: { success: false, code: 401, message: "proxy authentication required", proxy: "upstream" } },
+    },
+    async () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.notEqual(u.signIn, "expired", `a proxy's refusal was read as a dead token: ${JSON.stringify(u)}`)
+  assert.ok(!/令牌失效/.test(u.error ?? ""), `the card said the token died: ${JSON.stringify(u.error)}`)
+
+  // the site's own 200 + 401 code is still the sign-in: the field is absent
+  // and the words are ModelScope's
+  const dead = await withFetch(
+    {
+      [BALANCE_PATH]: { status: 200, body: { Code: 401, Success: false, Message: "Unauthorized" } },
+      [TX_PATH]: { status: 200, body: { Code: 401, Success: false, Message: "Unauthorized" } },
+    },
+    async () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.equal(dead.signIn, "expired", `the site's own refusal stopped being read: ${JSON.stringify(dead)}`)
+})
+
+test("a 403 that names a proxy challenge is the path's, not the site's risk control", async () => {
+  // riskShaped decides whether a 403 is ModelScope refusing by policy, and it
+  // excused a body naming a proxy, a gateway or a re-authentication. A proxy
+  // that answers "WWW-Authenticate: Basic realm=corp" names none of those
+  // three, so the card told the user ModelScope's risk control had blocked
+  // them — and waiting for it to lift would never have helped.
+  const token = "ms-test-403challenge-01"
+  const u = await withFetch(
+    {
+      [BALANCE_PATH]: { status: 403, body: { success: false, message: "WWW-Authenticate: Basic realm=corp" } },
+      [TX_PATH]: { status: 403, body: { success: false, message: "WWW-Authenticate: Basic realm=corp" } },
+    },
+    async () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.ok(!/风控/.test(u.error ?? ""), `a proxy challenge was read as the site's risk control: ${JSON.stringify(u.error)}`)
+  assert.ok(/不是魔搭的/.test(u.error ?? ""), `the path's own words were not used: ${JSON.stringify(u.error)}`)
+
+  // the site's own 403 is still risk control
+  const risk = await withFetch(
+    {
+      [BALANCE_PATH]: { status: 403, body: { success: false, Code: 403, Message: "blocked" } },
+      [TX_PATH]: { status: 403, body: { success: false, Code: 403, Message: "blocked" } },
+    },
+    async () => auth.usage(async () => ({ type: "api", key: token })),
+  )
+  assert.match(risk.error ?? "", /风控/, `the site's own 403 stopped being read as risk control: ${JSON.stringify(risk.error)}`)
+})
+
 test("what the two sites say is ranked by what it says, not by which was asked first", async () => {
   // Both sites fail. The order they are asked in depends on which site the
   // token was remembered on, so a priority decided by arrival makes the card's
