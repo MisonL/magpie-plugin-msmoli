@@ -7164,3 +7164,19 @@ test("a key straddling the chunk boundary is not split into two unreadable halve
     assert.equal(arg(v).length, v.length, `a long value changed length`)
   }
 })
+
+test("the text after a key that straddles a chunk boundary is kept", () => {
+  // The carry was dropped from the front of a piece's result by CHARACTER
+  // count, and the mask standing for the carry is shorter than the carry: the
+  // slice cut into the piece's own text. Measured before the fix, 32798
+  // characters in gave 32768 out, with 16 characters of the key in the clear
+  // and the error's own words gone.
+  const key = "ghp_" + "1".repeat(36)
+  for (const pad of [32700, 32749, 32760, 32770, 40000]) {
+    const v = "x".repeat(pad) + " " + key + " invalid"
+    const out = arg(v)
+    assert.ok(!/ghp_[0-9a-f]{8}/.test(out), `at ${pad}, the key reached the terminal: ${JSON.stringify(out.slice(-40))}`)
+    assert.ok(out.endsWith(" invalid"), `at ${pad}, the words after the key were eaten: ${JSON.stringify(out.slice(-30))}`)
+    assert.equal((out.match(/x/g) ?? []).length, pad, `at ${pad}, the padding changed`)
+  }
+})

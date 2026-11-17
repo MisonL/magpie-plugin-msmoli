@@ -1685,10 +1685,23 @@ export function arg(v) {
     const parts = chunked(orig)
     let out = ""
     for (const { text, carry } of parts) {
-      const read = arg(text)
-      // the carry was read by the piece before it: its result is already in
-      // `out`, so only what follows it is appended
-      out += carry === 0 ? read : read.slice(carry)
+      if (carry === 0) {
+        out += arg(text)
+        continue
+      }
+      // The carry was read by the piece before it, and its result is already
+      // in `out`. It is read AGAIN together with this piece — a key the cut
+      // straddled is one key only when the two parts are seen together — and
+      // then dropped from the front of the result. Dropping by CHARACTER
+      // count was wrong: the mask of the carry is shorter than the carry
+      // ("ghp_…1111" for a 40-character key), so the slice cut into the
+      // piece's own text and took the rest of the error with it (measured:
+      // 32798 characters in, 32768 out, 16 key characters in the clear).
+      // the carry as `out` ends with it, not by character count: the mask
+      // behind it is shorter than the carry it stands for
+      const seen = arg(text)
+      const carryText = arg(text.slice(0, carry))
+      out = (out.endsWith(carryText) ? out.slice(0, out.length - carryText.length) : out) + seen
     }
     return out
   }
