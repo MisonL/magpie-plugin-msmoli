@@ -5716,7 +5716,10 @@ test("a middot-cut key behind a frame's punctuation is masked in arg() too", () 
   assert.equal(arg("key=AKIAIOS·FODNN7E·XAMPLE."), "key=AKIA…PLE.")
 })
 
-test("the CLI's 32 KiB worst case stays fast", () => {
+// the ceiling below is on cpu time, not on the runner's clock: Bun's default
+// per-test timeout is 5 s, and the two runs plus the runner's own overhead
+// reached it on a loaded machine. The assertion is the cpu bound.
+test("the CLI's 32 KiB worst case stays fast", { timeout: 120_000 }, () => {
   // Before this round the CLI took 9 s on "1A1 " × 8192 and 1.8 s on 32 KiB of
   // one-character words. A run that finds nothing now hands the scan on to its
   // last word. The bound is loose on purpose: it guards a regression to

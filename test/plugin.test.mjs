@@ -12370,3 +12370,110 @@ test("a page of one plain word does not spend the hook's budget on masks", () =>
   assert.equal(masked.length, body.length)
   assert.ok(!masked.includes("…"), "no key, no mask")
 })
+
+test("a key of capitals longer than the join's cap is masked to its end", () => {
+  // The join stops at 4*RUNCUT (80 characters without the spaces) so that a
+  // page of capitals is not one body from every start. But the key itself can
+  // be longer, and when the join was simply cut at the cap whatever followed
+  // it stayed on the card in the clear: a 102-character key in fours printed
+  // every piece after the twentieth character ("HIJK LMNO …").
+  const flat = "1ABCDEFGDEFG" + "DEFG".repeat(17) + "HIJKLMNOPQRSTUVWXYZABC"
+  assert.equal(flat.length, 102)
+  const spaced = flat.match(/.{1,4}/g).join(" ")
+  const out = testables.cardText(spaced, "")
+  // every run of the key's own characters on the card is 1-4 long: a masked
+  // piece's ends are at most that, and no piece of the key is left whole
+  for (const m of out.matchAll(/[A-Z0-9]{5,}|[A-Z0-9]{2,}(?: [A-Z0-9]{2,}){2,}/g)) {
+    assert.fail(`key material stayed on the card: ${JSON.stringify(m[0])} in ${JSON.stringify(out)}`)
+  }
+  assert.ok(out.includes("…"), `the key went unmasked: ${JSON.stringify(out)}`)
+})
+
+test("the join's cap still refuses prose in capitals whatever its length", () => {
+  // The cap is not a licence to mask every page of capitals: a run that never
+  // reads as key material stays, at any length.
+  const prose = "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG AGAIN AND AGAIN AND AGAIN AND AGAIN AND AGAIN AND AGAIN"
+  assert.equal(testables.cardText(prose, ""), prose)
+  const headings = "README INSTALL BUILD TEST RELEASE DEPLOY MONITOR ROLLBACK RECOVER UPGRADE DOWNGRADE MIGRATE"
+  assert.equal(testables.cardText(headings, ""), headings)
+})
+
+test("a mask-shaped span followed by '=' and a key is not mistaken for the mask itself", () => {
+  // WORD_MASK's left side included "=" as key material. A word like
+  // "abcd…efg=ghp_16C7abcdefghijklmnop" was therefore left as written: the
+  // four characters before the ellipsis and the four after read as our mask,
+  // so the whole word was skipped and the key after "=" stayed in the clear.
+  const key = "ghp_16C7abcdefghijklmnop"
+  const value = `abcd…efg=${key}`
+  const out = testables.cardText(`key ${value} here`, "")
+  assert.ok(!out.includes(key), `the key after '=' stayed: ${JSON.stringify(out)}`)
+})
+
+test("a token echoed one character at a time is masked to its last piece", () => {
+  // The echo's pieces repeat the vendor front ("ms-7 ms-b … ms-c"), so the
+  // piece accumulated by maskEchoes stopped matching the token once it grew
+  // past the front. The last pieces before the frame were then echoed in the
+  // clear: "ms-7…ms-c ms-1…ms-8 ms-c ms-1 ms-d" showed a readable tail.
+  const token = "ms-7bcd6e6b8c1cd0ee6b8c1d"
+  const echo = token.split("").map((c, i) => `${c} `).join("").trim()
+  const out = testables.cardText(echo, token)
+  assert.ok(!/ms-[0-9a-f](?: ms-[0-9a-f]){2,}$/.test(out), `a tail of the echoed token stayed: ${JSON.stringify(out)}`)
+})
+
+test("an echo that repeats the front before every piece is masked whole", () => {
+  // A proxy that prints the key as "ms-7bc ms-d6e ms-6b8 …" repeats the
+  // front as a filler between pieces. maskEchoes' filler budget ("as many
+  // characters as the run has matched") ran out once the front was written
+  // again, and the pieces after it were echoed in the clear.
+  const token = "ms-7bcd6e6b8c1cd0ee6b8c1d"
+  for (const echo of [
+    token.slice(3).match(/.{1,3}/g).map((p) => "ms-" + p).join(" "),
+    token.match(/.{1,3}/g).map((p) => "ms-" + p).join(" "),
+  ]) {
+    const out = testables.cardText(echo, token)
+    assert.ok(!/ms-[0-9a-f]+(?: ms-[0-9a-f]+){2,}$/.test(out), `pieces past the front stayed: ${JSON.stringify(out)}`)
+  }
+})
+
+test("'basic plan' in a 401 body does not hide an expired session", () => {
+  // pathWords matched "basic" as a whole word to catch "Basic realm=corp",
+  // so ModelScope's own "Token expired on basic plan" read as a proxy's
+  // refusal: the card stopped asking the user to sign in again.
+  assert.equal(testables.awaitsSignIn({ Code: 401, Message: "Token expired on basic plan" }), true)
+  // a proxy's challenge still names the path through PATH_MARK
+  assert.equal(testables.awaitsSignIn({ message: "unauthorized", "WWW-Authenticate": "Basic realm=corp" }), false)
+})
+
+test("a config path that is a directory keeps the claim off, not on a made-up window", () => {
+  // The EACCES fix covered "there but not readable". A directory in the
+  // config's place fails earlier, with EISDIR, and fell into the catch-all
+  // `{}`: the window was invented from the default instead of left off.
+  const dir = tmpDir("msmoli-eisdir-")
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  mkdirSync(join(dir, "msmoli.json"))
+  process.env.MAGPIE_MSMOLI_CONFIG = join(dir, "msmoli.json")
+  try {
+    assert.equal(testables.windowIn(dir), null, "a directory in the config's place is not the default window")
+  } finally {
+    delete process.env.MAGPIE_MSMOLI_CONFIG
+    if (saved !== undefined) process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a long run of hex digits is read in linear time", { timeout: 60_000 }, () => {
+  // keyBody's first arm was a greedy [0-9a-f]{11,} with a lookahead: at every
+  // start it ate to the end of the run and backtracked, quadratic in the run.
+  // Measured on "f"*32768 + "g": 12.7 s. The question is one left-to-right
+  // pass now.
+  for (const n of [16384, 32768]) {
+    const page = "f".repeat(n) + "g!"
+    const started = performance.now()
+    testables.keyBody.test(page)
+    const ms = performance.now() - started
+    assert.ok(ms < 200, `${n} hex digits took ${ms.toFixed(0)} ms`)
+  }
+  // the arm still answers as it did: a hex run of 11+ not followed by a
+  // lower-case letter or digit is key material
+  assert.equal(testables.keyBody.test("0123456789abcdef01"), true)
+  assert.equal(testables.keyBody.test("f".repeat(32) + "g"), false)
+})

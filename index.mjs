@@ -212,7 +212,7 @@ function saidFailure(e, ctl, budget) {
 // card tell the user the sign-in expired, and a re-login would not have
 // changed the answer. A refusal is the default because it is what the site
 // itself sends; the answer has to excuse it to be read as the path's.
-const pathWords = /proxy|gateway|www-authenticate|re-?authenticate|\bbasic\b/i
+const pathWords = /proxy|gateway|www-authenticate|re-?authenticate/i
 // a path naming itself, as a whole word: in the words of a body or in a field
 // name ("proxy": "upstream"). The 401's words and the 403's envelope both ask.
 // an upstream's "Upstream returned status 401" is not a path naming itself: a
@@ -639,8 +639,9 @@ function configOf(dir) {
     // window moved the claim to a time they never named, with nothing said, on
     // every ask, for as long as the permission stayed wrong. `undefined` says
     // "not known", and the caller keeps the window off rather than inventing
-    // one.
-    const denied = e && typeof e === "object" && (e.code === "EACCES" || e.code === "EPERM")
+    // one. A directory in the file's place (EISDIR) is the same answer: it is
+    // there and cannot be read, and it is never going to be JSON.
+    const denied = e && typeof e === "object" && (e.code === "EACCES" || e.code === "EPERM" || e.code === "EISDIR")
     return denied ? undefined : {}
   }
 }
@@ -939,8 +940,13 @@ const maskEchoes = (s, token) => {
       // already long enough to be an echo under the lower floor. Without that
       // second half, "said: aaaa1111-b" matched the last s of "said" and then
       // skipped "id" to join the piece, and a 9-character slice that the floor
-      // is meant to leave alone was masked as if it were longer.
-      if (hit < 0 || (hit - v > 1 && piece.length < MIN_ECHO - 2)) break
+      // is meant to leave alone was masked as if it were longer. An echo that
+      // repeats the key's front between every piece ("ms-7bc ms-d6e ms-6b8 …")
+      // writes the front again before the run is that long, and the front is
+      // the key's own opening: those characters are stepped over too, or each
+      // piece under MIN_ECHO ended the run and the pieces after it printed.
+      if (hit < 0) break
+      if (hit - v > 1 && piece.length < MIN_ECHO - 2 && !flat.startsWith(vis.slice(v, hit).join(""))) break
       fillers += hit - v
       v = hit
     }
@@ -1028,7 +1034,22 @@ const tokenShaped = new RegExp(
     String.raw`(?:(?:\s*[·•∙‧・⋅]\s*|\s+)(?!(?:m${INV}*s${INV}*-))(?![\x21-\x7e]*\.)(?=[\x21-\x7e]{5,})(?=[\x21-\x7e]*\d)[\x21-\x7e]+)*`,
   "gu",
 )
-const HEX_RUN = /[0-9a-f]{11,}(?![0-9a-z])/
+// A run of 11+ hex digits at the end of a stretch: the regex form with a
+// lookahead backtracked over every shorter suffix of a long run ("f"*32768 +
+// "g" took 12.7 s). One left-to-right pass over the stretches answers it.
+const hasHexRun = (m) => {
+  let run = 0
+  for (let i = 0; i <= m.length; i += 1) {
+    const c = m[i]
+    if (c >= "0" && c <= "9" || c >= "a" && c <= "f") {
+      run += 1
+      continue
+    }
+    if (run >= 11 && !(c >= "0" && c <= "9" || c >= "g" && c <= "z")) return true
+    run = 0
+  }
+  return false
+}
 // The second arm — "a run of 11+ printable characters starting at a non-word
 // character, with a digit somewhere in it" — was a greedy `[\x21-\x7e]*\d`
 // with a lookahead: at every start it ate to the end of the run and
@@ -1058,7 +1079,7 @@ const hasDigitInPrintableRun = (m) => {
   }
   return false
 }
-const keyBody = { test: (m) => HEX_RUN.test(m) || hasDigitInPrintableRun(m) }
+const keyBody = { test: (m) => hasHexRun(m) || hasDigitInPrintableRun(m) }
 // maskShaped is the replace both passes share: the shape finds a run that
 // begins like a key; keyBody asks whether the run after the front reads as
 // one. A run that does not is ordinary text and is handed back as written,
@@ -1087,11 +1108,19 @@ const keyAt = (word, letters) => (MAYKEY(word) && isKeyWord(word, letters)) || V
 // character per word). A word already carrying a mask is not judged again.
 const MASKED = "…"
 // the shape of a mask this tool wrote, as it sits inside a word: up to four
-// key characters either side of the ellipsis. A word carrying one is left
-// alone on the second pass (reading across it rebuilds key material out of
-// the mask and the text round it). An ellipsis the text itself wrote is not
-// this shape — "x…<key>" has a whole key after it — and the word is read.
+// key characters either side of the ellipsis. A word carrying one, and
+// nothing else that reads as key material, is left alone on the second pass
+// (reading across it rebuilds key material out of the mask and the text round
+// it). An ellipsis the text itself wrote is not this shape — "x…<key>" has a
+// whole key after it — and the word is read.
 const WORD_MASK = /[A-Za-z0-9_+\/=-]{1,4}…[A-Za-z0-9]{1,4}(?![A-Za-z0-9_])/
+// what is left of a word once a mask's shape is taken out of it, when that
+// rest still reads as a key: a vendor's front, or a long run of key characters
+// with a digit in it (a name beside the mask — "providerNickName=[" — has the
+// run and no digit, and is not key material)
+const REST_VENDOR = /sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|ms-|akia|asia|aida|aliyun|ssh-rsa/i
+const REST_RUN = /[A-Za-z0-9_+\/=-]{16,}/
+const restKey = (w) => REST_VENDOR.test(w) || (REST_RUN.test(w) && /[0-9]/.test(w))
 // the length at which a run is long enough to be a key: the floor every
 // reading asks for, and all a mask needs to show
 const RUNCUT = 20
@@ -1894,11 +1923,26 @@ const maskCaps = (s, letters) => {
   const words = [...s.matchAll(/[\x21-\x7e]+/g)]
   const at = (i) => words[i].index
   const end = (i) => words[i].index + words[i][0].length
+  // a body of capitals and digits is at most 4*RUNCUT without its spaces: the
+  // cap is what keeps a page of capitals from being joined from every start.
+  // It bounds a FAILING join only — once a join reads as a key, the rest of
+  // the contiguous run is that key's own material and is masked with it (cut
+  // at the cap, a 102-character key printed every piece past its 80th).
+  const CAP = 4 * RUNCUT
+  // an upper-cased vendor shape ("AKIAIOSFODNN7 EXAMPLE") carries a piece of
+  // an id's rhythm: a capital, a digit, short pieces. A word written out in
+  // full ("DOCUMENTATION", "CONFIGURED") is prose in capitals
+  const keyy = (body) => body.length >= 16 && !/[a-z]/.test(body) &&
+    (/^AKIA[0-9A-Z]{16}$/.test(body) || /[A-Z][0-9]/.test(body) || /[0-9][A-Z]/.test(body))
   const out = []
   let from = 0
-  for (let i = 0; i < words.length; i += 1) {
+  let i = 0
+  while (i < words.length) {
     const w = words[i][0]
-    if (!VENDOR.test(w) && !(/^[A-Z0-9]{4,}$/.test(w) && /[A-Z]/.test(w))) continue
+    if (!VENDOR.test(w) && !(/^[A-Z0-9]{4,}$/.test(w) && /[A-Z]/.test(w))) {
+      i += 1
+      continue
+    }
     let j = i
     // `allCaps` is the same question `^[A-Z0-9]+$` asked of the grown body,
     // carried along as a boolean: re-testing the whole body at every join made
@@ -1907,15 +1951,11 @@ const maskCaps = (s, letters) => {
     // false as pieces are added.
     const pieces = [w]
     let allCaps = /^[A-Z0-9]+$/.test(w)
-    // a key written without its spaces is never longer than 4*RUNCUT, and the
-    // cap is what keeps a page of capitals from being one body: without it the
-    // walk joined the whole page from every start. (the same cap the CLI's
-    // capsRun carries)
     let joined = w.length
     while (
       j + 1 < words.length &&
       allCaps &&
-      joined < 4 * RUNCUT &&
+      joined < CAP &&
       s.slice(end(j), at(j + 1)).length <= 2 &&
       /^[A-Z0-9]{2,}$/.test(words[j + 1][0])
     ) {
@@ -1926,16 +1966,24 @@ const maskCaps = (s, letters) => {
       if (!/^[A-Z0-9]+$/.test(piece)) allCaps = false
     }
     // the join is the pieces with the gap between them taken out, as before
-    const body = pieces.length === 1 ? w : pieces.join("")
-    if (j === i || body.length < 16 || /[a-z]/.test(body)) continue
-    // an upper-cased vendor shape ("AKIAIOSFODNN7 EXAMPLE") carries a piece of
-    // an id's rhythm: a capital, a digit, short pieces. A word written out in
-    // full ("DOCUMENTATION", "CONFIGURED") is prose in capitals
-    const awsy = /^AKIA[0-9A-Z]{16}$/.test(body)
-    if (!awsy && !/[A-Z][0-9]/.test(body) && !/[0-9][A-Z]/.test(body)) continue
-    out.push(s.slice(from, at(i)), maskToken(body))
-    from = end(j)
-    i = j
+    let body = pieces.length === 1 ? w : pieces.join("")
+    if (j > i && keyy(body)) {
+      // the run past the cap is the same key's: read on to its end
+      while (
+        j + 1 < words.length &&
+        s.slice(end(j), at(j + 1)).length <= 2 &&
+        /^[A-Z0-9]{2,}$/.test(words[j + 1][0])
+      ) {
+        j += 1
+        pieces.push(words[j][0])
+      }
+      if (pieces.length > 1) body = pieces.join("")
+      out.push(s.slice(from, at(i)), maskToken(body))
+      from = end(j)
+      i = j + 1
+      continue
+    }
+    i = j + 1
   }
   return out.join("") + s.slice(from)
 }
@@ -2139,7 +2187,12 @@ const maskKeys = (s, letters = true) => {
     // after the ellipsis printed on the card, in the name and in the log.
     // (the piece a mask leaves is under five characters on both sides, and
     // the frame's punctuation around it is not key material)
-    if (WORD_MASK.test(word)) return word
+    // ...unless the word carries a key beside the mask: "abcd…efg=ghp_16C7…"
+    // has a mask's shape on the left and a whole key on the right, and
+    // skipping the word printed the key. Only a word with nothing else in it
+    // that reads as key material is left as written.
+    const maskHit = WORD_MASK.exec(word)
+    if (maskHit && !restKey(word.slice(0, maskHit.index) + word.slice(maskHit.index + maskHit[0].length))) return word
     const folded = word.normalize("NFKC").replace(/\uFF0D/g, "-")
     // (the word as written is what is masked, and the folded copy is what is
     // judged \u2014 but only the key's own span of it: a word's prose is the
@@ -4086,6 +4139,6 @@ export async function MsmoliPlugin(input) {
 // exporting them as functions: magpie's loader treats every exported function
 // as a plugin entry (see windowOf above), but an object it skips. The tests
 // are the only reader.
-export const testables = { windowOf, plan, streakOf, onDay, CN, INTL, sites, deferred, maskAll, cardText, nameText, hostText, awaitsSignIn, gate, json }
+export const testables = { windowOf, windowIn, keyBody, plan, streakOf, onDay, CN, INTL, sites, deferred, maskAll, cardText, nameText, hostText, awaitsSignIn, gate, json }
 
 export default MsmoliPlugin
