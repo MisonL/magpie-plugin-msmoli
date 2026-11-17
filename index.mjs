@@ -1260,7 +1260,11 @@ function maskSpaced(s, letters) {
     if ((w1.length === 1 || (pieceHead && i + 1 < words.length && pieceGap(i + 1))) && mayRun(i, 96)) {
       let k = i
       while (k + 1 < words.length && k - i <= 96 && pieceGap(k + 1)) k += 1
+      // a mask is not key material: a character cut never runs across one,
+      // and joining one made the second pass read a mask and the words round
+      // it as a new key ("0a1b…4e5f 012345  abcdefgh·AKIA…" → "0a1b…4e5f…AKIA…")
       const joined = w1p + words.slice(i + 1, k + 1).map((w) => w[0]).join("")
+      if (joined.includes(MASKED)) continue
       const capJoined = joined.replace(/[^A-Z0-9]/g, "")
       const rhythmic = /[A-Z][0-9]/.test(capJoined) || /[0-9][A-Z]/.test(capJoined)
       if (
@@ -1636,7 +1640,17 @@ function maskSpaced(s, letters) {
     // (a middot-joined run keeps its cut's middots only when it is one key
     // whole: a mask over a list of pieces was "\u2026" among the text's)
     const keepSep = !fronted && run.every((w) => /^\w+$/.test(w))
-    const keyText = run.join("").replaceAll(MASKED, "").replace(keepSep ? /[·•∙‧・⋅]/g : /$^/g, "").replace(/^-+/, "")
+    const joinedRun = run.join("")
+    // a mask inside the run is the text's own masking, not key material: the
+    // second pass over "0a1b…4e5f 012345  abcdefgh·AKIA…" joined the mask and
+    // the words round it into a new "key". A run that spans one is left as
+    // written (the words inside it keep whatever reading they had).
+    if (joinedRun.includes(MASKED)) {
+      out.push(s.slice(from, end(head)))
+      from = end(head)
+      continue
+    }
+    const keyText = joinedRun.replace(keepSep ? /[·•∙‧・⋅]/g : /$^/g, "").replace(/^-+/, "")
     out.push(s.slice(from, at(head)), hf, maskToken(keyText), tailP)
     // the mask ends at the last piece it kept; a word after a middot that the
     // run read past is text, and stays as written ("… · 4 次")
@@ -1966,6 +1980,13 @@ const maskCaps = (s, letters) => {
     const pieces = [w]
     let allCaps = /^[A-Z0-9]+$/.test(w)
     let joined = w.length
+    // how few pieces the join had when it FIRST read as a key. A word that is
+    // prose on its own ("ABCD") is not made part of the key by what follows
+    // it: the join is re-started from the shortest form that already read as
+    // one ("AKIA…"), and the words in front of that stay as written. Without
+    // this the walk from "ABCD" read on to the key after it and masked
+    // "ABCD…EF12" across both.
+    let firstKey = -1
     while (
       j + 1 < words.length &&
       allCaps &&
@@ -1978,6 +1999,28 @@ const maskCaps = (s, letters) => {
       pieces.push(piece)
       joined += piece.length
       if (!/^[A-Z0-9]+$/.test(piece)) allCaps = false
+      if (firstKey < 0 && pieces.length > 1 && keyy(pieces.join(""))) firstKey = pieces.length
+    }
+    // the part of the join that is the key: from where it first read as one
+    if (firstKey > 0 && firstKey <= pieces.length) {
+      const lead = pieces.length - firstKey
+      const core = pieces.slice(lead)
+      let body = core.join("")
+      const i0 = i + lead
+      // the run past the cap is the same key's: read on to its end
+      while (
+        j + 1 < words.length &&
+        s.slice(end(j), at(j + 1)).length <= 2 &&
+        /^[A-Z0-9]{2,}$/.test(words[j + 1][0])
+      ) {
+        j += 1
+        core.push(words[j][0])
+      }
+      if (core.length > 1) body = core.join("")
+      out.push(s.slice(from, at(i0)), maskToken(body))
+      from = end(j)
+      i = j + 1
+      continue
     }
     // the join is the pieces with the gap between them taken out, as before
     let body = pieces.length === 1 ? w : pieces.join("")
@@ -2142,6 +2185,10 @@ function maskCut(s, letters) {
       // the same piece-versus-prose split as the run reading: four lower-case
       // letters end the run unless the run starts at a key's front
       if (/^[a-z]{4,}$/.test(x) && body.length >= 4 && !/[0-9]/.test(body) && !/^[A-Z0-9]+$/.test(body) && (x.length > 4 || !(VENDOR.test(w) || /^ms-/i.test(w)))) break
+      // a word carrying a mask is the text's, not key material: the join
+      // stops in front of it (the mask's own ellipsis was the last piece's
+      // tail, and the run "4e5f 012345 abcdefgh" then read on into it)
+      if (x.includes(MASKED)) break
       body += x
       if (body.length < 20 || body.includes(MASKED)) continue
       // every keyRun arm needs a letter (see MAYKEY), so a body of numerals
@@ -2165,6 +2212,10 @@ function maskCut(s, letters) {
     }
     if (j === i || !mixed) continue
     const run = words.slice(i, j + 1)
+    // a run that spans one of our own masks is the text's two readings, not a
+    // key cut up: the masks' ellipses are not key characters, and joining the
+    // words round them made a new "key" out of "4e5f 012345 abcdefgh·AKIA…"
+    if (run.some((x) => x[0].includes(MASKED))) continue
     // a run of words that are each prose-shaped ("Rebecca Deborah Bradford")
     // is two runs of words, not a key
     if (run.every((x) => /^[a-z]{3,}$/i.test(x[0]))) continue

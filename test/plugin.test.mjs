@@ -12614,3 +12614,20 @@ test("a ledger whose total grows is walked to its new end, not the old one", asy
     }
   }
 })
+
+test("a plain word in capitals in front of a key stays on the card", () => {
+  // maskCaps used to start its join at the first word that could begin one
+  // ("ABCD") and read on into the key after it, so the whole run came out as
+  // one mask and the ordinary word went with it. The join now starts at the
+  // shortest form that already reads as a key.
+  for (const [v, kept] of [
+    ["ABCD AKIA0123456789ABCDEF12 AKIA0123456789ABCDEF12", "ABCD "],
+    ["ABCD\nAKIA0123456789ABCDEF12\nAKIA0123456789ABCDEF12", "ABCD\n"],
+    ["bonus AKIA0123456789ABCDEF12 AKIA0123456789ABCDEF12", "bonus "],
+  ]) {
+    const out = testables.maskAll(v, true)
+    assert.ok(out.startsWith(kept), `the word in front went into the mask: ${JSON.stringify(out)}`)
+    assert.ok(out.includes("…"), `the key went unmasked: ${JSON.stringify(out)}`)
+    assert.ok(!out.includes("ABCDEF12 "), "the tail of the key stayed")
+  }
+})
