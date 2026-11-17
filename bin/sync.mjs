@@ -1618,31 +1618,56 @@ const joinedKey = (s) => {
 // the body, which is right for a page of one-character words and wrong for a
 // key in the tail of a long echo: arg() cuts at this size first.
 const CHUNK = 32 * 1024
-// chunked cuts text too long for one reading into pieces under CHUNK, at a
-// line break where there is one and at whitespace otherwise, keeping every
-// separator on the piece it ends so the join reproduces the input exactly.
-// A piece longer than CHUNK with no line break and no whitespace (one huge
-// token) is cut at the size, because a key cannot be longer than that either.
+// chunked cuts text too long for one reading into pieces under CHUNK.
+//
+// The cut is at a WORD boundary and the straddling word goes with the piece
+// after it: a key cut between its own words ("AKIAAAAA AAAA1AAA AAAA") is two
+// pieces too short to read, and both printed — that was a leak the first
+// version of this fix had. A line break is preferred, then a space or tab.
+// One unbroken run with no boundary at all is cut at the size; a key is never
+// that long, and a piece must stay under CHUNK or arg() recurses into itself.
+const OVERLAP = 256
 function chunked(text) {
-  if (text.length <= CHUNK) return [text]
-  const out = []
+  if (text.length <= CHUNK) return [{ text, carry: 0 }]
+  const pieces = []
   let at = 0
   while (at < text.length) {
-    let end = Math.min(at + CHUNK, text.length)
+    const back = Math.min(OVERLAP, at)
+    const limit = at + CHUNK - back
+    let end = Math.min(limit, text.length)
     if (end < text.length) {
-      // prefer a newline, then a space, then a tab: the last one at or
-      // before the cut. A separator is part of the piece it ends.
       const window = text.slice(at, end)
       const nl = window.lastIndexOf("\n")
-      const sp = nl >= 0 ? -1 : window.lastIndexOf(" ")
-      const tb = nl >= 0 || sp >= 0 ? -1 : window.lastIndexOf("\t")
-      const cutAt = nl >= 0 ? nl + 1 : sp >= 0 ? sp + 1 : tb >= 0 ? tb + 1 : -1
-      if (cutAt > 0) end = at + cutAt
+      if (nl > 0) {
+        end = at + nl + 1
+      } else {
+        // the last space or tab in the window, then back over the word it
+        // ends so that word is not split; if that would give up more than a
+        // quarter of the window, the run has no usable boundary and the cut
+        // stays at the size
+        let k = Math.max(window.lastIndexOf(" "), window.lastIndexOf("\t"))
+        if (k > 0) {
+          let start = k
+          while (start > 0 && /[A-Za-z0-9+/=_.-]/.test(window[start - 1])) start -= 1
+          if (start > 0 && limit - (at + start) < (CHUNK * 3) / 4) end = at + start
+        }
+      }
     }
-    out.push(text.slice(at, end))
+    if (end <= at) end = Math.min(limit, text.length)
+    // a cut made at the size can leave the next piece starting inside a run
+    // of key characters: 32 700 "y"s then the rest of the run read as one
+    // long key of their own, and the run was masked away. A piece starts at a
+    // word boundary, or (when the run has none) after the run has ended.
+    if (at > 0 && end < text.length && /[A-Za-z0-9+/=_.-]/.test(text[at]) && /[A-Za-z0-9+/=_.-]/.test(text[at - 1])) {
+      let k = at
+      while (k < text.length && /[A-Za-z0-9+/=_.-]/.test(text[k])) k += 1
+      if (k - at < CHUNK / 2) at = k
+    }
+    const skip = Math.min(back, at)
+    pieces.push({ text: text.slice(at - skip, end), carry: skip })
     at = end
   }
-  return out
+  return pieces
 }
 
 export function arg(v) {
@@ -1656,7 +1681,17 @@ export function arg(v) {
   // whole while a 30 075-character one masked it. Cutting first means the
   // skip is never reached by a whole page — only by a chunk-sized body of
   // one-character words, which is what it was written for.
-  if (orig.length > CHUNK) return chunked(orig).map((c) => arg(c)).join("")
+  if (orig.length > CHUNK) {
+    const parts = chunked(orig)
+    let out = ""
+    for (const { text, carry } of parts) {
+      const read = arg(text)
+      // the carry was read by the piece before it: its result is already in
+      // `out`, so only what follows it is appended
+      out += carry === 0 ? read : read.slice(carry)
+    }
+    return out
+  }
   // the glue is one pass over the value, and all three readings below ask the
   // same question of the same characters: it is removed once and handed to each
   // ("glue" is the value with an invisible character between two key characters

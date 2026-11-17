@@ -912,6 +912,7 @@ test("a relative MAGPIE_MSMOLI_CONFIG is not resolved against the host's cwd", a
   try {
     const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async () => {} } } })
     let reads = 0
+    let pasted = false
     const real = globalThis.fetch
     globalThis.fetch = async (url) => {
       const u = new URL(url)
@@ -4052,6 +4053,7 @@ test("a second check-in in the same process does not write the name again", asyn
     const withClient = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
     const token = "ms-nametest-0000-0000-0000-000000000011"
     let reads = 0
+    let pasted = false
     const real = globalThis.fetch
     globalThis.fetch = async (url) => {
       const path = new URL(url).pathname
@@ -10129,6 +10131,7 @@ test("an upper-cased, full-width or chunked nickname is refused and masked", asy
     delete process.env.MAGPIE_MSMOLI_CONFIG
     const writes = []
     let reads = 0
+    let pasted = false
     const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => { writes.push(o) } } } })
     try {
       await withFetch(
@@ -12500,5 +12503,114 @@ test("a key beside a mask is masked whatever shape the key has", () => {
   // and a word whose only key-looking part is the mask is still left alone
   for (const v of ["x ms-a…5555 y", "AKIA…XDKO/L3,", "not foundNickName=[sk-a…g4/M]not found"]) {
     assert.equal(testables.cardText(v, "", 1e9), v, `a mask was read again: ${JSON.stringify(v)}`)
+  }
+})
+
+test("a key pasted in while the hook runs is not overwritten by the write-back", async () => {
+  // auth.set replaces the whole sign-in and the host only refuses a write when
+  // the ACCOUNT is gone, so a new key pasted in between the re-read and the
+  // write was replaced with the old one — and the fields the user added went
+  // with it. The plugin reads once more right before writing and drops the
+  // write when the sign-in no longer carries its token.
+  testables.sites.clear()
+  const dir = tmpDir("msmoli-rerace-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const oldKey = "ms-old-0000-0000-0000-000000000031"
+    const newKey = "ms-new-0000-0000-0000-000000000032"
+    const writes = []
+    let reads = 0
+    let pasted = false
+    const p = await MsmoliPlugin({
+      directory: dir,
+      client: { auth: { set: async (o) => writes.push(o) } },
+    })
+    const responses = {
+      [TX_PATH]: {
+        body: { success: true, data: { records: [{ gmt_created: today, type: "EARN", rule_key: "daily_active", total_amount: 200 }] } },
+      },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "carol" } } },
+    }
+    await withUrlFetch(responses, async () => {
+      await p.auth.checkin(async () => {
+        reads += 1
+        // the hook reads once when it starts, then once more just before the
+        // write-back. The user pastes a new key right after the LAST read the
+        // plugin makes has already been answered with the old one: only a read
+        // that happens after this one can notice it, and only the plugin's
+        // pre-write read can be that one.
+        if (reads >= 2) queueMicrotask(() => { pasted = true })
+        return { type: "api", key: pasted ? newKey : oldKey, site: pasted ? "https://modelscope.cn" : undefined }
+      })
+    })
+    assert.ok(reads >= 3, `a read must follow the one the user changed after: ${reads}`)
+    assert.equal(writes.length, 0, `a sign-in holding another key was overwritten: ${JSON.stringify(writes)}`)
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a refused token on a later ledger page is reported as expired", async () => {
+  // The first page's gate reads ModelScope's 200 + {"Code":401} as a refusal.
+  // The pages after it only looked at the HTTP status, so the same answer on
+  // page two read as "a page this walk could not read": the card said the
+  // number was low and the host kept retrying a dead token as a broken ledger.
+  for (const status of [200, 401]) {
+    testables.sites.clear()
+    const token = `ms-late-refusal-0000-0000-0000-00000000${status}`
+    const records = Array.from({ length: 50 }, (_, i) => ({
+      id: i + 1, gmt_created: today, type: "SPEND_CONFIRM", total_amount: 1,
+    }))
+    const p = await MsmoliPlugin({ directory: "/nonexistent-review" })
+    const real = globalThis.fetch
+    globalThis.fetch = async (url) => {
+      const u = new URL(url)
+      if (u.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 100 } } })
+      if (u.searchParams.get("page") === "1") return reply({ body: { success: true, data: { total: 51, records } } })
+      return reply({ status, body: { Code: 401, Success: false, Message: "unauthorized" } })
+    }
+    try {
+      for (const method of ["usage", "checkin"]) {
+        const r = await p.auth[method](async () => ({ type: "api", key: token }))
+        assert.equal(r.signIn, "expired", `${method} at ${status}: a refused token did not read as an expiry: ${JSON.stringify(r)}`)
+      }
+    } finally {
+      globalThis.fetch = real
+    }
+  }
+})
+
+test("a ledger whose total grows is walked to its new end, not the old one", async () => {
+  // streakOf stopped when the rows it held reached the `total` of the FIRST
+  // page. A ledger whose second page says it holds one row more (a grant
+  // landing while the walk ran) was stopped one page early, and a 4-day
+  // streak was reported as 3.
+  const prev = (d) => new Date(Date.parse(`${d}T00:00:00Z`) - 86400e3).toISOString().slice(0, 10)
+  const d1 = today, d2 = prev(today), d3 = prev(d2), d4 = prev(d3)
+  const row = (id, day, type = "EARN") => ({ id, gmt_created: day, type, rule_key: "daily_active", total_amount: 200 })
+  const first = [row(1, d1), row(2, d2), ...Array.from({ length: 48 }, (_, i) => row(i + 3, d2, "EXPIRE"))]
+  const second = [row(51, d3), ...Array.from({ length: 49 }, (_, i) => row(i + 52, d3, "EXPIRE"))]
+  const third = [row(101, d4)]
+  for (const firstTotal of [100, 101]) {
+    testables.sites.clear()
+    const real = globalThis.fetch
+    globalThis.fetch = async (url) => {
+      const u = new URL(url)
+      if (u.pathname.endsWith("/login/info")) return reply({ body: { success: true, data: { Name: "" } } })
+      const page = Number(u.searchParams.get("page"))
+      const records = page === 1 ? first : page === 2 ? second : page === 3 ? third : []
+      return reply({ body: { success: true, data: { total: page === 1 ? firstTotal : 101, records } } })
+    }
+    try {
+      const p = await MsmoliPlugin({ directory: "/nonexistent-review" })
+      const key = `ms-grow${firstTotal}-0000-0000-0000-000000000`
+      const r = await p.auth.checkin(async () => ({ type: "api", key }))
+      assert.equal(r.streak, 4, `first page said ${firstTotal}: ${JSON.stringify(r)}`)
+    } finally {
+      globalThis.fetch = real
+    }
   }
 })

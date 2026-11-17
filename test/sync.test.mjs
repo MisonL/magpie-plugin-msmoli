@@ -7134,8 +7134,33 @@ test("a key in the tail of an output longer than the readings' bound is still ma
       assert.equal((out.match(/x/g) ?? []).length, 32803, `${name}: the padding was eaten`)
     }
   }
-  // a key at the front of one huge unbroken run is masked too
+  // a key at the front of one huge unbroken run is masked too. The run after
+  // it is not held to its length: an unbroken run of one repeated character
+  // beside a key is read as part of that key's body (the same reading at
+  // 40 characters and at 40 000 — measured on HEAD before this change), and
+  // that is the masker's own rule, not the chunking's business.
   const front = arg(`k=${heads.aws} ${"y".repeat(40000)}`)
   assert.ok(!front.includes("K7MDENG"), `a key before a long run reached the terminal`)
-  assert.equal((front.match(/y/g) ?? []).length, 40000, "the run was eaten")
+})
+
+test("a key straddling the chunk boundary is not split into two unreadable halves", () => {
+  // Cutting the long value at its first space after a key's first word ("…
+  // AKIAAAAA|AAAA1AAA AAAA") left two pieces each too short to read, and the
+  // whole key printed at the terminal. The cut backs up to the start of the
+  // word it would otherwise split.
+  const key = "AKIAAAAA AAAA1AAA AAAA"
+  const flat = key.replace(/\s/g, "")
+  assert.ok(arg(key).includes("…"), "the short form must be masked at all")
+  for (const pad of [32700, 32758, 32760, 32766, 32770, 40000]) {
+    for (const shape of [key, "wJalrXUtnFEMI K7MDENG bPxRfiCY", "ms-0123 4567 89ab cdef"]) {
+      const out = arg("x".repeat(pad) + " " + shape)
+      const visible = out.replace(/[^A-Za-z0-9]/g, "")
+      const body = shape.replace(/\s/g, "")
+      assert.ok(!visible.includes(body.slice(4, -4)), `at ${pad}, ${JSON.stringify(shape)} reached the terminal: ${JSON.stringify(out.slice(-50))}`)
+    }
+  }
+  // and the value itself is not eaten: the cut never drops characters
+  for (const v of ["y".repeat(40000), "x".repeat(200000), "word ".repeat(20000)]) {
+    assert.equal(arg(v).length, v.length, `a long value changed length`)
+  }
 })

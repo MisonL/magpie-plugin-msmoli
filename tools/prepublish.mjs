@@ -57,12 +57,15 @@ const modes = [
   { name: "bun test", cmd: "bun", args: ["test"], optional: true },
 ]
 
-// the runner's own summary, whichever one wrote it: Node's reporter prints
-// "ℹ pass 676", Bun's prints " 676 pass"
+// the runner's own summary, whichever one wrote it: Node 24's reporter prints
+// "ℹ pass 676", Node 18 and 22 print the TAP form "# pass 676", and Bun prints
+// " 676 pass". Node 18 is the engine floor in package.json, so a summary this
+// could not read was a gate that passed on a count it never had.
 const passedOf = (out) => {
   const node = /^ℹ pass (\d+)$/m.exec(out)
+  const tap = /^# pass (\d+)$/m.exec(out)
   const bun = /^\s*(\d+) pass$/m.exec(out)
-  return Number(node?.[1] ?? bun?.[1] ?? NaN)
+  return Number(node?.[1] ?? tap?.[1] ?? bun?.[1] ?? NaN)
 }
 
 let failed = false

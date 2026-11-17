@@ -1041,11 +1041,13 @@ const hasHexRun = (m) => {
   let run = 0
   for (let i = 0; i <= m.length; i += 1) {
     const c = m[i]
-    if (c >= "0" && c <= "9" || c >= "a" && c <= "f") {
+    // a hex digit in either case: an upper-cased copy of a key ("MS-ABCDEF")
+    // is the same key, and its letters are no "word" for the lookahead below
+    if (c >= "0" && c <= "9" || c >= "a" && c <= "f" || c >= "A" && c <= "F") {
       run += 1
       continue
     }
-    if (run >= 11 && !(c >= "0" && c <= "9" || c >= "g" && c <= "z")) return true
+    if (run >= 11 && !(c >= "0" && c <= "9" || c >= "g" && c <= "z" || c >= "G" && c <= "Z")) return true
     run = 0
   }
   return false
@@ -1995,7 +1997,13 @@ const maskCaps = (s, letters) => {
       i = j + 1
       continue
     }
-    i = j + 1
+    // A failing join is not evidence about what follows it: a run of
+    // capitals with no digit in it ("ABCD ABCD …") is prose by the rhythm
+    // rule, and the key after it ("… 12ABCD EFGH") starts inside the same
+    // run. Skipping the whole failed join put the next start past the key,
+    // and 84 characters of it went out in the clear. Only a join that
+    // MASKED is skipped whole; a failed one moves on by one word.
+    i += 1
   }
   return out.join("") + s.slice(from)
 }
@@ -2210,9 +2218,15 @@ const maskKeys = (s, letters = true) => {
     // is no word isKeyWord can name).
     const maskHit = WORD_MASK.exec(word)
     if (maskHit) {
-      const rest = word.slice(0, maskHit.index) + word.slice(maskHit.index + maskHit[0].length)
-      if (!restKey(rest, letters)) return word
-      return word.slice(0, maskHit.index) + maskHit[0] + maskKeys(word.slice(maskHit.index + maskHit[0].length), letters)
+      const head = word.slice(0, maskHit.index)
+      const tail = word.slice(maskHit.index + maskHit[0].length)
+      // (each side is judged and read on its own: a key in FRONT of the mask
+      // ("ghp_…!abcd…efg") was left whole when only the tail was recursed
+      // into, and the head was never asked about at all)
+      const ahead = restKey(head, letters)
+      const abaft = restKey(tail, letters)
+      if (!ahead && !abaft) return word
+      return (ahead ? maskKeys(head, letters) : head) + maskHit[0] + (abaft ? maskKeys(tail, letters) : tail)
     }
     const folded = word.normalize("NFKC").replace(/\uFF0D/g, "-")
     // (the word as written is what is masked, and the folded copy is what is
@@ -2622,6 +2636,25 @@ async function rememberAccountFields(client, token, learned, auth, dir, budgetEn
   // this key is not this key's account any more: the facts learned here are
   // about a token it no longer carries, so nothing is written.
   let base = auth
+  // readBase re-reads the sign-in. It runs once here and once more just
+  // before the write: auth.set replaces the whole entry, and the host only
+  // refuses a write when the ACCOUNT is gone, so a key pasted in between the
+  // read and the write was overwritten with the old one (and a field added
+  // with it). The second read is the last word on whether this is still the
+  // same account; the window left after it is one store round-trip the plugin
+  // cannot close from here.
+  const readBase = async (capEnd) => {
+    if (typeof getAuth !== "function") return auth
+    const cap = Math.max(0, Math.min(WRITE_WAIT_MS, capEnd - Date.now()))
+    if (cap <= 0) return undefined
+    try {
+      const now = await waitFor(Promise.resolve().then(getAuth), cap)
+      if (now === undefined || tokenOf(now) !== token) return undefined
+      return now
+    } catch {
+      return undefined
+    }
+  }
   if (typeof getAuth === "function") {
     try {
       // The read is host I/O like the write: it takes the same store lock and
@@ -2668,6 +2701,14 @@ async function rememberAccountFields(client, token, learned, auth, dir, budgetEn
   const wantName =
     !!name && base?.accountId !== name && !cooling && aliasOf(ID, dir, labelOf(base, token)) === ""
   if (!wantName && !wantSite && !wantClear) return
+  // the last read before the write: a key replaced since the read above is
+  // not this token's account any more, and nothing is written over it
+  if (typeof getAuth === "function") {
+    const fresh = await readBase(budgetEnd)
+    if (fresh === undefined) return
+    // only the facts are re-decided; a `base` that changed shape is fine
+    base = fresh
+  }
   if (wantName) {
     named.delete(token)
     named.set(token, Date.now())
@@ -3073,6 +3114,19 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
       }
       throw deadToken(profile.where, token)
     }
+    // ModelScope's login layer answers a refused token inside a 200
+    // ({"Code":401,"Success":false}) — the first page's gate reads that, and
+    // this walk must too: read as "a page it could not read", the expiry was
+    // never reported and the host kept retrying the dead token as a broken
+    // ledger.
+    if (got.parsed && res.status === 200 && !okOf(got.body) && String(got.body?.Code ?? got.body?.code ?? "") === "401" && awaitsSignIn(got.body)) {
+      if (dayDone) {
+        complete = true
+        refused = true
+        break
+      }
+      throw deadToken(profile.where, token)
+    }
     if (!got.parsed || res.status !== 200 || !okOf(got.body)) {
       if (dayDone) complete = true
       break
@@ -3315,6 +3369,7 @@ async function streakOf(records, day, total, readPage, deadline) {
     // the ledger contradicting itself, and nothing after this can be trusted
     // to be the end of the run; with no `total`, it is the end of the ledger.
     if (!more.length) return total === null ? n : undefined
+    if (typeof more.said === "number" && more.said > (total ?? 0)) total = more.said
     daysWithGrant(more, days)
     records = more
     held += more.length
@@ -3361,6 +3416,12 @@ const ledgerReader = (profile, token, deadline, from = 1, first = null, seenPage
       const fresh = rows.filter((r) => !counted.has(rowKey(r)))
       for (const r of fresh) counted.add(rowKey(r))
       if (!fresh.length) return null
+      // the page hands back what the ledger now says it holds: a total that
+      // grew since the first page ("total":100 → 101) was invisible to the
+      // walk, which then stopped one row early and told a 4-day streak as 3.
+      // `said` is the number the server printed; a short page's own row count
+      // is not evidence about the pages after it
+      fresh.said = totalOf(body, rows).said
       return fresh
     } catch (e) {
       // a 401 the gate confirmed is the token refused; the walk still gives up

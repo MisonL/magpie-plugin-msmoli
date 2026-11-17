@@ -1,0 +1,13 @@
+# GitGuardian runs on this repository as an integration and flags "Generic
+# High Entropy Secret" in the test fixtures: every key shape this plugin masks
+# (ghp_, sk-ant-, AKIA, ms-, xox-) has a fixture that looks like the real
+# thing, because the tests are about exactly those shapes. The fixtures are
+# invented from scratch (repeated words, "example" runs, sequence digits), and
+# none of them is a credential.
+#
+# The tests are the only place such strings live, so they are what this
+# config sets aside. Everything else in the repository is scanned as usual.
+version: 2
+secret:
+  ignored-paths:
+    - "test/**"
