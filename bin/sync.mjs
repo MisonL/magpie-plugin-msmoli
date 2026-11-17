@@ -1614,8 +1614,49 @@ const joinedKey = (s) => {
   return rest.length >= 11 && /\d/.test(rest) && /^[A-Za-z0-9+/=_.-]+$/.test(rest)
 }
 
+// the longest body the whole-text readings take. Past it each reading skips
+// the body, which is right for a page of one-character words and wrong for a
+// key in the tail of a long echo: arg() cuts at this size first.
+const CHUNK = 32 * 1024
+// chunked cuts text too long for one reading into pieces under CHUNK, at a
+// line break where there is one and at whitespace otherwise, keeping every
+// separator on the piece it ends so the join reproduces the input exactly.
+// A piece longer than CHUNK with no line break and no whitespace (one huge
+// token) is cut at the size, because a key cannot be longer than that either.
+function chunked(text) {
+  if (text.length <= CHUNK) return [text]
+  const out = []
+  let at = 0
+  while (at < text.length) {
+    let end = Math.min(at + CHUNK, text.length)
+    if (end < text.length) {
+      // prefer a newline, then a space, then a tab: the last one at or
+      // before the cut. A separator is part of the piece it ends.
+      const window = text.slice(at, end)
+      const nl = window.lastIndexOf("\n")
+      const sp = nl >= 0 ? -1 : window.lastIndexOf(" ")
+      const tb = nl >= 0 || sp >= 0 ? -1 : window.lastIndexOf("\t")
+      const cutAt = nl >= 0 ? nl + 1 : sp >= 0 ? sp + 1 : tb >= 0 ? tb + 1 : -1
+      if (cutAt > 0) end = at + cutAt
+    }
+    out.push(text.slice(at, end))
+    at = end
+  }
+  return out
+}
+
 export function arg(v) {
   const orig = String(v ?? "")
+  // A value far longer than any value a person types — a child process's
+  // verbose error, a page dumped to stderr — is cut into chunks and each
+  // chunk read through this function. Every whole-text reading below skips a
+  // body past 32 KiB (each is a scan over the whole text, and a page that
+  // long is not one key cut up), so a key in the tail of one went out in the
+  // clear: measured, a 32 841-character echo with an AWS secret printed it
+  // whole while a 30 075-character one masked it. Cutting first means the
+  // skip is never reached by a whole page — only by a chunk-sized body of
+  // one-character words, which is what it was written for.
+  if (orig.length > CHUNK) return chunked(orig).map((c) => arg(c)).join("")
   // the glue is one pass over the value, and all three readings below ask the
   // same question of the same characters: it is removed once and handed to each
   // ("glue" is the value with an invisible character between two key characters
@@ -1761,15 +1802,17 @@ const foldedSpans = (raw) => {
 function argRun(text) {
   // a body of many KiB of one-character words (a pretty-printed page) costs
   // far more reading than the masking is worth here: past 32 KiB the cut
-  // reading is skipped and the per-word pass (linear) still runs
+  // reading is skipped and the per-word pass (linear) still runs. arg() hands
+  // this function at most one chunk (see CHUNK above), so the skip is reached
+  // only by a chunk-sized body, never by a whole page.
   if (text.length > 32 * 1024) return argWords(text)
+  let s = text
   // The two readings the body has are applied together, until neither finds
   // anything: the whitespace routes (maskCut, and capsRun for a vendor key
   // written without its spaces, "AKIAIOSF ODNN7EXA MPLE") each mask what they
   // join, and argWords then judges every word the join did not take. One
   // pass of each per round, so a round over ordinary text is a couple of
   // scans, not a dozen.
-  let s = text
   for (let n = 0; n < 4; n += 1) {
     const next = argWords(maskCut(capsRun(s)))
     if (next === s) break

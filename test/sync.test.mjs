@@ -7113,3 +7113,29 @@ test("a long line of masks is read in one pass, not one squaring pass", () => {
   // of them is read as a cut
   assert.equal(out, s)
 })
+
+test("a key in the tail of an output longer than the readings' bound is still masked", () => {
+  // Every whole-text reading skips a body past 32 KiB, and arg() used to hand
+  // the whole value to them: a child process's long error masked a key at
+  // 30 075 characters and printed the same key at 32 841. The value is cut
+  // into chunks first, so the bound is never reached by a whole page.
+  const pad = "x".repeat(32803)
+  const heads = {
+    aws: "wJalrXUtnFEMI K7MDENG bPxRfiCY",
+    split_aws_id: "AKIAIOSF ODNN7EXA MPLE",
+    caps: "ZQXJKVBW MNPY7HTR",
+    uuid: "123e4567-e89b 12d3-a456-426614174000",
+  }
+  const marks = { aws: "K7MDENG", split_aws_id: "ODNN7EXA M", caps: "MNPY7HTR", uuid: "12d3-a456" }
+  for (const [name, key] of Object.entries(heads)) {
+    for (const v of [`${pad} k=${key} tail`, `${pad}\nk=${key} tail`]) {
+      const out = arg(v)
+      assert.ok(!out.includes(marks[name]), `${name} reached the terminal: ${JSON.stringify(out.slice(-60))}`)
+      assert.equal((out.match(/x/g) ?? []).length, 32803, `${name}: the padding was eaten`)
+    }
+  }
+  // a key at the front of one huge unbroken run is masked too
+  const front = arg(`k=${heads.aws} ${"y".repeat(40000)}`)
+  assert.ok(!front.includes("K7MDENG"), `a key before a long run reached the terminal`)
+  assert.equal((front.match(/y/g) ?? []).length, 40000, "the run was eaten")
+})

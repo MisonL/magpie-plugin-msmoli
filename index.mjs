@@ -1115,12 +1115,24 @@ const MASKED = "…"
 // whole key after it — and the word is read.
 const WORD_MASK = /[A-Za-z0-9_+\/=-]{1,4}…[A-Za-z0-9]{1,4}(?![A-Za-z0-9_])/
 // what is left of a word once a mask's shape is taken out of it, when that
-// rest still reads as a key: a vendor's front, or a long run of key characters
-// with a digit in it (a name beside the mask — "providerNickName=[" — has the
-// run and no digit, and is not key material)
+// rest still reads as key material. The question is the word pass's own —
+// isKeyWord over every run of key characters the rest holds — not a second
+// set of shape rules beside it: a rest of mixed case ("AbCdEfGhIjKlMnOp"), of
+// base64 ("dGhpc2lzYQ==") and of eleven hex digits are all keys to isKeyWord,
+// and each was printed whole when this listed only vendor fronts and long
+// runs with a digit in them. A name beside the mask ("providerNickName=[")
+// reads as no key there either, so it stays skipped as before.
 const REST_VENDOR = /sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|ms-|akia|asia|aida|aliyun|ssh-rsa/i
-const REST_RUN = /[A-Za-z0-9_+\/=-]{16,}/
-const restKey = (w) => REST_VENDOR.test(w) || (REST_RUN.test(w) && /[0-9]/.test(w))
+// the value of a frame ("efg=" / "NickName=[") is the key's own span; the
+// name in front of it is what made the run read as one word, and isKeyWord
+// judges a word, so the name has to come off first
+const REST_NAME = /^[A-Za-z_][A-Za-z0-9_]*[=:[]/
+const REST_RUN = /[A-Za-z0-9_+\/=-]{8,}/g
+// (a frame's own punctuation is not the key's: "=dGhpc2lzYQ==" is the value
+// behind the "=" the cut fell on)
+const restKey = (w, letters) =>
+  REST_VENDOR.test(w) ||
+  [...w.matchAll(REST_RUN)].some((m) => isKeyWord(m[0].replace(REST_NAME, "").replace(/^[=:\[]+/, ""), letters))
 // the length at which a run is long enough to be a key: the floor every
 // reading asks for, and all a mask needs to show
 const RUNCUT = 20
@@ -2191,8 +2203,17 @@ const maskKeys = (s, letters = true) => {
     // has a mask's shape on the left and a whole key on the right, and
     // skipping the word printed the key. Only a word with nothing else in it
     // that reads as key material is left as written.
+    // A word carrying a mask and nothing else that reads as key material is
+    // left as written; one carrying a key beside the mask is read in parts:
+    // the mask stays, and each piece around it is judged on its own ("abcd…
+    // efg=<key>" kept the key, because the whole word with the ellipsis in it
+    // is no word isKeyWord can name).
     const maskHit = WORD_MASK.exec(word)
-    if (maskHit && !restKey(word.slice(0, maskHit.index) + word.slice(maskHit.index + maskHit[0].length))) return word
+    if (maskHit) {
+      const rest = word.slice(0, maskHit.index) + word.slice(maskHit.index + maskHit[0].length)
+      if (!restKey(rest, letters)) return word
+      return word.slice(0, maskHit.index) + maskHit[0] + maskKeys(word.slice(maskHit.index + maskHit[0].length), letters)
+    }
     const folded = word.normalize("NFKC").replace(/\uFF0D/g, "-")
     // (the word as written is what is masked, and the folded copy is what is
     // judged \u2014 but only the key's own span of it: a word's prose is the

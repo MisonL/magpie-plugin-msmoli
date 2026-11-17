@@ -12400,10 +12400,13 @@ test("the join's cap still refuses prose in capitals whatever its length", () =>
 
 test("a mask-shaped span followed by '=' and a key is not mistaken for the mask itself", () => {
   // WORD_MASK's left side included "=" as key material. A word like
-  // "abcd…efg=ghp_16C7abcdefghijklmnop" was therefore left as written: the
-  // four characters before the ellipsis and the four after read as our mask,
-  // so the whole word was skipped and the key after "=" stayed in the clear.
-  const key = "ghp_16C7abcdefghijklmnop"
+  // "abcd…efg=<a ghp_ key>" was therefore left as written: the four
+  // characters before the ellipsis and the four after read as our mask, so
+  // the whole word was skipped and the key after "=" stayed in the clear.
+  // (the fixture is deliberately made of repeated letters and an obvious
+  // "example" run: a high-entropy fake still trips secret scanners, and a
+  // false alert buries the real one)
+  const key = "ghp_exampleexampleexampleexample"
   const value = `abcd…efg=${key}`
   const out = testables.cardText(`key ${value} here`, "")
   assert.ok(!out.includes(key), `the key after '=' stayed: ${JSON.stringify(out)}`)
@@ -12476,4 +12479,26 @@ test("a long run of hex digits is read in linear time", { timeout: 60_000 }, () 
   // lower-case letter or digit is key material
   assert.equal(testables.keyBody.test("0123456789abcdef01"), true)
   assert.equal(testables.keyBody.test("f".repeat(32) + "g"), false)
+})
+
+test("a key beside a mask is masked whatever shape the key has", () => {
+  // The guard that leaves one of our own masks alone judged the rest of the
+  // word by a second, narrower set of shapes than the word pass uses: mixed
+  // case, base64 and a long run were keys to isKeyWord and not to the guard,
+  // so the word was skipped and the key printed whole. The guard asks the
+  // word pass's own question now, and the mask stays where it is while each
+  // piece around it is read on its own.
+  for (const [v, key] of [
+    ["abcd…efg=AbCdEfGhIjKlMnOp done", "AbCdEfGhIjKlMnOp"],
+    ["abcd…efg]XyZqWvTsRpOnMlKjIhGf done", "XyZqWvTsRpOnMlKjIhGf"],
+    ["abcd…efg=dGhpc2lzYQ== done", "dGhpc2lzYQ=="],
+  ]) {
+    const out = testables.cardText(v, "", 1e9)
+    assert.ok(!out.includes(key), `the key beside a mask stayed: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    assert.ok(out.includes("…"), `both masks must survive: ${JSON.stringify(out)}`)
+  }
+  // and a word whose only key-looking part is the mask is still left alone
+  for (const v of ["x ms-a…5555 y", "AKIA…XDKO/L3,", "not foundNickName=[sk-a…g4/M]not found"]) {
+    assert.equal(testables.cardText(v, "", 1e9), v, `a mask was read again: ${JSON.stringify(v)}`)
+  }
 })
