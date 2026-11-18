@@ -265,6 +265,11 @@ MSMOLI_FAKE_NOW=1893456000000 node --test               # the whole clock shifte
 bun test                                                # the runtime magpie actually runs plugins on
 ```
 
+`npm test` is the bare `node --test` above, not a fifth mode. The
+`MSMOLI_FAKE_NOW=…` line is POSIX shell syntax; in PowerShell or cmd, set the
+variable first (`$env:MSMOLI_FAKE_NOW='1893456000000'`, then `node --test`),
+which is what CI does with an `env:` block.
+
 The ticking-clock run makes a fixture that reads the clock twice (once to build,
 once to expect) fail every time instead of one run in a thousand; the shifted
 clock makes a fixture pinned to the calendar day it runs break. The bun run is
