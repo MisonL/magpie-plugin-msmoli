@@ -332,7 +332,9 @@ npm version <patch|minor> -m "v%s — <one line>"
 git push origin main --tags
 npm publish                     # prepublishOnly runs every mode again, and
                                 # checks each one's own count: a mode that
-                                # found no tests is not a green mode
+                                # found no tests is not a green mode. Bun is
+                                # optional here — skipped when it is not
+                                # installed, and CI's bun job covers it
 gh release create "v$(node -p 'require("./package.json").version')" \
   --title "v$(node -p 'require("./package.json").version')" --verify-tag --generate-notes
 ```

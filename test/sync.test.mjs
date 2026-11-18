@@ -7180,3 +7180,19 @@ test("the text after a key that straddles a chunk boundary is kept", () => {
     assert.equal((out.match(/x/g) ?? []).length, pad, `at ${pad}, the padding changed`)
   }
 })
+
+test("a word longer than a chunk loses nothing at the chunk's start", () => {
+  // A piece begins mid-word when the cut before it backed up to a space. The
+  // next piece then snapped its start forward to the end of that word — but
+  // used the ORIGINAL start to decide, and the span between them was read by
+  // neither piece: 32768 characters of an unbroken run reached the terminal
+  // where the input had 33000. The snap must move the start it writes, not
+  // just the end.
+  for (const run of [32769, 33000, 40000, 49000]) {
+    const v = "x".repeat(run) + " invalid " + "y".repeat(40000)
+    const out = arg(v)
+    assert.equal((out.match(/x/g) ?? []).length, run, `at ${run}, characters at the chunk's start were dropped`)
+    assert.equal((out.match(/y/g) ?? []).length, 40000, `at ${run}, the tail was dropped`)
+    assert.ok(out.includes("invalid"), `at ${run}, the word after the run was dropped`)
+  }
+})

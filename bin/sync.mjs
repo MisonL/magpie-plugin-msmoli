@@ -1654,17 +1654,25 @@ function chunked(text) {
       }
     }
     if (end <= at) end = Math.min(limit, text.length)
+    // the carry is a copy of the tail of the PREVIOUS piece, read again so a
+    // key the cut split is still whole for this one. It is counted back from
+    // the start of this piece's own text, which is `at` — so it is taken
+    // before anything moves that start.
+    const skip = Math.min(back, at)
     // a cut made at the size can leave the next piece starting inside a run
     // of key characters: 32 700 "y"s then the rest of the run read as one
     // long key of their own, and the run was masked away. A piece starts at a
     // word boundary, or (when the run has none) after the run has ended.
+    // Moving `at` forward here used to leave the span it skipped over read by
+    // neither piece: 32 768 "x"s reached the terminal where the input had
+    // 33 000. The span is this piece's now — it starts where the old one did.
+    let start = at - skip
     if (at > 0 && end < text.length && /[A-Za-z0-9+/=_.-]/.test(text[at]) && /[A-Za-z0-9+/=_.-]/.test(text[at - 1])) {
       let k = at
       while (k < text.length && /[A-Za-z0-9+/=_.-]/.test(text[k])) k += 1
       if (k - at < CHUNK / 2) at = k
     }
-    const skip = Math.min(back, at)
-    pieces.push({ text: text.slice(at - skip, end), carry: skip })
+    pieces.push({ text: text.slice(start, end), carry: skip })
     at = end
   }
   return pieces
