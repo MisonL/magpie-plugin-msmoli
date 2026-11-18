@@ -7242,7 +7242,10 @@ test("--version reads the manifest through a symlinked entry", () => {
   // declares its version.
   const fresh = mkdtempSync(join(tmpdir(), "msmoli-version-"))
   try {
-    const link = join(fresh, "magpie-plugin-msmoli")
+    // the link needs the .mjs extension of what it points at: Node infers the
+    // module type from the ENTRY's name, and a link called without one is read
+    // as CommonJS on 18 and 20
+    const link = join(fresh, "magpie-plugin-msmoli.mjs")
     symlinkSync(bin, link)
     const r = spawnSync(process.execPath, ["--preserve-symlinks-main", link, "--version"], { encoding: "utf8", timeout: 30_000 })
     assert.equal(r.status, 0, r.stderr)
