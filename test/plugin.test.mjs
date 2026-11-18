@@ -12865,6 +12865,32 @@ test("a full-width key grouped by spaces is masked on the card, in names and in 
   }
 })
 
+test("a key cut by a comma, a bar or a full-width stop is masked on the card", () => {
+  // CONTRIBUTING names these cuts ("what masks a key cut by a comma, a bar or
+  // a full-width stop"), and the card did none of them: the word walk sees
+  // "ms-0123,4567,…" as one word — there is no space in it — and the per-word
+  // pass has no reading for a body holding punctuation, so all 32 characters
+  // of the body went out on the card while the CLI masked the same text.
+  const body = "0123456789abcdef0123456789abcdef"
+  const groups = body.match(/.{1,4}/g)
+  const flat = (x) => String(x).normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "")
+  for (const sep of [",", "、", "|", "｜", "。", "—", ";", "\u200b", "\u00a0"]) {
+    const v = `ms-${groups.join(sep)}`
+    for (const [tag, out] of [
+      ["card", testables.maskAll(v, true)],
+      ["host", testables.hostText(v)],
+    ]) {
+      const o = flat(out)
+      let leak = ""
+      for (let i = 0; i + 8 <= body.length; i += 1) if (o.includes(body.slice(i, i + 8))) leak = body.slice(i, i + 8)
+      assert.equal(leak, "", `${JSON.stringify(sep)} cut leaked ${leak} in ${tag}: ${out}`)
+    }
+  }
+  // and the ordinary text those separators carry keeps its shape
+  for (const t of ["hello, world", "Total 300,000 credits; retry in 60s", "release · notes", "no key ms-0123 for provider"])
+    assert.equal(testables.maskAll(t, true), t, `ordinary text was masked: ${JSON.stringify(testables.maskAll(t, true))}`)
+})
+
 test("a full-width key cut by joiners or continued in ASCII is masked whole too", () => {
   // Two stretches the wide reading left: a word joiner pasted between its
   // pieces (the format characters sit below U+3000, so the stretch stopped at

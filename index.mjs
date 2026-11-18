@@ -2099,7 +2099,55 @@ const maskCaps = (s, letters) => {
 // before maskCut: a middot-joined run of a key's shape is the key's own cut
 // (maskSpaced reads it whole, maskCut reads each piece alone), and maskCut
 // draws "·" as a mask's ellipsis when it is on the mask's own edge
-const maskAll = (s, letters) => maskKeys(maskSpaced(maskCut(maskSpaced(maskCaps(maskWide(s, letters), letters), letters), letters), letters), letters)
+const maskAll = (s, letters) => maskKeys(maskSpaced(maskCut(maskSpaced(maskCaps(maskWide(maskSep(s), letters), letters), letters), letters), letters), letters)
+
+// maskSep reads a key cut by punctuation: a comma, a bar, a full-width stop or
+// bar, an ideographic comma, a semicolon, a dash, or a joiner a copy left
+// between the pieces. CONTRIBUTING promises the card reads a key cut by a
+// comma, a bar or a full-width stop; measured, it did none of them — the word
+// walk sees "ms-0123,4567,…" as one word (no space in it) and the per-word
+// pass has no reading for a body holding punctuation, so all 32 characters of
+// the body went out on the card while the CLI, whose splitKey does read it,
+// masked the same text.
+//
+// The separators are taken out of the stretch and the body is asked the card's
+// own questions — a ModelScope front and a body that reads as one. The mask
+// stands for the key; the punctuation it was cut by does not stay, because
+// what a mask shows is four key characters at each end, not the display's
+// separators.
+const SEPCUT = /[,、。｜|;—–​-‍⁠﻿]+/
+// (the replace needs the g flag; the test must not have it — a global regexp
+// carries lastIndex between calls, and the next test() would start mid-string)
+const SEPCUT_ALL = new RegExp(SEPCUT.source, "g")
+const SEPSTRETCH = /[A-Za-z0-9+/=_.:-]|[,、。｜|;—–​-‍⁠﻿]/
+const maskSep = (s) => {
+  if (typeof s !== "string" || !SEPCUT.test(s)) return s
+  const chars = [...s]
+  let out = ""
+  let at = 0
+  let k = 0
+  while (k < chars.length) {
+    if (!/[A-Za-z0-9]/.test(chars[k])) {
+      k += 1
+      continue
+    }
+    let end = k
+    while (end < chars.length && SEPSTRETCH.test(chars[end])) end += 1
+    const piece = chars.slice(k, end).join("")
+    // a cut is the separator's own here: a stretch carrying none is the word
+    // passes' business, and asking it again only costs them their reading
+    if (!SEPCUT.test(piece)) {
+      k = end
+      continue
+    }
+    const flat = piece.replace(SEPCUT_ALL, "")
+    if (/^ms-/i.test(flat) && flat.length > 12 && keyBody.test(flat)) out += s.slice(at, k) + maskToken(flat)
+    else out += s.slice(at, end)
+    at = end
+    k = end
+  }
+  return out + s.slice(at)
+}
 
 // maskWide reads a key written in full width and cut by spaces among its
 // pieces. Every reading above walks ASCII words: a full-width piece is no word
