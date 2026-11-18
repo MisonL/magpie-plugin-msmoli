@@ -3711,7 +3711,25 @@ export async function MsmoliPlugin(input) {
           // amount.
           const byRule = (rows) => {
             const m = new Map()
-            for (const r of rows) m.set(r?.rule_key, (m.get(r?.rule_key) ?? 0) + amountOf(r))
+            for (const r of rows) {
+              let n
+              try {
+                n = amountOf(r)
+              } catch (e) {
+                // A row whose amount will not read is a body we do not
+                // understand, and the day must stay open for another ask —
+                // but only for the row that carries the claim itself. Once
+                // daily_active is on the page with a readable amount, the
+                // claim has landed, and a sibling rule's unreadable amount
+                // must not un-claim it: the sums exist for the diff, and a
+                // row left out of the diff says "no change", which is the
+                // truth about that row. The claimed branch reports the
+                // total as unsaid.
+                if (!claimed || r?.rule_key === "daily_active") throw e
+                continue
+              }
+              m.set(r?.rule_key, (m.get(r?.rule_key) ?? 0) + n)
+            }
             return m
           }
           // `beforeDaily` and every `rows` handed to grew(...) are already
@@ -3900,7 +3918,18 @@ export async function MsmoliPlugin(input) {
               const grewNow = gained(after.rows.filter((r) => DAILY_RULES.includes(r?.rule_key)), after.day)
               if (grewNow) return await claimedNow(after, grewNow)
             }
-            const credit = sumOf(beforeDaily)
+            // A row whose amount will not read cannot be summed — but this
+            // is the already-claimed branch: `claimed` is true, the claim is
+            // the fact, and the amount is not. Thrown out of here it became
+            // `failed` for a day that had landed, the one outcome the host
+            // retries every half hour, so the card read "check-in failed" all
+            // day. The amount is left unsaid instead.
+            let credit = null
+            try {
+              credit = sumOf(beforeDaily)
+            } catch {
+              credit = null
+            }
             // each title is cut and stringified as before, and the join is
             // masked once at the end: two titles that each carry a piece of the
             // key under MIN_ECHO spell it together, and a per-title mask never
@@ -3917,15 +3946,19 @@ export async function MsmoliPlugin(input) {
             // a claim of a negative amount is not a thing. The rows are still
             // named — the user can see which ones — but the amount stops at
             // zero, the way the usage card's limit already does.
-            const shown = Math.max(0, credit)
+            const shown = credit === null ? null : Math.max(0, credit)
             // The streak is read from the page **before** the touch here too:
             // the touch grants nothing new for an account already claimed, so
             // the two readings answer the same thing, and this one is the page
             // the totals above were taken from.
             return withStreak({
               outcome: "done",
-              credit: shown,
-              message: `今日已领取 ${shown} 魔粒` + (which ? `（${which}）` : "") + (before.complete ? "" : "；账单未读完，数字偏低"),
+              ...(shown === null ? {} : { credit: shown }),
+              message:
+                (shown === null ? "今日已领取" : `今日已领取 ${shown} 魔粒`) +
+                (which ? `（${which}）` : "") +
+                (shown === null ? "；到账金额读不出来，数字略过" : "") +
+                (before.complete ? "" : "；账单未读完，数字偏低"),
               ...(marks.expired ? { signIn: "expired" } : {}),
             }, await streakOf(before.all, before.day, before.total, ledgerReader(profile, token, deadline, before.pages, before.last, before.seenPages, before.seenRows, marks), deadline), marks)
           }

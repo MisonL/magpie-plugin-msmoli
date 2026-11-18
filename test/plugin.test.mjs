@@ -7806,6 +7806,25 @@ test("a login answer with no data still finishes the check-in", async () => {
   assert.equal(r.credit, 200)
 })
 
+test("an amount the ledger will not read does not un-claim a day already claimed", async () => {
+  // The claimed branch sums today's daily rows, and one row whose amount
+  // cannot be read made that sum throw — out into the hook's catch, which
+  // answered `failed` for a day whose claim was sitting right there in the
+  // same page. The host retries `failed` every half hour, so the card read
+  // "check-in failed" all day. The claim is the fact; the amount is not.
+  const good = day({ total_amount: 200 })
+  const broken = day({ rule_key: "aliyun_bindlogin", total_amount: null, title: "绑定阿里云账号" })
+  const r = await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [good, broken] } } },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+    },
+    async () => auth.checkin(async () => ({ type: "api", key: "ms-badamt-0000-0000-0000-00000001" })),
+  )
+  assert.equal(r.outcome, "done", `an unreadable row took the claim with it: ${JSON.stringify(r)}`)
+  assert.doesNotMatch(r.message, /账单格式不认识/, `the parser's sentence reached the card: ${r.message}`)
+})
+
 test("a ledger row with no title is not named on the card", async () => {
   // cardText's `String(value ?? "")`: a missing or null title reads as the
   // empty string and the card writes only the amount, listing no
