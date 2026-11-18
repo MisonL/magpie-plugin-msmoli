@@ -1316,6 +1316,37 @@ test("a later page whose shape is unreadable stops the walk, it does not fail th
   assert.match(c.message, /账单读取不完整/, `the parser's sentence reached the card: ${c.message}`)
 })
 
+test("a refused page after today's rows keeps the answer the day had", async () => {
+  // The day's rows were not read to their end when page 2 came back 401, and
+  // dayRows threw the dead-token to say so — out through todayEarn into the
+  // hook's own catch, which turned a day that WAS claimed into `failed`. The
+  // host retries `failed` every half hour, so the card showed a failed
+  // check-in for the rest of the day on an account whose claim had landed.
+  // The refusal still has to reach the host: `signIn` carries the expiry, and
+  // the rows in hand are a floor the answer says is low.
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.pathname !== "/openapi/v1/magicubes/transactions") {
+      return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    }
+    const page = u.searchParams.get("page")
+    if (page === "2") {
+      return reply({ status: 401, body: { success: false, Code: 401, Message: "invalid token" } })
+    }
+    // a full page of today's rows with a total that promises more
+    const records = Array.from({ length: 50 }, () => day())
+    return reply({ body: { success: true, data: { page: 1, page_size: 50, total: 51, records } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-streak-0000-0000-0000-000000000048" }))
+    assert.notEqual(r.outcome, "failed", `a claimed day was answered as failed: ${JSON.stringify(r)}`)
+    assert.equal(r.signIn, "expired", `the refusal did not reach the host: ${JSON.stringify(r)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("a page that cannot be read leaves the streak unsaid, and the check-in still answers", async () => {
   // A 403 on page 2 says nothing about the claim that already landed. The
   // streak is dropped; the answer keeps its outcome and credit, and the host

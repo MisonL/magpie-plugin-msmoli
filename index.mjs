@@ -3148,35 +3148,33 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
     // success envelope is an answer. A 202 used to be read as the end of the
     // ledger, which confirmed a day that was never finished. A 401 is the same
     // token being refused, and swallowing it here kept a confirmed expiry off
-    // the card and out of the check-in's answer: it goes through the same
-    // dead-token throw the first page's gate uses.
+    // the card and out of the check-in's answer.
+    //
+    // It is reported, not thrown: `refused` is how the caller learns the token
+    // was refused, and it was already the whole answer for a courtesy page.
+    // Throwing for the other case put the refusal through todayEarn into the
+    // hook's own catch, which answered a day that WAS claimed as `failed` —
+    // the one outcome the host retries every half hour, so the card read
+    // "check-in failed" for the rest of a day whose claim had landed, and the
+    // expiry it carried was the field the host never reads.
     if (got.parsed && res.status === 401 && awaitsSignIn(got.body)) {
       // a refusal on a courtesy page (the numbers already proven) ends the
       // scan without touching them: the claim it was read for stands, as it
-      // did when the walk stopped before this page at all
-      if (dayDone) {
-        complete = true
-        // a refusal on a courtesy page ends the scan without touching the
-        // numbers — but the scan did not reach its end, and the token *was*
-        // refused: the card says the expiry it shows is a floor, and the
-        // account is reported expired instead of the refusal being swallowed
-        refused = true
-        break
-      }
-      throw deadToken(profile.where, token)
+      // did when the walk stopped before this page at all. One met before the
+      // numbers are proven leaves them a floor, which `complete` already says.
+      if (dayDone) complete = true
+      refused = true
+      break
     }
     // ModelScope's login layer answers a refused token inside a 200
     // ({"Code":401,"Success":false}) — the first page's gate reads that, and
     // this walk must too: read as "a page it could not read", the expiry was
     // never reported and the host kept retrying the dead token as a broken
-    // ledger.
+    // ledger; thrown, it failed the whole answer the way the 401 above did.
     if (got.parsed && res.status === 200 && !okOf(got.body) && String(got.body?.Code ?? got.body?.code ?? "") === "401" && awaitsSignIn(got.body)) {
-      if (dayDone) {
-        complete = true
-        refused = true
-        break
-      }
-      throw deadToken(profile.where, token)
+      if (dayDone) complete = true
+      refused = true
+      break
     }
     if (!got.parsed || res.status !== 200 || !okOf(got.body)) {
       if (dayDone) complete = true
@@ -3686,7 +3684,7 @@ export async function MsmoliPlugin(input) {
           // grant absent: the row may sit on the page that failed, and the
           // touch-then-diff would report a row nobody read as this run's gain.
           // `failed` is the one outcome the host retries.
-          if (!before.complete && !claimed) return { outcome: "failed", message: "账单读取不完整，稍后自动重试" }
+          if (!before.complete && !claimed) return { outcome: "failed", message: "账单读取不完整，稍后自动重试", ...(marks.expired ? { signIn: "expired" } : {}) }
           // What this run granted is the ledger's growth, not a new key: the
           // rows are aggregated per (day, type, rule_key, model_tier), so a
           // second grant of a rule already in today's page grows that row's
@@ -3950,7 +3948,7 @@ export async function MsmoliPlugin(input) {
           // `failed` — the one outcome the host retries, which reads the
           // ledger again half an hour later.
           if (!again.complete) {
-            return { outcome: "failed", message: "账单读取不完整，稍后自动重试" }
+            return { outcome: "failed", message: "账单读取不完整，稍后自动重试", ...(marks.expired ? { signIn: "expired" } : {}) }
           }
           const hourCN = Math.floor(minuteCN() / 60)
           // Before noon the host re-asks a provisional answer every half hour,
