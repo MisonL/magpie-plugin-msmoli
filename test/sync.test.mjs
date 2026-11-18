@@ -7093,6 +7093,23 @@ test("a vendor key written in lower case is masked whole", () => {
   }
 })
 
+test("a page of one unbroken run is cut in linear time", () => {
+  // The snap that moves a piece's start to the end of a long run scanned from
+  // `at` to the far end of the run EVERY time, and a run has one end: a 4 MB
+  // body of one character scanned 268 million of them across its 129 pieces,
+  // and `arg` spent 14 s on a page the per-piece pass reads in 0.4 s. The
+  // snap's own rule is "only when the move costs less than CHUNK/2", so the
+  // scan stops there.
+  const s = "a".repeat(4 * 1024 * 1024)
+  const started = process.cpuUsage()
+  const out = arg(s)
+  const spent = process.cpuUsage(started)
+  const ms = (spent.user + spent.system) / 1000
+  // measured: 14 s before the bound, ~0.4 s after
+  assert.ok(ms < 5000, `4 MB of one run took ${Math.round(ms)} ms of CPU`)
+  assert.equal(out.length, s.length, "the body changed length")
+})
+
 test("a long line of masks is read in one pass, not one squaring pass", () => {
   // unmark reads an ellipsis as a cut only where key material of eight or
   // more characters follows it, and it used to ask that by joining every

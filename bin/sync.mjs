@@ -1668,8 +1668,13 @@ function chunked(text) {
     // 33 000. The span is this piece's now — it starts where the old one did.
     let start = at - skip
     if (at > 0 && end < text.length && /[A-Za-z0-9+/=_.-]/.test(text[at]) && /[A-Za-z0-9+/=_.-]/.test(text[at - 1])) {
+      // the walk stops at the bound the rule itself uses: a move of CHUNK/2
+      // or more is not taken, so nothing past that point can change the
+      // answer — and without the bound a 4 MB run was scanned to its far end
+      // once per piece, 268 million characters for a body of one character
+      const stop = Math.min(text.length, at + CHUNK / 2)
       let k = at
-      while (k < text.length && /[A-Za-z0-9+/=_.-]/.test(text[k])) k += 1
+      while (k < stop && /[A-Za-z0-9+/=_.-]/.test(text[k])) k += 1
       if (k - at < CHUNK / 2) at = k
     }
     pieces.push({ text: text.slice(start, end), carry: skip })
