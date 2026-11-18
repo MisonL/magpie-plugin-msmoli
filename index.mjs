@@ -1204,6 +1204,15 @@ const STEM = /^(?:ms|sk|gh[opusr]|xox[a-z]?|akia|asia|aida)$/i
 // piece at a time: a word of prose it is not)
 const FRONT_PART = /^(?:sk|gh|ghp|gho|ghs|ghu|ghr|ms|xox|xoxa|xoxb|xoxp|xoxo|xoxr|xoxs|aki|akia|asi|asia|aid|aida)$/i
 const startProse = (w) => /^[a-z]{2,}$/.test(w) && !VENDOR.test(w) && !/^ms-/.test(w) && !STEM.test(w) && !FRONT_PART.test(w)
+// a lower-case piece of a key cut into groups, and no word of the text: no
+// vowel in it ("bcd", "gh"), or only hex characters ("cdef", "ef", "ab" —
+// where a word and a piece can be the same string, "face", "cafe", a run that
+// reads a key already keeps them, the safe direction). A run that began at a
+// key's front reads on across one — the front is the evidence, as keyAt reads
+// it — and whether there is a key to mask is still the cut's own check below.
+// The card's frame after a key ("here", "for", "provider") carries a vowel and
+// is no hex, so it stays the text's.
+const piecey = (w) => /^[a-z]{2,6}$/.test(w) && (!/[aeiouy]/.test(w) || /^[0-9a-f]+$/.test(w))
 function maskSpaced(s, letters) {
   if (s.length > 32 * 1024) return s
   // (the ellipsis stays outside the word class: as a word character it glued a
@@ -1435,9 +1444,16 @@ function maskSpaced(s, letters) {
       // (four letters that a key piece follows are a piece of that key:
       // "ms-v qmjh 75qa …" — the piece after it carries a digit or a capital)
       const moreKey = k + 1 < words.length && /[0-9A-Z]/.test(words[k + 1][0])
+      // a piece of a key cut after its own front — "ms-0123 4567 89ab cdef" —
+      // is read on once the run has already read a key: a piece with no vowel,
+      // of hex characters only, a piece the next piece carries (a cut's pieces
+      // are its own whether a vowel landed in one — "mno" of "… 012 mno p34"),
+      // or one a key-shaped word follows. What is masked is still the cut's own
+      // check below.
+      const readOn = piecey(x) || moreKey || (k + 1 < words.length && piecey(words[k + 1][0]))
       // (a middot's pieces are read whatever they would read as alone: the
       // separator is a cut's, and "sk-a·nt-a·pi03" is a key)
-      const prose = !mid && /^[a-z]{4,}$/.test(x) && (x.length > 4 || !frontHead || !moreKey)
+      const prose = !mid && /^[a-z]{4,}$/.test(x) && (x.length > 4 || !frontHead || !moreKey) && !(j > i && MAYKEY(body) && readOn)
       const fronty = front(keyFrontOf(x)) || STEM.test(x)
       // a word of the run's own text ends it once a cut has been read ("see
       // AKIA… here", "ms-foreign-… for provider"), and before that if the run
@@ -1449,8 +1465,10 @@ function maskSpaced(s, letters) {
       // a key that has already read as one ends at a short word ("ms-0123…
       // for provider" keeps its frame): the frame is not part of the mask
       // a short word after a run that already reads as a key ends it ("123e…-…
-      // not found", "ms-0123 for provider")
-      if (/^[a-z]{1,3}$/.test(x) && (j > i || (body.length >= 12 && MAYKEY(body) && isKeyWord(body, letters)))) break
+      // not found", "ms-0123 for provider"), unless it is a piece of the key
+      // cut into groups — "ms-01 23 45 67 89 ab …" ("in", "of" are pieces by
+      // the same reading; the safe direction is to keep them in the mask)
+      if (/^[a-z]{1,3}$/.test(x) && (j > i || (body.length >= 12 && MAYKEY(body) && isKeyWord(body, letters))) && !(j > i && MAYKEY(body) && readOn)) break
       // (a middot's pieces are the key's: "9f8e·7d6c·…" is one key whatever
       // case its pieces are written in, and the run goes on to its end)
       if (j === i && body.length >= 4 * RUNCUT) break

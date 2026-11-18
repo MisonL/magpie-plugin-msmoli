@@ -504,6 +504,22 @@ const RUNCUT = 20
 // extended by prose: the mask covers 20 characters as well as 40.
 const VERNUM = /^\d{3,}$/
 const PROSE = /^[A-Za-z]{3,}$/
+// a lower-case piece of a key cut into groups, and no word of the text (the
+// card's `piecey`): no vowel in it ("bcd", "gh"), or only hex characters
+// ("cdef", "ef" — where a word and a piece can be the same string, "face",
+// "cafe", a run that reads a key already keeps them, the safe direction). A key
+// cut after its own front — "ms-0123 4567 89ab cdef" — has pieces of this
+// shape, and the run goes on across them once its body reads as a key; the
+// frame after a key ("for", "provider", "here") carries a vowel and is no hex,
+// so it stays the text's.
+const keyPiecey = (w) => /^[a-z]{2,6}$/.test(w) && (!/[aeiouy]/.test(w) || /^[0-9a-f]+$/.test(w))
+// the next piece of a cut goes on where this one's own letters carry a vowel
+// ("mno" of "… 012 mno p34"): a piece a key-shaped piece follows is the key's,
+// as the card's run reading has it
+const nextPiecey = (t) => {
+  const n = String(t ?? "").replace(/^[^A-Za-z0-9]{1,2}/, "")
+  return /[0-9A-Z]/.test(n) || keyPiecey(n)
+}
 const FRONT_PIECE = /^(?:m|s|k|ms|sk|s-|g|h|p|u|r|o|x|ox|a|i|l|ali|as|akia|aida|ghp|gho|ghu|ghs|ghr|xox|asia)$/i
 // a mark a copy or a table put where a cut was, which no cut the readings join
 // is: a full-width comma or full stop, a bracket, a dash, a bar between cells
@@ -708,7 +724,20 @@ function spacedKey(s) {
     // wJalr…/K7MDENG/…), and its pieces are key material even when a lower-case
     // word sits in them ("RgjNpwI" has "gj"): at a slash the run goes on while
     // the body so far reads as a key, and the prose rule is the space's
-    if (PROSE.test(piece) && (frontLen === 0 || bodyFrom(end).length >= frontLen) && !(/^\/+$/.test(v.slice(end, pieces[idx].at)) && bodyFrom(end).length >= 12 && isKey(bodyFrom(end)))) break
+    // a piece of a key cut into groups goes on over a space too, once the body
+    // reads as a key: "ms-0123 4567 89ab cdef" stopped at "cde" and left
+    // twenty-four characters of the body on the terminal (measured). The body
+    // is judged as this reading's own acceptance judges it — an ms- run of key
+    // length, or the shape isKey reads — since a 13-character ms- body is a key
+    // to msKey and not to isKey.
+    const keySoFar = bodyFrom(end)
+    const soFarKey = keySoFar.length >= 12 && (/^ms-/i.test(keySoFar) ? msKey(keySoFar, false) : isKey(keySoFar))
+    if (
+      PROSE.test(piece) &&
+      (frontLen === 0 || keySoFar.length >= frontLen) &&
+      !(/^\/+$/.test(v.slice(end, pieces[idx].at)) && keySoFar.length >= 12 && isKey(keySoFar)) &&
+      !(soFarKey && (keyPiecey(piece) || nextPiecey(pieces[idx + 1]?.text)))
+    ) break
     end = pieces[idx].at + lead + piece.length
     bare = bare || FRONT_PIECE.test(piece)
   }
@@ -2026,8 +2055,11 @@ function joinFramed(s) {
       const stem = words[k].text.replace(STEM, "")
       if (!stem || !KEYCH.test(stem)) break
       // a word of prose ends the run: a value's body carries a digit or a
-      // capital, a sentence's next word does not
-      if (!/[0-9]/.test(stem) && !/[A-Z]/.test(stem) && stem.length < 12) break
+      // capital, a sentence's next word does not — unless the word is a piece
+      // of a key cut into groups and the join so far already reads as one
+      // ("ms-0123456 789abcd ef01234 56789ab cdef" stopped at "cdef" and left
+      // the key's last four on the terminal, measured)
+      if (!/[0-9]/.test(stem) && !/[A-Z]/.test(stem) && stem.length < 12 && !(best && (keyPiecey(stem) || nextPiecey(words[k + 1]?.text)))) break
       joined += stem
       if (joined.length >= 12 && /[0-9]/.test(joined) && isKey(joined, false)) {
         best = joined

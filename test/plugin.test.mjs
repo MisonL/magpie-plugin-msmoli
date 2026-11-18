@@ -8782,6 +8782,58 @@ test("a key cut into pieces by spaces or line breaks is masked on the card too",
   }
 })
 
+test("a key cut after its own front keeps its pieces on the card and in the CLI", () => {
+  // The matrix above cuts the whole key, so its first piece is "ms-a" and the
+  // run's head carries a character of the body. A display that keeps the front
+  // whole and groups what follows ("ms-0123 4567 89ab …") reaches the run
+  // readings with a head that is entirely front: every later piece made of
+  // lower-case letters only was then read as a word of the text and the run
+  // stopped there. Measured on the bodies below, the card left 8 to 20
+  // characters of the body in the clear and the CLI up to 26 — a key cut at
+  // widths 1, 2, 3, 4, 5, 7 and 9, and the body of the fours shape printed
+  // whole when the cut left no key-shaped head at all.
+  const bodies = [
+    "0123456789abcdef0123456789abcdef",
+    "abcd1234efgh5678ijkl9012mnop3456",
+    "vqmjh75qa651ittg5gli9zadx8zg9jez",
+  ]
+  // the invariant is the body's own run, not the whole key: a mask keeps four
+  // characters at each end by design, and eight in the clear is a leak
+  const leaked = (out, body) => {
+    const flat = (x) => String(x).normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "")
+    const o = flat(out)
+    const b = flat(body)
+    for (let i = 0; i + 8 <= b.length; i += 1) if (o.includes(b.slice(i, i + 8))) return b.slice(i, i + 8)
+    return ""
+  }
+  for (const body of bodies) {
+    for (let w = 1; w <= 12; w += 1) {
+      const cut = `ms-${body.match(new RegExp(`.{1,${w}}`, "g")).join(" ")}`
+      for (const [tag, out] of [
+        ["card", testables.maskAll(cut, true)],
+        ["arg", arg(cut)],
+      ]) {
+        const leak = leaked(out, body)
+        assert.equal(leak, "", `${body.slice(0, 8)} cut ${w} by spaces leaked ${leak} in ${tag}: ${out}`)
+      }
+    }
+  }
+  // the frame after a key cut the same way is still the text's, and the mask
+  // still keeps four characters of the key at each end
+  const own = "ms-zzzz0000zzzz0000zzzz0000"
+  const cut = "ms-0123 4567 89ab cdef 0123 4567 89ab cdef"
+  for (const [tag, fn] of [
+    ["card", (x) => testables.cardText(x, own, 400)],
+    ["host message", (x) => testables.hostText(x)],
+  ]) {
+    assert.equal(fn(`no key ${cut} for provider`), "no key ms-0…cdef for provider", `${tag}: ${fn(`no key ${cut} for provider`)}`)
+  }
+  // and the prose the run must not swallow
+  for (const t of ["no key ms-0123 for provider", "see ms-dos and ms-word now", "ms-2024 demo here"]) {
+    assert.equal(testables.maskAll(t, true), t, `ordinary text was masked: ${JSON.stringify(testables.maskAll(t, true))}`)
+  }
+})
+
 test("a key the plugin does not hold is masked on the card too", async () => {
   // Of cardText's three gates, the first two revolve around this account's
   // token and the third only recognises the ms- shape. So when the ledger
