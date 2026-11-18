@@ -2117,18 +2117,23 @@ const maskAll = (s, letters) => maskKeys(maskSpaced(maskCut(maskSpaced(maskCaps(
 const maskWide = (s, letters) => {
   if (typeof s !== "string" || !/[^\x00-\x7e]/.test(s)) return s
   const chars = [...s]
+  // a stretch is a run of letters, spaces, full-width characters and format
+  // characters: the key's own pieces, the gaps they were cut with, and the
+  // joiners a copy or an IME pastes in. A format character sits below U+3000
+  // (U+2060 is one), so the wide range alone stopped the stretch at it and the
+  // key's tail went out as ordinary text — measured on the card and in the
+  // host's log line.
+  const STRETCH = /[A-Za-z0-9\s 　-￿\p{Cf}]/u
   let out = ""
   let at = 0
   let k = 0
   while (k < chars.length) {
-    // a stretch is a run of letters, spaces and full-width characters: the
-    // key's own pieces, and the gaps they were cut with
-    if (!/[A-Za-z0-9\s 　-￿]/.test(chars[k]) || !/[^\x00-\x7e]/.test(chars[k])) {
+    if (!STRETCH.test(chars[k]) || !/[^\x00-\x7e]/.test(chars[k])) {
       k += 1
       continue
     }
     let end = k
-    while (end < chars.length && /[A-Za-z0-9\s 　-￿]/.test(chars[end])) end += 1
+    while (end < chars.length && STRETCH.test(chars[end])) end += 1
     // the key ends at its own last full-width or spaced piece: the ASCII words
     // after it ("for provider") are the text's, and a window that ran on to
     // them took them with the mask
@@ -2139,14 +2144,37 @@ const maskWide = (s, letters) => {
       k = end
       continue
     }
-    const folded = chars.slice(k, stop).join("").normalize("NFKC")
-    const flat = folded.replace(/[\s　]+/g, "")
+    // a key cut across both widths goes on over the ASCII pieces that follow
+    // it: a piece carrying a digit or a capital is key material ("MnOp3456",
+    // "QrSt7890"), and the text's word after the key ("retry", "for") carries
+    // neither. Measured, "…ＩｊＫｌ９０１２ MnOp3456：QrSt7890：UvWx1234 retry"
+    // came back with eleven characters of the body in the clear on the card
+    // and in the host's log line.
+    let wide = stop
+    for (;;) {
+      let w = wide
+      while (w < end && /\s/.test(chars[w])) w += 1
+      let p = w
+      while (p < end && !/\s/.test(chars[p])) p += 1
+      if (p === w) break
+      const piece = chars.slice(w, p).join("").replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, "")
+      if (!piece || !/[\dA-Z]/.test(piece)) break
+      wide = p
+    }
+    const folded = chars.slice(k, wide).join("").normalize("NFKC")
+    // A format character is not the key's either. The card's text() turns one
+    // into a space by the time the string is shown, so a word joiner pasted
+    // into a full-width key (chat clients and IMEs add them) split the folded
+    // body into pieces each under the run floors and the whole key went out
+    // behind a mask that covered its first four characters only — measured on
+    // the card and in the host's log line.
+    const flat = folded.replace(/[\s\p{Cf}]+/gu, "")
     // "－" is U+FF0D, which NFKC leaves alone; the shape test reads it as a
     // hyphen, and so does this one
     const asked = flat.replace(/－/g, "-")
     if (/^ms-/i.test(asked) && asked.length > 12 && keyBody.test(asked)) {
       // the mask stands for the key; the rest of the window is the text's
-      out += s.slice(at, k) + maskToken(asked) + chars.slice(stop, end).join("")
+      out += s.slice(at, k) + maskToken(asked) + chars.slice(wide, end).join("")
       at = end
     }
     k = end

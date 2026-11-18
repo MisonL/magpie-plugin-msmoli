@@ -12865,6 +12865,43 @@ test("a full-width key grouped by spaces is masked on the card, in names and in 
   }
 })
 
+test("a full-width key cut by joiners or continued in ASCII is masked whole too", () => {
+  // Two stretches the wide reading left: a word joiner pasted between its
+  // pieces (the format characters sit below U+3000, so the stretch stopped at
+  // one and the rest of the body went out as ordinary text), and a body whose
+  // tail was written in ASCII after the last full-width character (the window
+  // ended there by design, and eleven characters of the body stayed on the
+  // card and in the host's log line). Both were measured on the card and in
+  // hostText; a full-width colon between the pieces is the cut, not a stop.
+  const cases = [
+    // a word joiner (U+2060) between the pieces
+    "error: ｍｓ－ＬｍＮｏ２４６８Ｐｑ⁠Ｒｓ１３⁠５７ＴｕＶｗ９０⁠８１ＸｙＺａ４７⁠２５ＢｃＤｅ６８⁠１０ＦｇＨｉ３５⁠９７ for provider",
+    // the tail written in ASCII, cut by full-width colons
+    "ｍｓ－ＡｂＣｄ１２３４ ＥｆＧｈ５６７８ ＩｊＫｌ９０１２ MnOp3456：QrSt7890：UvWx1234 retry",
+  ]
+  for (const v of cases) {
+    // the body is the key alone: the frame before and after it is the text's,
+    // and a body taken across either would report the frame itself as a leak
+    const key = v
+      .replace(/\s+(?:for provider|retry)$/, "")
+      .replace(/^error:\s*/, "")
+    const body = key.normalize("NFKC").replace(/[^A-Za-z0-9]/g, "").toLowerCase()
+    const leaked = (text) => {
+      const t = text.normalize("NFKC").replace(/[^A-Za-z0-9]/g, "").toLowerCase()
+      for (let i = 0; i + 8 <= body.length; i += 1) if (t.includes(body.slice(i, i + 8))) return body.slice(i, i + 8)
+      return ""
+    }
+    for (const [tag, out] of [
+      ["card", testables.maskAll(v, true)],
+      ["host", testables.hostText(v)],
+    ]) {
+      assert.equal(leaked(out), "", `${tag} left ${JSON.stringify(leaked(out))}: ${out}`)
+    }
+    // the text after the key is still the text's
+    assert.ok(testables.maskAll(v, true).trimEnd().endsWith(v.startsWith("error:") ? "for provider" : "retry"), `the frame went too: ${testables.maskAll(v, true)}`)
+  }
+})
+
 test("a cancel that never settles does not hold the hook", { timeout: 20_000 }, async () => {
   // Both refuse paths await the body's cancel. A Web ReadableStream's cancel()
   // is allowed to return a promise that never settles, and awaiting it left
