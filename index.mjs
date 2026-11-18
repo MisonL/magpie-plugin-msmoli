@@ -2749,7 +2749,7 @@ async function rememberAccountFields(client, token, learned, auth, dir, budgetEn
   // it would re-key their alias to a label the account no longer has. A
   // providers.json that can't be read says the same thing — don't write over
   // a state we can't see.
-  const wantName =
+  let wantName =
     !!name && base?.accountId !== name && !cooling && aliasOf(ID, dir, labelOf(base, token)) === ""
   if (!wantName && !wantSite && !wantClear) return
   // the last read before the write: a key replaced since the read above is
@@ -2757,9 +2757,14 @@ async function rememberAccountFields(client, token, learned, auth, dir, budgetEn
   if (typeof getAuth === "function") {
     const fresh = await readBase(budgetEnd)
     if (fresh === undefined) return
-    // only the facts are re-decided; a `base` that changed shape is fine
+    // only the facts are re-decided; a `base` that changed shape is fine.
+    // The name is one of them: the copy read at the start of the hook may be
+    // seconds old, and a user naming the account in that window (or a write
+    // of theirs landing) was written over with the nickname.
     base = fresh
-  }
+    if (wantName) {
+      wantName = !!name && base?.accountId !== name && !cooling && aliasOf(ID, dir, labelOf(base, token)) === ""
+    }  }
   if (wantName) {
     named.delete(token)
     named.set(token, Date.now())

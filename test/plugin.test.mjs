@@ -6794,6 +6794,56 @@ test("a write that rejects after the cap is not an unhandled rejection", { timeo
   }
 })
 
+test("an alias set while the hook ran is not written over", async () => {
+  // The write decides `wantName` from a read taken at the start, then re-reads
+  // the sign-in (readBase) as the last thing before writing. `providers.json`
+  // is hot, so a user aliasing the account between those reads had the alias
+  // ignored: the nickname went over it and the card lost the user's name.
+  // getAuth is called three times on this path — the hook's own read, the one
+  // rememberAccountFields opens with, and readBase's last look — so the alias
+  // is written on the third, which only the re-decision can see.
+  const dir = tmpDir("msmoli-alias-race-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [{ id: "msmoli" }] }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  delete process.env.MAGPIE_MSMOLI_CONFIG
+  try {
+    const writes = []
+    const token = "ms-rename-0000-0000-000000000001"
+    const label = "API key …0001"
+    let reads = 0
+    const getAuth = async () => {
+      reads += 1
+      if (reads === 3) {
+        writeFileSync(
+          join(dir, "providers.json"),
+          JSON.stringify({ providers: [{ id: "msmoli", accountNames: { [label.toLowerCase()]: "用户自己起的名字" } }] }),
+        )
+      }
+      return { type: "api", key: token }
+    }
+    const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: (o) => (writes.push(o), Promise.resolve()) }, app: { log: () => {} } } })
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "server-nickname" } } },
+      },
+      async () => {
+        const c = await p.auth.checkin(getAuth)
+        assert.equal(c.outcome, "done", JSON.stringify(c))
+      },
+    )
+    assert.equal(reads >= 3, true, `readBase did not run: ${reads} reads`)
+    for (const w of writes) {
+      assert.notEqual(w.body?.accountId, "server-nickname", `the alias was written over: ${JSON.stringify(w.body)}`)
+    }
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("the nickname is written back before the hook answers", async () => {
   // rememberAccountFields is awaited on both paths: the host labels the account
   // by the accountId, and a write that is still in flight when the card is
