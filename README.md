@@ -233,7 +233,7 @@ It syncs the **domestic site only**: the built-in preset it reads is the
 | `--to-preset` | The other way round; a preset that already holds a different key needs `--force` |
 | `--force` | Replace a single existing plugin account whose key differs |
 | `--from <id>` | Pick the preset when more than one provider could be it |
-| `--dry-run` | Print the commands, masked, without running them or writing anything; no magpie binary needed |
+| `--dry-run` | Print the commands, masked, without running them or writing anything; no magpie binary needed. Exits 0 whether or not there is work — the verdict belongs to `--status`, which exits 1 when there is something to run |
 | `--dir <folder>` | Where magpie's config is (a portable install's `data` folder) |
 | `--magpie <path>` | Path to the magpie binary; a bare `magpie` is refused |
 | `--version` | Print the version (read from the package's own `package.json`) |
@@ -684,12 +684,12 @@ The terms and risks are in
 |---|---|
 | `没有登录信息，请先登录` | `printf 'ms-token\n' \| magpie plugin login msmoli` |
 | No credit window on the card, or no check-in | Restart magpie; the plugin host caches. |
-| `failed` with HTTP 401 | The token was revoked, or belongs to the other site; `modelscope.cn` and `modelscope.ai` don't share tokens. The message names the site that refused (国内站 / 国际站), or 任一站点 when both did. When the key is spelled like a URL or a path, the message says so first — check the field, not the sign-in. Make a new token there and sign in again. |
+| `failed` with HTTP 401 | The token was revoked, or belongs to the other site; `modelscope.cn` and `modelscope.ai` don't share tokens. When both sites refused the token in ModelScope's own words, the message names them (任一站点) and magpie signs the account out; when only a proxy or gateway answered 401, the message says 响应不是魔搭的 instead and the sign-in is left alone. When the key is spelled like a URL or a path, the message says so first — check the field, not the sign-in. Make a new token there and sign in again. |
 | `failed` with HTTP 403, message says 被魔搭风控拒绝 | ModelScope's risk control refused the request; the token is fine. A check-in is asked again in 30 minutes; a usage read shows the 403 on the card until the next poll. |
 | `failed` with HTTP 403, message says 响应不是魔搭的 | The 403 is not ModelScope's — a proxy, a gateway or a captive portal answered in its own words. The token is not the problem: check the proxy/VPN the request goes through. |
 | Before the window: failed, with `09:56 后自动领取（北京时间，magpie 每半小时问一次，无需操作）` | Expected. See [When it claims](#when-it-claims-the-check-in-window). |
 | Check in now before the target minute answers failed with the same line | Expected. A manual press and the host's half-hourly ask reach the plugin the same way, so only the target minute starts the claim. |
-| Always `inactive` | The sign-in works but today's ledger shows nothing: the account may not be eligible, or the grant hasn't been written yet. Before noon magpie re-asks every 30 minutes; from noon the plugin checks once more ("半小时后再核对一次"), and only the second `inactive` stands. |
+| Always `inactive` | The sign-in works but today's ledger shows nothing: the account may not be eligible, or the grant hasn't been written yet. Before noon magpie re-asks every 30 minutes; from noon the plugin checks once more ("半小时后再核对一次"), and only the second `inactive` stands — that one deferral is kept in memory, so a restarted magpie can offer it once more the same afternoon. |
 | Chat through the `modelscope` preset answers `429 insufficient balance` | The day's 250 credits are spent (~125 flagship calls). Not this plugin: it registers no models. See the tip under [Why its own provider](#why-its-own-provider-with-no-models). |
 | Two accounts with the same nickname, and only one checks in | magpie before 2026-10-20 kept check-ins per display name. Update magpie (fixed in magpie-community/plugins#254). |
 | Edits to a clone do nothing | Path plugins are referenced in place; restart magpie. |

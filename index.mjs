@@ -396,8 +396,13 @@ async function json(site, token, path, deadline = Infinity) {
     // The abort does NOT carry e: saidFailure reads "e is the abort reason" as
     // a timeout, and aborting with "响应过大" would relabel the refusal.
     if (res) {
+      // The cancel is asked for and not waited on: a Web ReadableStream's
+      // cancel() may return a promise that never settles, and awaiting it held
+      // the hook past its budget while the host's own request stayed pending.
+      // Its rejection is observed (an unobserved one is a process-level
+      // failure in Node); its completion is not needed for anything here.
       try {
-        await res.body?.cancel?.()
+        Promise.resolve(res.body?.cancel?.()).catch(() => {})
       } catch {}
       try {
         ctl.abort(new Error("read abandoned"))
@@ -442,9 +447,10 @@ async function readBounded(res) {
         // to add: its own error ("terminated", a runtime's sentence about
         // sockets) would replace the one sentence the user can act on. Not
         // awaited at all, that rejection is unobserved, and an unobserved
-        // rejection is a process-level failure in Node.
+        // rejection is a process-level failure in Node — so it is observed and
+        // dropped, and the wait is not taken: a cancel may never settle.
         try {
-          await reader.cancel()
+          Promise.resolve(reader.cancel()).catch(() => {})
         } catch {}
         throw new Error("响应过大")
       }
@@ -530,6 +536,23 @@ const recordsOf = (body) => {
   const records = data.records
   if (records === undefined || records === null) return []
   if (!Array.isArray(records)) throw new Error("账单格式不认识：records 不是列表")
+  // A member that is not an object is not a row, and a null among real rows is
+  // skipped by every sum and every day test (the card walks `r?.field`). What
+  // must not pass is a list with NO row in it: read as an empty ledger, a page
+  // of [17, null, {}] settled the day with `inactive` beside a total of 3. An
+  // empty list is still the empty ledger — the keys are optional in
+  // ModelScope's answers — but a list of things that are not rows is a body
+  // this plugin does not understand.
+  const isRow = (r) =>
+    r !== null &&
+    typeof r === "object" &&
+    !Array.isArray(r) &&
+    // a row of this ledger names its kind and the day it was written: an empty
+    // object (or one of other fields only) is no row either
+    ("gmt_created" in r || "type" in r || "rule_key" in r || "total_amount" in r)
+  if (records.length > 0 && !records.some(isRow)) {
+    throw new Error("账单格式不认识：records 里没有可读的行")
+  }
   return records
 }
 
@@ -2682,11 +2705,21 @@ const nameShape = (name) => {
 // answer is told about an expiry the walk met on the way (`marks`), which the
 // walk records because a claim that already landed still has to reach the
 // host as "the token was refused".
+// The host's checkinOf reads outcome, credit, streak, message and until, and
+// nothing else: `signIn` is a field this plugin writes and the host drops, so a
+// refusal found after the claim landed reached no card at all — the day read
+// "今日已领取 200 魔粒" beside a token the site had already refused. The
+// message carries it, because the message is the one channel the host shows.
 const withStreak = (answer, streak, marks) =>
   ({
     ...answer,
     ...(streak === undefined ? {} : { streak }),
-    ...(marks?.expired ? { signIn: "expired" } : {}),
+    ...(marks?.expired
+      ? {
+          signIn: "expired",
+          message: `${answer.message ?? ""}；但登录已失效（HTTP 401），请重新登录 msmoli`.replace(/^；/, ""),
+        }
+      : {}),
   })
 // WRITE_WAIT_MS caps how long a hook waits for the host's write-back. The
 // lock it takes can block for ~20s (host.js's lockAuth, when another process

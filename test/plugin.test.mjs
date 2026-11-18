@@ -12812,3 +12812,72 @@ test("a full-width key grouped by spaces is masked on the card, in names and in 
     assert.equal(leaked(named), "", `nameText left ${JSON.stringify(leaked(named))}: ${named}`)
   }
 })
+
+test("a cancel that never settles does not hold the hook", async () => {
+  // Both refuse paths await the body's cancel. A Web ReadableStream's cancel()
+  // is allowed to return a promise that never settles, and awaiting it left
+  // usage and checkin running past the 18s and 25s budgets — the host's own
+  // request stayed pending the whole time. The wait belongs inside the call's
+  // budget: whatever the cancel is still doing, the answer comes back.
+  const real = globalThis.fetch
+  const hanging = () => ({
+    status: 200,
+    headers: { get: () => "300000" },
+    body: {
+      cancel: () => new Promise(() => {}),
+      getReader: () => ({
+        read: () => new Promise(() => {}),
+        cancel: () => new Promise(() => {}),
+      }),
+    },
+    text: () => new Promise(() => {}),
+  })
+  globalThis.fetch = async () => hanging()
+  try {
+    const started = Date.now()
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-hangcancel-00000000000001" }))
+    const ms = Date.now() - started
+    assert.ok(u.error, "usage must answer, not hang")
+    assert.ok(ms < 10_000, `usage took ${ms} ms with a cancel that never settles`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a claim that lands on a refused token says so on the card", async () => {
+  // The host's checkinOf reads outcome/credit/streak/message/until and drops
+  // the rest, so `signIn: "expired"` never reached the card: a day whose claim
+  // had landed on a token the site then refused read "今日已领取 200 魔粒" with
+  // nothing about the sign-in, and the user only learned at the next usage
+  // poll — if that was reached at all. The message has to carry it.
+  const r = await withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+      "/api/v1/users/login/info": { status: 401, body: { success: false, Code: 401, Message: "Token expired" } },
+    },
+    async () => auth.checkin(async () => ({ type: "api", key: "ms-expiredclaim-0000000000001" })),
+  )
+  assert.equal(r.outcome, "done", `the claim stands: ${JSON.stringify(r)}`)
+  assert.match(r.message, /令牌失效|重新登录/, `the refusal did not reach the card: ${r.message}`)
+})
+
+test("records that are not rows are a body we do not understand", async () => {
+  // recordsOf checked only that `records` is a list. A page of [17, null, {}]
+  // passed as an empty ledger, and the check-in answered `inactive` — the
+  // answer that settles a day — with "today nothing arrived" beside a total of
+  // 3. A proxy's rewrite or a changed API reads the same way, so the shape has
+  // to be refused before anything is summed.
+  for (const bad of [[17], [null], [{}], ["text"], [{ id: 1 }]]) {
+    const r = await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+          body: { success: true, data: { records: bad, total: bad.length } },
+        },
+      },
+      async () => auth.checkin(async () => ({ type: "api", key: "ms-badrows-0000-0000-0000-00001" })),
+    )
+    assert.equal(r.outcome, "failed", `${JSON.stringify(bad)} was read as a ledger: ${JSON.stringify(r)}`)
+    assert.match(r.message, /账单/, `the reason is not the ledger's: ${r.message}`)
+  }
+})
