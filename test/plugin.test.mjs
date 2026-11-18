@@ -12865,12 +12865,14 @@ test("a full-width key grouped by spaces is masked on the card, in names and in 
   }
 })
 
-test("a cancel that never settles does not hold the hook", async () => {
+test("a cancel that never settles does not hold the hook", { timeout: 20_000 }, async () => {
   // Both refuse paths await the body's cancel. A Web ReadableStream's cancel()
   // is allowed to return a promise that never settles, and awaiting it left
   // usage and checkin running past the 18s and 25s budgets — the host's own
   // request stayed pending the whole time. The wait belongs inside the call's
   // budget: whatever the cancel is still doing, the answer comes back.
+  // (the timeout is the test's own: without one a regression here does not go
+  // red, it hangs the whole suite — measured, and a hang reports as nothing)
   const real = globalThis.fetch
   const hanging = () => ({
     status: 200,
@@ -12890,6 +12892,35 @@ test("a cancel that never settles does not hold the hook", async () => {
     const u = await auth.usage(async () => ({ type: "api", key: "ms-hangcancel-00000000000001" }))
     const ms = Date.now() - started
     assert.ok(u.error, "usage must answer, not hang")
+    assert.ok(ms < 10_000, `usage took ${ms} ms with a cancel that never settles`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a body with no length that overruns the cap is abandoned without waiting on its cancel", { timeout: 20_000 }, async () => {
+  // The declared-length refuse path and this one are two different cancels: a
+  // body with no content-length is read in chunks and the cap is met
+  // mid-stream. Measured, awaiting reader.cancel() here left all 447 plugin
+  // tests green — the cancel test above only ever reached the branch that
+  // trusts the header it was handed — so the hook could hang on a streamed
+  // page nobody bounded.
+  const real = globalThis.fetch
+  const chunk = new Uint8Array(64 * 1024).fill(0x61)
+  globalThis.fetch = async () => ({
+    status: 200,
+    headers: { get: () => null },
+    body: new ReadableStream({
+      pull: (ctl) => ctl.enqueue(chunk.slice()),
+      cancel: () => new Promise(() => {}),
+    }),
+  })
+  try {
+    const started = Date.now()
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-streamcap-000000000000001" }))
+    const ms = Date.now() - started
+    assert.ok(u.error, "usage must answer, not hang")
+    assert.match(String(u.error), /过大/, `the cap's own sentence is the one to show: ${u.error}`)
     assert.ok(ms < 10_000, `usage took ${ms} ms with a cancel that never settles`)
   } finally {
     globalThis.fetch = real
