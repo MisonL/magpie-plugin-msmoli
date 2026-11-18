@@ -7806,6 +7806,35 @@ test("a login answer with no data still finishes the check-in", async () => {
   assert.equal(r.credit, 200)
 })
 
+test("a grant the first page carries twice is summed once", async () => {
+  // The walk merges an aggregate that comes back on a LATER page with the copy
+  // it already has, by the server's own id. The first page went in as it came,
+  // so a page that repeated an id inside itself had both copies summed: one
+  // 200 grant read as "今日已领取 400" on the card and doubled the usage
+  // window's denominator.
+  const row = { ...day({ total_amount: 200 }), id: "grant-a" }
+  for (const fn of ["checkin", "usage"]) {
+    const seen = await withFetch(
+      {
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 100 } } },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+          body: { success: true, data: { records: [row, row], total: 1 } },
+        },
+      },
+      async () => auth[fn](async () => ({ type: "api", key: "ms-dupid-0000-0000-0000-0000001" })),
+    )
+    if (fn === "checkin") {
+      assert.equal(seen.outcome, "done", JSON.stringify(seen))
+      assert.equal(seen.credit, 200, `the same grant was counted twice: ${JSON.stringify(seen)}`)
+      assert.doesNotMatch(seen.message, /每日签到 \+ 每日签到|注册并登录 \+ 注册并登录/, `the row was named twice: ${seen.message}`)
+    } else {
+      const shown = JSON.stringify(seen)
+      assert.ok(!shown.includes('"limit":400'), `the window counted the row twice: ${shown}`)
+    }
+  }
+})
+
 test("an amount the ledger will not read does not un-claim a day already claimed", async () => {
   // The claimed branch sums today's daily rows, and one row whose amount
   // cannot be read made that sum throw — out into the hook's catch, which
@@ -12747,5 +12776,39 @@ test("a plain word in capitals in front of a key stays on the card", () => {
     assert.ok(out.startsWith(kept), `the word in front went into the mask: ${JSON.stringify(out)}`)
     assert.ok(out.includes("…"), `the key went unmasked: ${JSON.stringify(out)}`)
     assert.ok(!out.includes("ABCDEF12 "), "the tail of the key stayed")
+  }
+})
+
+test("a full-width key grouped by spaces is masked on the card, in names and in a log line", () => {
+  // maskSpaced walks ASCII words, and maskKeys' fold reads one word at a time:
+  // a key typed in full width with a space every few characters is neither —
+  // every piece is short, so no reading found a key and the whole token went
+  // out on the card, in hostText (the log line) and, when a server echoed it
+  // as the nickname, into the account's stored name.
+  const ascii = "ms-" + "Example12".repeat(3)
+  const full = [...ascii].map((c) => {
+    const k = c.charCodeAt(0)
+    return k >= 0x21 && k <= 0x7e ? String.fromCharCode(k + 0xfee0) : c
+  })
+  const spellings = [
+    full.join("").match(/.{1,4}/g).join(" "), // full width, ASCII spaces
+    full.join("").match(/.{1,4}/g).join("　"), // full width, ideographic spaces
+    ascii.match(/.{1,4}/g).join("　"), // ASCII letters, ideographic spaces
+  ]
+  for (const v of spellings) {
+    const body = v.replace(/\s+/g, "").normalize("NFKC").slice(3) // past the "ms-" front: the front may stay
+    const leaked = (text) => {
+      // the pieces are cut by spaces, so the reader joins them back before
+      // asking: a reader of the card does the same
+      const t = text.normalize("NFKC").replace(/[\s　]+/g, "")
+      for (let i = 0; i + 6 <= body.length; i += 1) if (t.includes(body.slice(i, i + 6))) return body.slice(i, i + 6)
+      return ""
+    }
+    const out = testables.maskAll(v, true)
+    assert.equal(leaked(out), "", `${JSON.stringify(v)} left ${JSON.stringify(leaked(out))} on the card: ${JSON.stringify(out)}`)
+    const said = testables.hostText(`no key ${v} for provider`)
+    assert.equal(leaked(said), "", `hostText left ${JSON.stringify(leaked(said))}: ${said}`)
+    const named = testables.nameText(v, "")
+    assert.equal(leaked(named), "", `nameText left ${JSON.stringify(leaked(named))}: ${named}`)
   }
 })

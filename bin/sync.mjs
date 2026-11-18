@@ -37,9 +37,22 @@ const CN_SITE = "https://modelscope.cn"
 // the two can never drift — a published tarball carries package.json beside
 // bin/, and so does a clone. An unreadable manifest is not a reason to fail a
 // version question: the answer is just unknown.
+//
+// The entry itself is resolved first: npm installs .bin entries as links, and a
+// launcher that keeps the link (node --preserve-symlinks-main, which npx's
+// shims do not always avoid) made the relative lookup resolve against the link
+// rather than the package, and a package that declares its version answered
+// "unknown". isMain already resolves the same way.
 const VERSION = (() => {
+  const here = fileURLToPath(import.meta.url)
+  let manifest = new URL("../package.json", import.meta.url)
   try {
-    return JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")).version ?? "unknown"
+    manifest = pathToFileURL(join(dirname(realpathSync(here)), "..", "package.json"))
+  } catch {
+    // a path realpath cannot resolve is still a path the relative URL names
+  }
+  try {
+    return JSON.parse(readFileSync(fileURLToPath(manifest), "utf8")).version ?? "unknown"
   } catch {
     return "unknown"
   }
@@ -1677,6 +1690,14 @@ function chunked(text) {
       while (k < stop && /[A-Za-z0-9+/=_.-]/.test(text[k])) k += 1
       if (k - at < CHUNK / 2) at = k
     }
+    // The carry is a copy of the previous piece's tail, read again so a key the
+    // cut split is whole for this one. It has to begin where the run it sits in
+    // begins: a carry that opened two characters into a key gave this piece a
+    // body with its front cut off — no front, no key — and it printed that body
+    // beside the mask the previous piece had already written for the whole run.
+    // The piece's own start moves back with it, so the run is read to the same
+    // end either way and the piece stays under CHUNK (widening the carry alone
+    // is what recursed: the piece grew past the chunk and arg() cut it again).
     pieces.push({ text: text.slice(start, end), carry: skip })
     at = end
   }
@@ -1714,7 +1735,21 @@ export function arg(v) {
       // behind it is shorter than the carry it stands for
       const seen = arg(text)
       const carryText = arg(text.slice(0, carry))
-      out = (out.endsWith(carryText) ? out.slice(0, out.length - carryText.length) : out) + seen
+      if (out.endsWith(carryText)) {
+        out = out.slice(0, out.length - carryText.length) + seen
+        continue
+      }
+      // The carry's own read did not come out the same as the previous piece's
+      // tail — the carry began INSIDE a run, so this piece was handed the run's
+      // body with its front cut off and read it as ordinary text. The previous
+      // piece had the whole run and wrote a mask for it; repeating the run's
+      // opening characters here prints them beside that mask. They are dropped:
+      // a mask in `out` means the run before it was taken, and this piece's own
+      // text starts where it starts, so nothing else is lost.
+      let cut = 0
+      while (cut < seen.length && cut < carry && /[A-Za-z0-9+/=_.-]/.test(seen[cut])) cut += 1
+      if (cut > 0 && !out.includes(MASKED)) cut = 0
+      out = out + seen.slice(cut)
     }
     return out
   }

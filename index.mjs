@@ -2058,7 +2058,61 @@ const maskCaps = (s, letters) => {
 // before maskCut: a middot-joined run of a key's shape is the key's own cut
 // (maskSpaced reads it whole, maskCut reads each piece alone), and maskCut
 // draws "·" as a mask's ellipsis when it is on the mask's own edge
-const maskAll = (s, letters) => maskKeys(maskSpaced(maskCut(maskSpaced(maskCaps(s, letters), letters), letters), letters), letters)
+const maskAll = (s, letters) => maskKeys(maskSpaced(maskCut(maskSpaced(maskCaps(maskWide(s, letters), letters), letters), letters), letters), letters)
+
+// maskWide reads a key written in full width and cut by spaces among its
+// pieces. Every reading above walks ASCII words: a full-width piece is no word
+// to them, and each piece is short on its own, so a token like
+// "ｍｓ－Ｅ ｘａｍｐ ｌｅ１２ …" found no reading at all and went out whole — on the
+// card, in a host log line and, when a server echoed it as the nickname, into
+// the account's stored name.
+//
+// Only the stretch that holds a full-width character is looked at. It is folded
+// (NFKC turns "ｍｓ－" back into "ms-"), its spaces are dropped, and the result
+// is asked the card's own questions: does it open like a ModelScope key, and
+// does the body read as one. A stretch that does is replaced by that key's
+// mask; every other stretch, and every other character of the text, is left
+// exactly as it was written.
+const maskWide = (s, letters) => {
+  if (typeof s !== "string" || !/[^\x00-\x7e]/.test(s)) return s
+  const chars = [...s]
+  let out = ""
+  let at = 0
+  let k = 0
+  while (k < chars.length) {
+    // a stretch is a run of letters, spaces and full-width characters: the
+    // key's own pieces, and the gaps they were cut with
+    if (!/[A-Za-z0-9\s 　-￿]/.test(chars[k]) || !/[^\x00-\x7e]/.test(chars[k])) {
+      k += 1
+      continue
+    }
+    let end = k
+    while (end < chars.length && /[A-Za-z0-9\s 　-￿]/.test(chars[end])) end += 1
+    // the key ends at its own last full-width or spaced piece: the ASCII words
+    // after it ("for provider") are the text's, and a window that ran on to
+    // them took them with the mask
+    let stop = end
+    while (stop > k && !/[^\x00-\x7e]/.test(chars[stop - 1])) stop -= 1
+    while (stop > k && /\s/.test(chars[stop - 1])) stop -= 1
+    if (stop <= k) {
+      k = end
+      continue
+    }
+    const folded = chars.slice(k, stop).join("").normalize("NFKC")
+    const flat = folded.replace(/[\s　]+/g, "")
+    // "－" is U+FF0D, which NFKC leaves alone; the shape test reads it as a
+    // hyphen, and so does this one
+    const asked = flat.replace(/－/g, "-")
+    if (/^ms-/i.test(asked) && asked.length > 12 && keyBody.test(asked)) {
+      // the mask stands for the key; the rest of the window is the text's
+      out += s.slice(at, k) + maskToken(asked) + chars.slice(stop, end).join("")
+      at = end
+    }
+    k = end
+  }
+  return out + s.slice(at)
+}
+
 // maskKeys walks the words of a piece of text: one word that is itself a key
 // goes, and inside a word that is not, only the key-like runs and UUIDs go.
 // Punctuation that cannot be part of a key stays where it was, so a card
@@ -3031,25 +3085,40 @@ const idOf = (r) =>
   r?.id !== undefined && r?.id !== null && r.id !== "" ? `id:${String(r.id)}` : ""
 
 async function dayRows(profile, token, day, first, deadline, body, { expiry = true } = {}) {
-  const all = [...first]
-  let rows = first
+  // A page can repeat an aggregate within itself — the same id twice, the
+  // same grant twice — and the walk below only merges an id it has seen on a
+  // LATER page: the first page went in as it came, so a 200 grant on it was
+  // summed as 400 and the card read "今日已领取 400". Rows the server names
+  // are kept once, by the same identity the later pages are merged by.
+  const all = []
+  const firstSeen = new Map()
+  for (const r of first) {
+    const id = idOf(r)
+    if (id && firstSeen.has(id)) {
+      all[firstSeen.get(id)] = r
+      continue
+    }
+    if (id) firstSeen.set(id, all.length)
+    all.push(r)
+  }
+  let rows = all
   let pages = 1
   // A page seen before is the page number being ignored, and a row seen before
   // is the server shifting its window between reads: the same grant then sits
   // at the bottom of one page and the top of the next, and summing both
   // reports it twice.
   const seenPages = new Set([stable(first)])
-  const seenRows = new Set(first.map(rowKey))
+  const seenRows = new Set(all.map(rowKey))
   // the aggregate behind each row already counted, and where it sits in `all`:
   // a row that comes back with the same identity but new numbers replaces the
   // one in hand (the later read is the newer read) instead of being summed
   // beside it
   const byId = new Map()
-  first.forEach((r, i) => {
+  all.forEach((r, i) => {
     const id = idOf(r)
     if (id && !byId.has(id)) byId.set(id, i)
   })
-  let { total, contradicted } = totalOf(body, first)
+  let { total, contradicted } = totalOf(body, all)
   let complete = false
   // Two questions end this walk, and they are not the same one. The day's
   // numbers are proven complete by a page older than the day, a total the rows

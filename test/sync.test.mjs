@@ -7213,3 +7213,41 @@ test("a word longer than a chunk loses nothing at the chunk's start", () => {
     assert.ok(out.includes("invalid"), `at ${run}, the word after the run was dropped`)
   }
 })
+
+test("a carry that begins inside a key does not print the key's tail", () => {
+  // The piece before had the whole key and masked it. This piece's carry began
+  // two characters into that key, so its own read saw "s-example…" — no front,
+  // no key — and printed it beside the mask the previous piece had already
+  // written. Measured: the whole body after the front reached the terminal.
+  const key = "ms-" + "example".repeat(4)
+  // a body of "!" puts the key where the FIRST piece ends inside it, so the
+  // second piece's carry begins on the key's third character
+  for (const shift of [-4, -2, 0, 2, 4, 16, 40]) {
+    const start = 32768 - 256 - 2 + shift
+    const v = "!".repeat(start) + key + " ".repeat(300) + "tail example"
+    const out = arg(v)
+    assert.ok(!out.includes(key.slice(2)), `at ${shift}: the key's body reached the terminal: ${JSON.stringify(out.slice(-140))}`)
+    assert.ok(out.endsWith("tail example"), `at ${shift}: the text after the key was eaten`)
+  }
+  // and the same text through scrub, which is what a child's output goes through
+  const at = 32768 - 256 - 2
+  const v = "!".repeat(at) + key + " ".repeat(300) + "tail example"
+  assert.ok(!scrub(v, "another-secret-entirely").includes(key.slice(2)), "scrub printed the key's body")
+})
+
+test("--version reads the manifest through a symlinked entry", () => {
+  // npm installs .bin entries as links, and a launcher that keeps the link
+  // (node --preserve-symlinks-main) made the manifest lookup relative to the
+  // link instead of the package: the answer was "unknown" for a package that
+  // declares its version.
+  const fresh = mkdtempSync(join(tmpdir(), "msmoli-version-"))
+  try {
+    const link = join(fresh, "magpie-plugin-msmoli")
+    symlinkSync(bin, link)
+    const r = spawnSync(process.execPath, ["--preserve-symlinks-main", link, "--version"], { encoding: "utf8", timeout: 30_000 })
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(r.stdout, /^magpie-plugin-msmoli \d+\.\d+\.\d+/, `the version was not read through the link: ${JSON.stringify(r.stdout)}`)
+  } finally {
+    rmSync(fresh, { recursive: true, force: true })
+  }
+})
