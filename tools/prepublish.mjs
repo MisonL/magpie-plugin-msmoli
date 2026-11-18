@@ -19,10 +19,12 @@
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 
-// Today's suite is 726 tests (the plain run); the floor leaves room for a
+// Today's suite is 761 tests (the plain run); the floor leaves room for a
 // legitimate consolidation while still catching a whole file that vanished.
-// (Keep this number current: a stale one reads as a suite that shrank.)
-const MIN_TESTS = 600
+// (Keep this number current: a stale one reads as a suite that shrank. It sat
+// at 600 while the comment said 726, so about 160 tests could have gone
+// missing — most of one test file — with the gate still green.)
+const MIN_TESTS = 700
 
 // The count floor alone does not catch one file going missing: sync.test.mjs is
 // ~300 tests and style.test.mjs is 7, so dropping either still clears 600, and
