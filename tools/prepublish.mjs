@@ -44,7 +44,11 @@ const modes = [
     cmd: "node",
     args: ["--import", "./tools/ticking-clock.mjs", "--test"],
     // the mode's own probe test must run: it is the only test that is not in
-    // the plain run, and its absence is how an inert shim would hide
+    // the plain run, and its absence is how an inert shim would hide. Its NAME
+    // is what proves it — a count one higher is satisfied by any extra test a
+    // stray file in the folder contributes (a decoy *.test.mjs beside the
+    // suite was measured passing the gate with the shim inert).
+    probe: "the ticking clock shim is in effect for test files",
     expectsExtraTest: true,
   },
   {
@@ -52,6 +56,7 @@ const modes = [
     cmd: "node",
     args: ["--test"],
     env: { MSMOLI_FAKE_NOW: "1893456000000" },
+    probe: "the shifted clock is in effect for this run",
     expectsExtraTest: true,
   },
   { name: "bun test", cmd: "bun", args: ["test"], optional: true },
@@ -103,6 +108,13 @@ for (const m of modes) {
   if (plain === null) plain = passed
   if (m.expectsExtraTest && passed <= plain) {
     process.stdout.write(`FAILED: ${m.name}: ${passed} tests, no more than the plain run's ${plain}; the mode's own probe did not run, so its clock shim may be inert.\n`)
+    failed = true
+  }
+  // the count is a weak proof on its own: a stray *.test.mjs in the folder is
+  // collected by `node --test` and clears the "+1" without the probe running.
+  // The probe test's own name has to appear in this mode's output.
+  if (m.probe && !out.includes(m.probe)) {
+    process.stdout.write(`FAILED: ${m.name}: the mode's probe test ${JSON.stringify(m.probe)} did not run; its clock shim may be inert.\n`)
     failed = true
   }
 }
