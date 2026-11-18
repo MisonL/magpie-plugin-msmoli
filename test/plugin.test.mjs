@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict"
 import { after, test } from "node:test"
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -12541,6 +12541,24 @@ test("a config path that is a directory keeps the claim off, not on a made-up wi
   process.env.MAGPIE_MSMOLI_CONFIG = join(dir, "msmoli.json")
   try {
     assert.equal(testables.windowIn(dir), null, "a directory in the config's place is not the default window")
+  } finally {
+    delete process.env.MAGPIE_MSMOLI_CONFIG
+    if (saved !== undefined) process.env.MAGPIE_MSMOLI_CONFIG = saved
+  }
+})
+
+test("a config path that is a link to itself keeps the claim off too", () => {
+  // ELOOP is the same shape as EISDIR: the entry is there and cannot be read,
+  // and will never be JSON. Left in the catch-all `{}` it became the default
+  // window, which moved the claim to a time the user never named.
+  const dir = tmpDir("msmoli-eloop-")
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  const cfg = join(dir, "msmoli.json")
+  symlinkSync(cfg, join(dir, "loop.json"))
+  symlinkSync(join(dir, "loop.json"), cfg)
+  process.env.MAGPIE_MSMOLI_CONFIG = cfg
+  try {
+    assert.equal(testables.windowIn(dir), null, "a self-referencing link is not the default window")
   } finally {
     delete process.env.MAGPIE_MSMOLI_CONFIG
     if (saved !== undefined) process.env.MAGPIE_MSMOLI_CONFIG = saved

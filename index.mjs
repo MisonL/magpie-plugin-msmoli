@@ -641,7 +641,11 @@ function configOf(dir) {
     // "not known", and the caller keeps the window off rather than inventing
     // one. A directory in the file's place (EISDIR) is the same answer: it is
     // there and cannot be read, and it is never going to be JSON.
-    const denied = e && typeof e === "object" && (e.code === "EACCES" || e.code === "EPERM" || e.code === "EISDIR")
+    // `ELOOP` is the same shape: a link that points at itself is there and
+    // cannot be read, and it is never going to be JSON either — the same
+    // reasoning as EISDIR, and a file the user cannot open must not silently
+    // become the default window.
+    const denied = e && typeof e === "object" && (e.code === "EACCES" || e.code === "EPERM" || e.code === "EISDIR" || e.code === "ELOOP")
     return denied ? undefined : {}
   }
 }
