@@ -208,8 +208,14 @@ npx magpie-plugin-msmoli --status      # see both sides, change nothing; exits 0
 npx magpie-plugin-msmoli --to-plugin   # copy the preset's key into the plugin
 ```
 
-From a GitHub install, run magpie's own copy instead:
-`node ~/.config/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs`.
+From a GitHub install, run magpie's own copy instead. magpie keeps its files
+under `$XDG_CONFIG_HOME/magpie` when that is set (the installed default is
+`~/.config/magpie`), so resolve the folder rather than hardcoding one:
+
+```bash
+node "${XDG_CONFIG_HOME:-$HOME/.config}/magpie/plugins/node_modules/magpie-plugin-msmoli/bin/sync.mjs"
+```
+
 From a clone, run `./bin/sync.mjs` (or `node bin/sync.mjs` on Windows and
 WSL). npm 12 blocks `npx github:…` by default, so don't start from that.
 

@@ -19,7 +19,7 @@
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 
-// Today's suite is 761 tests (the plain run); the floor leaves room for a
+// Today's suite is 768 tests (the plain run); the floor leaves room for a
 // legitimate consolidation while still catching a whole file that vanished.
 // (Keep this number current: a stale one reads as a suite that shrank. It sat
 // at 600 while the comment said 726, so about 160 tests could have gone
@@ -32,6 +32,20 @@ const MIN_TESTS = 700
 // test/style.test.mjs deleted the gate printed "every mode passed".) The three
 // files are named here so a publish cannot go out with one of them gone.
 const FILES = ["test/plugin.test.mjs", "test/sync.test.mjs", "test/style.test.mjs"]
+
+// Present is not the same as intact: a file truncated by a bad merge to its
+// first test still clears the global floor. Measured on the 768-test suite,
+// with test/style.test.mjs trimmed from 7 tests to 1 the gate printed "every
+// mode passed" at 762 — the line-ending, trailing-whitespace and indentation
+// checks had silently gone, and the publish went out on a suite missing a
+// file's worth of guards. So each file is also run on its own and held to a
+// floor of its own. The numbers are today's counts (456 / 305 / 7) less room
+// for a legitimate consolidation; keep them current the way MIN_TESTS is.
+const PER_FILE = [
+  { file: "test/plugin.test.mjs", min: 430 },
+  { file: "test/sync.test.mjs", min: 280 },
+  { file: "test/style.test.mjs", min: 5 },
+]
 
 const missing = FILES.filter((f) => !existsSync(f))
 if (missing.length) {
@@ -119,6 +133,34 @@ for (const m of modes) {
     process.stdout.write(`FAILED: ${m.name}: the mode's probe test ${JSON.stringify(m.probe)} did not run; its clock shim may be inert.\n`)
     failed = true
   }
+}
+
+// Each file, alone: a file that is there but truncated still clears the global
+// floor, and the runner's summary does not say which file a count came from.
+// The three files are independent (none imports another), so running one is
+// the same suite CI runs for it, and the count is the file's own.
+for (const { file, min } of PER_FILE) {
+  process.stdout.write(`\n$ node --test ${file}\n`)
+  const r = spawnSync("node", ["--test", file], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })
+  const out = `${r.stdout ?? ""}${r.stderr ?? ""}`
+  if (r.error) {
+    process.stdout.write(`FAILED: ${file}: ${r.error.message}\n`)
+    failed = true
+    continue
+  }
+  const passed = passedOf(out)
+  if (r.status !== 0) {
+    process.stdout.write(out)
+    process.stdout.write(`FAILED: ${file} exited ${r.status}\n`)
+    failed = true
+    continue
+  }
+  if (!Number.isFinite(passed) || passed < min) {
+    process.stdout.write(`FAILED: ${file}: ${Number.isFinite(passed) ? `${passed} passing tests` : "no test count"}, below its own floor of ${min}; the file is there but short.\n`)
+    failed = true
+    continue
+  }
+  process.stdout.write(`${file}: ${passed} tests, floor ${min}.\n`)
 }
 
 if (failed) {
