@@ -2066,9 +2066,21 @@ const maskCaps = (s, letters) => {
   const out = []
   let from = 0
   let i = 0
+  // a piece's own trailing punctuation is the text's ("{\"key\":\"…MPLE\"}"):
+  // the join is judged and masked on the key's characters, and the mark after
+  // them stays as written
+  const TAIL = /[^A-Za-z0-9]+$/
   while (i < words.length) {
     const w = words[i][0]
-    if (!VENDOR.test(w) && !(/^[A-Z0-9]{4,}$/.test(w) && /[A-Z]/.test(w))) {
+    // a frame glued to the key's front is one word to this reading
+    // ("key=AKIA …", "\"AKIA …", "/path/AKIA …", "_AKIA …"): the front starts
+    // where it starts, and a word that read only whole masked the pieces after
+    // it and left "AKIA IOSF" as written on the card, eight characters of the
+    // id. What stays outside the mask is the word in front of the front.
+    const at0 = REST_VENDOR.exec(w)
+    const lead0 = at0 && at0.index > 0 && !/[A-Za-z0-9]/.test(w[at0.index - 1]) ? at0.index : 0
+    const head = (lead0 ? w.slice(lead0) : w).replace(TAIL, "")
+    if (!VENDOR.test(head) && !(/^[A-Z0-9]{4,}$/.test(head) && /[A-Z]/.test(head))) {
       i += 1
       continue
     }
@@ -2078,9 +2090,9 @@ const maskCaps = (s, letters) => {
     // this cubic in the page length (a 20 KB page of "ABCD EFGH " took 71 s,
     // and the hook's budget is 25), and the answer only ever goes from true to
     // false as pieces are added.
-    const pieces = [w]
-    let allCaps = /^[A-Z0-9]+$/.test(w)
-    let joined = w.length
+    const pieces = [head]
+    let allCaps = /^[A-Z0-9]+$/.test(head)
+    let joined = head.length
     // the piece the join first read as a key at, and the piece the key begins
     // at. A word that is prose on its own ("ABCD") is not made part of the key
     // by what follows it, and a vendor front is the key's own ("AKIA" of
@@ -2097,10 +2109,10 @@ const maskCaps = (s, letters) => {
       allCaps &&
       joined < CAP &&
       s.slice(end(j), at(j + 1)).length <= 2 &&
-      /^[A-Z0-9]{2,}$/.test(words[j + 1][0])
+      /^[A-Z0-9]{2,}$/.test(words[j + 1][0].replace(TAIL, ""))
     ) {
       j += 1
-      const piece = words[j][0]
+      const piece = words[j][0].replace(TAIL, "")
       pieces.push(piece)
       joined += piece.length
       if (!/^[A-Z0-9]+$/.test(piece)) allCaps = false
@@ -2121,32 +2133,34 @@ const maskCaps = (s, letters) => {
       while (
         j + 1 < words.length &&
         s.slice(end(j), at(j + 1)).length <= 2 &&
-        /^[A-Z0-9]{2,}$/.test(words[j + 1][0])
+        /^[A-Z0-9]{2,}$/.test(words[j + 1][0].replace(TAIL, ""))
       ) {
         j += 1
-        core.push(words[j][0])
+        core.push(words[j][0].replace(TAIL, ""))
       }
       if (core.length > 1) body = core.join("")
-      out.push(s.slice(from, at(i0)), maskToken(body))
-      from = end(j)
+      // the word the front sits in keeps its own text in front of the mask,
+      // and the last word keeps the mark after it
+      out.push(s.slice(from, at(i0) + (lead === 0 ? lead0 : 0)), maskToken(body))
+      from = at(j) + words[j][0].replace(TAIL, "").length
       i = j + 1
       continue
     }
     // the join is the pieces with the gap between them taken out, as before
-    let body = pieces.length === 1 ? w : pieces.join("")
+    let body = pieces.length === 1 ? head : pieces.join("")
     if (j > i && keyy(body)) {
       // the run past the cap is the same key's: read on to its end
       while (
         j + 1 < words.length &&
         s.slice(end(j), at(j + 1)).length <= 2 &&
-        /^[A-Z0-9]{2,}$/.test(words[j + 1][0])
+        /^[A-Z0-9]{2,}$/.test(words[j + 1][0].replace(TAIL, ""))
       ) {
         j += 1
-        pieces.push(words[j][0])
+        pieces.push(words[j][0].replace(TAIL, ""))
       }
       if (pieces.length > 1) body = pieces.join("")
-      out.push(s.slice(from, at(i)), maskToken(body))
-      from = end(j)
+      out.push(s.slice(from, at(i) + lead0), maskToken(body))
+      from = at(j) + words[j][0].replace(TAIL, "").length
       i = j + 1
       continue
     }

@@ -13369,23 +13369,44 @@ const leakOfKey = (out, key) => {
   return ""
 }
 
-test("an AWS key id cut by spaces keeps its front on the card", () => {
+test("an AWS key id cut by spaces keeps its front on the card, whatever the word in front of it", () => {
   // maskCaps re-started its join at the shortest form that read as a key
   // ("AKIAIOSFODNN7EXA") and then counted the pieces joined AFTER that moment
   // as ones standing in front of the key: the front came off with them, and
   // "AKIA IOSF…MPLE" put eight characters of the id on the card and in the
   // host's log line. A head that is key material on its own — a vendor front,
   // or a capital beside a digit — is where the key begins.
+  // The head is read out of its word, too: "key=AKIA …", "\"AKIA …" and
+  // "/path/AKIA …" are one word to this reading, and the front inside it went
+  // out on the card in every one of them (measured, 33 of 39 prefixes;
+  // "xAKIA …" stayed a word's own letters, and a letter or a digit glued to
+  // the front in front of it still joins as before).
   const key = "AKIAIOSFODNN7EXAMPLE"
-  const v = "AKIA IOSF ODNN 7EXA MPLE"
-  for (const [tag, out] of [
-    ["card", testables.maskAll(v, true)],
-    ["host", testables.hostText(v)],
-    ["arg", arg(v)],
+  for (const v of [
+    "AKIA IOSF ODNN 7EXA MPLE",
+    "key=AKIA IOSF ODNN 7EXA MPLE",
+    '{"key":"AKIA IOSF ODNN 7EXA MPLE"}',
+    "AWS_KEY=AKIA IOSF ODNN 7EXA MPLE",
+    "/path/AKIA IOSF ODNN 7EXA MPLE",
+    // a word's leading mark is not a frame either: the front behind it is
+    // where the key starts ("_AKIA IOSF…MPLE" printed eight body characters)
+    "-AKIA IOSFODNN 7EXA MPLE",
+    ".ASIA IOSF ODNN 7EXA MPLE",
+    "_AKIA IOSF ODNN 7EXA MPLE",
+    "-AKIA IOSF ODNN 7EXA MPLE",
   ]) {
-    assert.equal(leakOfKey(out, key), "", `${tag}: ${JSON.stringify(out)}`)
+    for (const [tag, out] of [
+      ["card", testables.maskAll(v, true)],
+      ["host", testables.hostText(v)],
+      ["arg", arg(v)],
+      ["scrub", scrub(v)],
+    ]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} ${JSON.stringify(v)}: ${JSON.stringify(out)}`)
+    }
   }
-  assert.equal(testables.maskAll(v, true), "AKIA…MPLE")
+  assert.equal(testables.maskAll("AKIA IOSF ODNN 7EXA MPLE", true), "AKIA…MPLE")
+  // the word in front of the key is still the text's
+  assert.equal(testables.maskAll("key=AKIA IOSF ODNN 7EXA MPLE", true), "key=AKIA…MPLE")
 })
 
 test("a digest, a UUID or a vendor key cut by marks is masked with no front to lead it", () => {

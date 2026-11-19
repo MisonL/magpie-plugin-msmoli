@@ -5748,8 +5748,10 @@ test("a middot-cut key behind a frame's punctuation is masked in arg() too", () 
     const lead = v.match(/^[^A-Za-z0-9]*[A-Za-z]+=[^A-Za-z0-9]*|^[^A-Za-z0-9]+/)[0]
     assert.ok(out.startsWith(lead), `the frame is kept: ${JSON.stringify(lead)} → ${out}`)
   }
-  // and the frames' words stay, as before
-  assert.equal(arg("key=AKIAIOS·FODNN7E·XAMPLE."), "key=AKIA…PLE.")
+  // and the frames' words stay, as before. The full stop after the key is the
+  // text's, not the key's: the mask keeps four characters of the key's own
+  // each end ("…MPLE"), and the mark prints after it as written.
+  assert.equal(arg("key=AKIAIOS·FODNN7E·XAMPLE."), "key=AKIA…MPLE.")
 })
 
 // the ceiling below is on cpu time, not on the runner's clock: Bun's default

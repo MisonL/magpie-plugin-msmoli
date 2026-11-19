@@ -1238,7 +1238,11 @@ function splitKey(s) {
     // to the per-word pass ("ghp_…9012·IjKl…7890")
     if (best > 0) {
       const last = pieces[best]
-      return { pre: s.slice(0, pieces[from].at), body: pieces.slice(from, best + 1).map((p) => p.text).join(""), post: s.slice(last.at + last.text.length) }
+      // (the body is the pieces the walk took, not the running join: the
+      // short word behind a middot is the key's end and is only moved into
+      // `best`, never added to the running string)
+      const body = pieces.slice(from, best + 1).map((p) => p.text).join("")
+      return { pre: s.slice(0, pieces[from].at), body, post: s.slice(last.at + last.text.length) }
     }
   }
   return null
@@ -1618,14 +1622,26 @@ const capsRun = (s) => {
   const out = []
   let from = 0
   for (let i = 0; i < words.length; i += 1) {
+    // a frame glued to the key's front is one word to this reading
+    // ("_AKIA …", "key=AKIA …"): the front starts where it starts. A word that
+    // read only whole masked the pieces after it and left "AKIA IOSF" as
+    // written ("_AKIA IOSF ODNN 7EXA MPLE" printed its first eight body
+    // characters and the card and the host's log line did the same)
+    const at0 = VENDOR_SPAN.exec(words[i][0])
+    VENDOR_SPAN.lastIndex = 0
+    const lead = at0 && at0.index > 0 && !/[A-Za-z0-9]/.test(words[i][0][at0.index - 1]) ? at0.index : 0
+    const head = words[i][0].slice(lead)
+    // the piece's own trailing mark is the text's ("…MPLE\"", "…MPLE)"):
+    // the join is judged on the key's characters and the mark stays
+    const TAIL = /[^A-Za-z0-9]+$/
     // three characters is a key's piece too ("AKI AIO SFO …" is a key cut
     // into threes); the join still has to be long enough to be one, so a
     // sentence of two capitals is not read
-    if (!/^[A-Z0-9]{3,}$/.test(words[i][0]) || !/[A-Z0-9]/.test(words[i][0])) continue
+    if (!/^[A-Z0-9]{3,}$/.test(head.replace(TAIL, "")) || !/[A-Z0-9]/.test(head)) continue
     let j = i
-    let body = words[i][0]
+    let body = head.replace(TAIL, "")
     // a piece carries the card's own separator on its end ("AKIAIO· SFODNN·…")
-    const piece = (w) => w.replace(/[·•∙‧・]+$/, "")
+    const piece = (w) => w.replace(/[·•∙‧・]+$/, "").replace(TAIL, "")
     // the join stops at four times RUNCUT: a key is never longer, and a body
     // of tiny words ("1A1 1A1 …") is otherwise re-read from every start
     while (j + 1 < words.length && body.length < 4 * RUNCUT && s.slice(words[j].index + words[j][0].length, words[j + 1].index).length <= 2 && /^[A-Z0-9]{2,}$/.test(piece(words[j + 1][0]))) {
@@ -1652,8 +1668,10 @@ const capsRun = (s) => {
       if (j > i) i = Math.max(i, j - 13)
       continue
     }
-    out.push(s.slice(from, words[i].index), mask(body))
-    from = words[j].index + words[j][0].length
+    // the word the front sits in keeps its own text in front of the mask, and
+    // the last word keeps the mark after it
+    out.push(s.slice(from, words[i].index + lead), mask(body))
+    from = words[j].index + piece(words[j][0]).length
     i = j
   }
   return out.join("") + s.slice(from)
@@ -2220,7 +2238,17 @@ function joinFramed(s) {
     const t0 = words[i].text
     let cut = -1
     for (let j = 0; j < t0.length; j += 1) if (FRAME_AT.test(t0[j])) cut = j
-    const head = t0.slice(cut + 1)
+    // a vendor front behind a plain mark is where the key starts ("_AKIA
+    // IOSFODNN 7EXA MPLE"): the word's own leading mark is not a frame, and a
+    // walk that began at the first word key material on its own began one word
+    // late — the head printed as written beside the body's mask (measured,
+    // eight body characters; the card and the host's log line did the same)
+    const lead = cut < 0 ? (() => {
+      const m = VENDOR_SPAN.exec(t0)
+      VENDOR_SPAN.lastIndex = 0
+      return m && m.index > 0 && /^[_\-.]+$/.test(t0.slice(0, m.index)) ? m.index : 0
+    })() : 0
+    const head = t0.slice((cut >= 0 ? cut : lead - 1) + 1)
     if (!head || !KEYCH.test(head)) continue
     // a value a frame names is read from after the frame. With no frame the
     // head has to look like the start of a key and not like a folder or a word:
@@ -2324,7 +2352,7 @@ function joinFramed(s) {
       }
     }
     if (best) {
-      const startAt = words[i].at + cut + 1
+      const startAt = words[i].at + (cut >= 0 ? cut : lead - 1) + 1
       return s.slice(0, startAt) + mask(best) + s.slice(bestEnd)
     }
   }
