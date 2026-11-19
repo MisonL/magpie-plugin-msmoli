@@ -13171,3 +13171,30 @@ test("records that are not rows are a body we do not understand", async () => {
     assert.match(r.message, /账单/, `the reason is not the ledger's: ${r.message}`)
   }
 })
+
+test("a ledger whose rows kept only rule_key is a body we do not understand", async () => {
+  // isRow accepted a row carrying any ONE of four names, so a body whose rows
+  // had been renamed down to `rule_key` alone (type/gmt_created dropped, the
+  // way a changed API or a proxy's rewrite reads) passed the shape check.
+  // Every day lookup then answered "no row", and the check-in settled the day
+  // as `inactive` — beside a ledger that may have held today's claim. A row
+  // of this ledger names its kind and the day it was written, and those are
+  // the two fields every read here keys on.
+  for (const lost of [
+    { id: 1, created_at: today, rule_key: "daily_active", total_amount: 200 },
+    { id: 2, gmt_created: today, rule_key: "daily_active", total_amount: 200 },
+    { id: 3, type: "EARN", rule_key: "daily_active", total_amount: 200 },
+  ]) {
+    const r = await withFetch(
+      {
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+          body: { success: true, data: { records: [lost], total: 1 } },
+        },
+      },
+      async () => auth.checkin(async () => ({ type: "api", key: "ms-lostrow-0000-0000-0000-00001" })),
+    )
+    assert.equal(r.outcome, "failed", `${JSON.stringify(lost)} was read as a ledger: ${JSON.stringify(r)}`)
+    assert.match(r.message, /账单/, `the reason is not the ledger's: ${r.message}`)
+  }
+})

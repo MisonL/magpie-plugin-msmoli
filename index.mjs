@@ -543,13 +543,19 @@ const recordsOf = (body) => {
   // empty list is still the empty ledger — the keys are optional in
   // ModelScope's answers — but a list of things that are not rows is a body
   // this plugin does not understand.
+  // A row of this ledger names its kind and the day it was written, and every
+  // read here keys on exactly those two: requires both, not either. Accepting
+  // any one of four names let a body renamed down to `rule_key` alone pass the
+  // shape check, and every day lookup then answered "no row" — the check-in
+  // settled the day as `inactive` beside a ledger it could not read, which is
+  // the answer that ends the day. A row without both is a body we do not
+  // understand and must be retried, not read as an empty day.
   const isRow = (r) =>
     r !== null &&
     typeof r === "object" &&
     !Array.isArray(r) &&
-    // a row of this ledger names its kind and the day it was written: an empty
-    // object (or one of other fields only) is no row either
-    ("gmt_created" in r || "type" in r || "rule_key" in r || "total_amount" in r)
+    typeof r.gmt_created === "string" &&
+    typeof r.type === "string"
   if (records.length > 0 && !records.some(isRow)) {
     throw new Error("账单格式不认识：records 里没有可读的行")
   }
