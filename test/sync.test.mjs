@@ -1803,6 +1803,42 @@ test("--status answers with its verdict, not with a constant", async () => {
   }
 })
 
+test("a --status that gives up on the files it reads still says nothing was run", async () => {
+  // The annotation covered the "no provider to sync" way out but not the ones
+  // before it: a --status whose last line was "providers.json 存在但读不出来"
+  // read like a run that had stopped halfway, and the comment above the
+  // annotation says every way out carries it. A usage error (a bare --magpie)
+  // is not a report and stays plain.
+  const dir = mkdtempSync(join(tmpdir(), "msmoli-status-files-"))
+  try {
+    // a folder with none of magpie's files
+    {
+      const out = []
+      const code = await main({ argv: ["--dir", dir, "--status"], log: (s) => out.push(s), spawn: () => ({ status: 0, stdout: "", stderr: "" }) })
+      assert.equal(code, 1)
+      assert.match(out.join("\n"), /--status：以上是计划，未执行/, out.join("\n"))
+    }
+    writeFileSync(join(dir, "providers.json"), "{ not json")
+    writeFileSync(join(dir, "plugin-auth.json"), "{}")
+    {
+      const out = []
+      const code = await main({ argv: ["--dir", dir, "--status"], log: (s) => out.push(s), spawn: () => ({ status: 0, stdout: "", stderr: "" }) })
+      assert.equal(code, 1)
+      assert.match(out.join("\n"), /--status：以上是计划，未执行/, out.join("\n"))
+    }
+    // two candidates: the same report, with a different first line
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ providers: [presetOf(A), presetOf(A)] }))
+    {
+      const out = []
+      const code = await main({ argv: ["--dir", dir, "--status"], log: (s) => out.push(s), spawn: () => ({ status: 0, stdout: "", stderr: "" }) })
+      assert.equal(code, 1)
+      assert.match(out.join("\n"), /--status：以上是计划，未执行/, out.join("\n"))
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("a --status that gives up early still says nothing was run", async () => {
   // The "no provider to sync" way out returned before the annotation, so a
   // report whose last line was "add a provider" read like a half-finished run.
@@ -7254,3 +7290,202 @@ test("--version reads the manifest through a symlinked entry", () => {
     rmSync(fresh, { recursive: true, force: true })
   }
 })
+
+test("an ellipsis elsewhere in a line does not stop the framed join", () => {
+  // joinFramed gave the whole line up when it carried an ellipsis anywhere
+  // ("a value that already carries a mask is not asked again") — but the
+  // ellipsis belongs to one word, and an AWS secret cut by a space behind a
+  // frame went out with its eight-character front: measured, "token=wJalr…
+  // bPxRfi CYEXAMPLEKEY …" printed "token=wJalrXUtnFEMI/K7MD…EKEY …".
+  const key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  for (const v of [
+    "token=wJalrXUtnFEMI/K7MDENG/bPxRfi CYEXAMPLEKEY …",
+    "… token=wJalrXUtnFEMI/K7MDENG/bPxRfi CYEXAMPLEKEY",
+  ]) {
+    for (const [tag, out] of [
+      ["arg", arg(v)],
+      ["scrub", scrub(v)],
+    ]) {
+      const flat = (x) => String(x).split("…").join("|").toLowerCase().replace(/[^a-z0-9|]/g, "")
+      const k = key.toLowerCase()
+      const o = flat(out)
+      let leak = ""
+      for (let i = 0; i + 8 <= k.length; i += 1) if (o.includes(k.slice(i, i + 8))) leak = k.slice(i, i + 8)
+      assert.equal(leak, "", `${tag} left key material: ${JSON.stringify(out)}`)
+    }
+  }
+  // and a mask already written is not read again
+  const once = arg("token=wJalrXUtnFEMI/K7MDENG/bPxRfi CYEXAMPLEKEY …")
+  assert.equal(arg(once), once, `the second pass changed it: ${JSON.stringify(once)} -> ${JSON.stringify(arg(once))}`)
+})
+
+test("a cut key whose frame carries a name is masked whole behind the frame", () => {
+  // CELL_OK judges the first cell of a run, and a run that begins at the name
+  // ("x=5f3a", "x=sk-ant-LmNo24") fails on it: the head is not a cell, and
+  // every cell after it was then read as "inside a key cut into words" and
+  // stepped over one by one. Measured: "x=5f3a 9c1e … 5a91" printed its last
+  // cell whole beside a mask of the rest ("c7d3" of the mask's own tail and
+  // "5a91" make eight contiguous characters), and "x=sk-ant-LmNo24 68Pq …"
+  // printed twelve.
+  const hex = "5f3a9c1e8b7d2460af13c5e9d820b746c7d35a91"
+  const vend = "LmNo2468PqRs1357TuVw9081XyZa4725BcDe6810FgHi3597"
+  const cells4 = (s) => s.match(/.{1,4}/g)
+  const cases = []
+  for (const pre of ["x=", "key=", "token:"]) cases.push([pre + cells4(hex).join(" ") + " for provider", hex])
+  for (const front of ["sk-ant-", "ghp_", "AKIA", "xoxb-"]) {
+    for (const pre of ["", "x="]) {
+      cases.push([pre + front + cells4(vend).join(" ") + " invalid", vend])
+    }
+  }
+  // a front cut a piece at a time behind a frame ("x=m s - …")
+  cases.push(["x=m s - " + cells4(vend).join(" ") + " invalid", vend])
+  for (const [v, key] of cases) {
+    for (const [tag, out] of [
+      ["arg", arg(v)],
+      ["scrub", scrub(v)],
+    ]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} → ${JSON.stringify(out)}`)
+    }
+  }
+})
+
+test("a mixed-width key cut by cells is read before the framed join masks its tail", () => {
+  // joinFramed ran first in arg() and masked the ASCII tail ("Vw9081Xy …
+  // Hi3597"), and foldedSpans then saw a value carrying a mask and declined —
+  // the full-width front and the four full-width cells printed as written
+  // beside that mask: 24 contiguous body characters.
+  const body = "LmNo2468PqRs1357TuVw9081XyZa4725BcDe6810FgHi3597"
+  const full = (s) => [...s].map((c) => (c >= "!" && c <= "~" ? String.fromCodePoint(c.codePointAt(0) + 0xfee0) : c)).join("")
+  const cells = body.match(/.{1,4}/g)
+  const v = `x=ｍｓ－${cells.slice(0, 3).map(full).join(" ")} ${cells.slice(3).join(" ")} invalid`
+  for (const [tag, out] of [
+    ["arg", arg(v)],
+    ["scrub", scrub(v)],
+  ]) {
+    assert.equal(leakOfKey(out, body), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+})
+
+test("a mixed-width key whose ASCII tail is cut by wide marks is masked whole", () => {
+  // The fold walk judges the word after the full-width cells with keyMat, and
+  // a tail cut by a wide comma ("9012、MnOp、3456…") is one word of key groups
+  // that none of them passes alone ("MnOp" reads as prose on its own): the
+  // walk stopped before the tail and eight contiguous body characters printed
+  // at the seam — measured, "x=ｍｓ…１２３４ ＩｊＫｌ 9012、…" went out as
+  // "x=ｍｓ…ＩｊＫｌ 9012…1234". A word whose every cut group is key material
+  // is the key's too (cellsW), and the span is masked as one.
+  const body = "AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890UvWx1234"
+  const full = (s) => [...s].map((c) => (c >= "!" && c <= "~" ? String.fromCodePoint(c.codePointAt(0) + 0xfee0) : c)).join("")
+  const cells = body.match(/.{1,4}/g)
+  for (const mark of ["、", "，", "：", "｜"]) {
+    const v = `x=ｍｓ－${cells.slice(0, 5).map(full).join(" ")} ${cells.slice(5).join(mark)} invalid`
+    for (const [tag, out] of [
+      ["arg", arg(v)],
+      ["scrub", scrub(v)],
+    ]) {
+      assert.equal(leakOfKey(out, body), "", `${tag} left key material: ${JSON.stringify(v)} → ${JSON.stringify(out)}`)
+    }
+  }
+  // the sentence after the key is still the text's
+  const v = `x=ｍｓ－${cells.slice(0, 5).map(full).join(" ")} ${cells.slice(5).join("、")} invalid`
+  assert.match(arg(v), / invalid$/, `the sentence after the key is the text's: ${JSON.stringify(arg(v))}`)
+})
+
+test("a key cut a few characters a cell is masked across the cell reading's stop", () => {
+  // cellCut takes a run up to the first one-letter cell, and scrub's pre-pass
+  // masked that share first: a mask is opaque to the joined readings, so the
+  // key's second half printed beside the first's mask. The terminal readings
+  // read the whole cut when they are given the value before the mask.
+  const bodies = ["AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890UvWx1234", "LmNo2468PqRs1357TuVw9081XyZa4725BcDe6810FgHi3597", "5f3a9c1e8b7d2460af13c5e9d820b746c7d35a91"]
+  for (const body of bodies) {
+    const parts = []
+    for (let i = 0; i < body.length; ) {
+      const w = 1 + ((i * 7) % 9)
+      parts.push(body.slice(i, i + w))
+      i += w
+    }
+    for (const front of ["ms-", "ghp_", "AKIA", ""]) {
+      const v = `x=${front}${parts.join(" ")} invalid`
+      for (const [tag, out] of [
+        ["arg", arg(v)],
+        ["scrub", scrub(v)],
+      ]) {
+        assert.equal(leakOfKey(out, body), "", `${tag} (${front || "no front"}) left key material: ${JSON.stringify(out)}`)
+      }
+    }
+  }
+})
+
+test("a front cut into pieces is read before the framed join masks its tail", () => {
+  // Both readings ran joinFramed before spacedKey, and the framed join masked
+  // the run from the middle on: "x=m s - LmNo24 68Pq … Hi3597" went out as
+  // "x=m s - LmNo24 68Pq Rs13…3597" — the key's opening eight characters beside
+  // its own mask. spacedKey starts at the front and reads the whole cut, so it
+  // runs first in arg() and in scrub().
+  const body = "LmNo2468PqRs1357TuVw9081XyZa4725BcDe6810FgHi3597"
+  for (const sep of [" ", "　"]) {
+    const parts = ["LmNo24", "68Pq", "Rs1357Tu", "Vw9081Xy", "Za4725Bc", "De6810Fg", "Hi3597"]
+    const v = `x=m${sep}s${sep}-${sep}${parts.join(sep)} invalid`
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, body), "", `${tag} left key material: ${JSON.stringify(out)}`)
+    }
+  }
+})
+
+test("a key cut one character at a time is still read whole", () => {
+  // joinFramed read at most twenty-four words after the head, and a cut of one
+  // character a word is forty-eight words: the run stopped at the twenty-fourth
+  // and the rest printed as written beside its mask. The bound is the key's
+  // length, as the other readings have it.
+  const b = "AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890UvWx1234"
+  const b2 = "LmNo2468PqRs1357TuVw9081XyZa4725BcDe6810FgHi3597"
+  for (const [front, body, key] of [
+    ["ghp_", b, b],
+    ["AKIA", b, b],
+    ["", b2, b2],
+  ]) {
+    for (const sep of [" ", "\t", "/"]) {
+      const v = `x=${front}${[...body].join(sep)} invalid`
+      for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(v)]]) {
+        assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+      }
+    }
+  }
+})
+
+test("a key whose cells are single letters is read past a short word", () => {
+  // The walk stopped at a one-letter word while the join so far was under the
+  // floor ("x=ghp_A bCd1234E f Gh5678Ij …" stopped at "f"), and the masked tail
+  // printed beside the head was fourteen contiguous body characters. A word
+  // that opens a phrase and no key ("for provider") has no key-shaped word
+  // after it either, so the piece rule is asked before the join reads.
+  const b = "AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890UvWx1234"
+  const parts = []
+  for (let i = 0; i < b.length; ) {
+    const w = 1 + ((i * 7) % 9)
+    parts.push(b.slice(i, i + w))
+    i += w
+  }
+  for (const front of ["ghp_", "AKIA", "ms-", ""]) {
+    const v = `x=${front}${parts.join(" ")} invalid`
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(v)]]) {
+      assert.equal(leakOfKey(out, b), "", `${tag} left key material: ${JSON.stringify(out)}`)
+    }
+  }
+})
+
+// the oracle the card's tests use: the output folded to its letters and
+// digits, asked for a run of eight that sits in the key's own
+// (each segment between two masks is asked on its own: the four characters a
+// mask keeps at either end are not contiguous key material, and folding the
+// ellipsis away made a mask's own ends read as the key's first eight)
+const leakOfKey = (out, key) => {
+  const k = String(key).normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "")
+  // (split before NFKC: the fold turns the ellipsis into three dots, and the
+  // mask's own ends would then read as one run across it)
+  for (const seg of String(out).split("\u2026")) {
+    const o = seg.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "")
+    for (let i = 0; i + 8 <= k.length; i += 1) if (o.includes(k.slice(i, i + 8))) return k.slice(i, i + 8)
+  }
+  return ""
+}

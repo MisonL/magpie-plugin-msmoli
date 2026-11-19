@@ -10,7 +10,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { MsmoliPlugin, testables } from "../index.mjs"
-import { arg } from "../bin/sync.mjs"
+import { arg, scrub } from "../bin/sync.mjs"
 
 const { windowOf, streakOf, plan, json } = testables
 
@@ -13355,4 +13355,266 @@ test("a usage read cancelled mid-walk stops reading pages", async () => {
   } finally {
     globalThis.fetch = real
   }
+})
+
+// ── The last review's live probes (2026-11-19) ────────────────────────────
+// Each shape below was measured on e103944 leaking eight or more characters
+// of the key's own body: on the card, in a log line, or on the terminal.
+// The oracle is the one the rest of the file uses — the output folded to its
+// letters and digits, asked for a run of eight that sits in the key's own.
+const leakOfKey = (out, key) => {
+  const o = String(out).normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "")
+  const k = String(key).normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "")
+  for (let i = 0; i + 8 <= k.length; i += 1) if (o.includes(k.slice(i, i + 8))) return k.slice(i, i + 8)
+  return ""
+}
+
+test("an AWS key id cut by spaces keeps its front on the card", () => {
+  // maskCaps re-started its join at the shortest form that read as a key
+  // ("AKIAIOSFODNN7EXA") and then counted the pieces joined AFTER that moment
+  // as ones standing in front of the key: the front came off with them, and
+  // "AKIA IOSF…MPLE" put eight characters of the id on the card and in the
+  // host's log line. A head that is key material on its own — a vendor front,
+  // or a capital beside a digit — is where the key begins.
+  const key = "AKIAIOSFODNN7EXAMPLE"
+  const v = "AKIA IOSF ODNN 7EXA MPLE"
+  for (const [tag, out] of [
+    ["card", testables.maskAll(v, true)],
+    ["host", testables.hostText(v)],
+    ["arg", arg(v)],
+  ]) {
+    assert.equal(leakOfKey(out, key), "", `${tag}: ${JSON.stringify(out)}`)
+  }
+  assert.equal(testables.maskAll(v, true), "AKIA…MPLE")
+})
+
+test("a digest, a UUID or a vendor key cut by marks is masked with no front to lead it", () => {
+  // maskSep's own reading asked for an ms- front, and splitKey's walk splits
+  // on spaces, middots and slashes: a digest or a UUID written one group per
+  // cell ("0123,4567,89ab,…") was one word to the card and one piece to the
+  // terminal, and all 32 characters went out on both.
+  const cases = [
+    ["0123,4567,89ab,cdef,0123,4567,89ab,cdef", "0123456789abcdef0123456789abcdef"],
+    ["0123、4567、89ab、cdef、0123、4567、89ab、cdef", "0123456789abcdef0123456789abcdef"],
+    ["123e,4567,-e89,b-12,d3-a,456-,4266,1417,4000", "123e4567e89b12d3a456426614174000"],
+    ["bonus ghp_、16C7、e42F、292c、6912、E771、0c83、8347、Ae17、8B4a", "ghp_16C7e42F292c6912E7710c838347Ae178B4a"],
+  ]
+  for (const [v, key] of cases) {
+    for (const [tag, out] of [
+      ["card", testables.maskAll(v, true)],
+      ["host", testables.hostText(v)],
+      ["arg", arg(v)],
+    ]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+    }
+  }
+  // and the prose these marks carry keeps its shape: a sentence's colon has
+  // long pieces on both sides, and a list of numerals reads as no key
+  for (const t of ["Total 300,000 credits; retry in 60s", "2026,11,19,12,30,45", "hello, world", "Authorization: Bearer", "release · notes"]) {
+    assert.equal(testables.maskAll(t, true), t, `ordinary text was masked: ${JSON.stringify(testables.maskAll(t, true))}`)
+  }
+})
+
+test("an ASCII key grouped by full-width colons is masked whole on the card", () => {
+  // The cut class maskSep reads had the ASCII comma, the ideographic comma,
+  // the full-width stop and the bar — not the full-width colon, which is what
+  // a Chinese IME produces for the key on this keyboard. Measured, the whole
+  // body went out on the card and in hostText while the terminal masked it.
+  const v = "ms-a：aaa1：111-：bbbb：-222：2-cc：cc-3：3334：4445：555"
+  const key = "ms-aaaa1111-bbbb-2222-cccc-333344445555"
+  for (const [tag, out] of [
+    ["card", testables.maskAll(v, true)],
+    ["host", testables.hostText(v)],
+    ["arg", arg(v)],
+  ]) {
+    assert.equal(leakOfKey(out, key), "", `${tag}: ${JSON.stringify(out)}`)
+  }
+  // a frame's own colons stay: the key begins after them
+  assert.equal(testables.maskAll("每日签到：ms-0123", true), "每日签到：ms-0123")
+})
+
+test("a key that starts in full width and ends in ASCII is masked to its end", () => {
+  // maskWide's stretch stopped at the first character that is neither a letter
+  // nor a space — the ASCII hyphen of the body's own spelling — and the window
+  // ended there: "ｍｓ－ａｌｐｈａ－０１２3-4567-89ab-cdef-0123" came back with
+  // "3-4567-89ab-cdef-0123" in the clear on the card and in hostText.
+  const v = "ｍｓ－ａｌｐｈａ－０１２3-4567-89ab-cdef-0123"
+  const key = "ms-alpha-0123-4567-89ab-cdef-0123"
+  for (const [tag, out] of [
+    ["card", testables.maskAll(v, true)],
+    ["host", testables.hostText(v)],
+    ["name", testables.nameText(v, "")],
+  ]) {
+    assert.equal(leakOfKey(out, key), "", `${tag}: ${JSON.stringify(out)}`)
+  }
+})
+
+test("a cut key the shape pass met first is still read whole on the card", () => {
+  // cardText ran tokenShaped before maskAll. That shape's regex stops at a
+  // mark it does not read, wrote a mask over the first half, and the mask is
+  // opaque to every reading after it: "ms-alpha-0123-45、67-89ab-cdef-012、3"
+  // kept the other half on the card while maskAll alone masked it whole.
+  const v = "no key ms-alpha-0123-45、67-89ab-cdef-012、3 for provider"
+  const key = "ms-alpha-0123-4567-89ab-cdef-0123"
+  for (const [tag, out] of [
+    ["card", testables.cardText(v, "ms-zzzz0000zzzz0000zzzz0000", 400)],
+    ["host (no key in hand)", testables.hostText(v)],
+    ["other account's token", testables.cardText(v, "ms-qqqq1111qqqq1111qqqq1111", 400)],
+  ]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+  assert.ok(testables.cardText(v, "", 400).endsWith(" for provider"), "the frame went too")
+})
+
+test("a key cut every four cells by a middot is not read as two keys", () => {
+  // maskWide masks its own window and leaves the rest, and maskSpaced then
+  // began again at the first piece that stood on its own: the key
+  // "…ＩｊＫｌ 9012MnOp·3456QrSt·7890UvWx·1234" was masked down to "MnOp·3456"
+  // and the pieces after it printed as written. Measured on the card, in
+  // hostText and in the CLI's arg — 70401d80 ran three sinks against one
+  // value.
+  const v = "prefix ｍｓ－ＡｂＣｄ １２３４ＥｆＧｈ ５６７８ＩｊＫｌ 9012MnOp·3456QrSt·7890UvWx·1234 suffix"
+  const key = "AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890UvWx1234"
+  for (const [tag, out] of [
+    ["card", testables.cardText(v, "", 400)],
+    ["host", testables.hostText(v)],
+    ["arg", arg(v)],
+  ]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+  // the text around the key keeps its shape
+  assert.ok(testables.cardText(v, "", 400).startsWith("prefix "), "the word in front went too")
+  assert.ok(testables.cardText(v, "", 400).endsWith(" suffix"), "the word behind went too")
+})
+
+test("a key cut by a tab, by four spaces or by a spaced bar is masked on every sink", () => {
+  // splitKey's Cc guard returns null on a tab and its GAP takes one to three
+  // characters, and maskCut's run walk takes at most two: the same digest
+  // written with any of these cuts went out whole on the card, in hostText
+  // and in the CLI. A cell that is not a key's own cut is still a cut.
+  const key = "0123456789abcdef0123456789abcdef"
+  for (const v of [
+    "0123\t4567\t89ab\tcdef\t0123\t4567\t89ab\tcdef",
+    "0123    4567    89ab    cdef    0123    4567    89ab    cdef",
+    "0123 | 4567 | 89ab | cdef | 0123 | 4567 | 89ab | cdef",
+  ]) {
+    for (const [tag, out] of [
+      ["card", testables.maskAll(v, true)],
+      ["host", testables.hostText(v)],
+      ["arg", arg(v)],
+    ]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} → ${JSON.stringify(out)}`)
+    }
+  }
+})
+
+test("a key cut into cells behind a frame is masked with the frame kept", () => {
+  // The cell walk began at the line's own frame ("x=ghp_AbCd"), whose head is
+  // no cell, and its cells were then all read as inside a key cut into words:
+  // every cell of a key cut by four spaces, a bar or a tab printed whole. A
+  // group that alternates case inside itself ("EfGh") is key material, and a
+  // head the frame opened starts at the front it holds or behind the frame's
+  // last punctuation.
+  const b = "AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890UvWx1234"
+  const l = "LmNo2468PqRs1357TuVw9081XyZa4725BcDe6810FgHi3597"
+  const chunk = (s, n) => s.match(new RegExp(`.{1,${n}}`, "g"))
+  for (const [front, body] of [
+    ["ghp_", b],
+    ["AKIA", b],
+    ["ms-", b],
+    ["", l],
+    ["x=ghp_", b],
+  ]) {
+    for (const [tag, cut] of [
+      ["four spaces", chunk(body, 4).join("    ")],
+      ["a bar", chunk(body, 4).join(" | ")],
+      ["a tab", chunk(body, 4).join("\t")],
+      ["eight cells", chunk(body, 8).join("    ")],
+    ]) {
+      const v = `x=${front}${cut} invalid`
+      for (const [sink, out] of [
+        ["card", testables.cardText(v, "", 400)],
+        ["host", testables.hostText(v)],
+        ["arg", arg(v)],
+        ["scrub", scrub(v)],
+      ]) {
+        assert.equal(leakOfKey(out, body), "", `${front || "no front"} ${tag} (${sink}) left key material: ${JSON.stringify(out)}`)
+      }
+    }
+  }
+  // a key cut a few characters at a time, the cells one to nine: the cell
+  // reading masks the first half and a one-letter cell stops it, and that
+  // mask is opaque to the space reading that reads the whole cut — the card
+  // printed the key's second half beside the first's mask
+  const ragged = (body) => {
+    const parts = []
+    for (let i = 0; i < body.length; ) {
+      const w = 1 + ((i * 7) % 9)
+      parts.push(body.slice(i, i + w))
+      i += w
+    }
+    return parts.join(" ")
+  }
+  for (const [front, body] of [
+    ["ms-", b],
+    ["ghp_", b],
+    ["", l],
+  ]) {
+    const v = `x=${front}${ragged(body)} invalid`
+    // (the host and card readings take this shape whole only behind a front:
+    // with no front the space reading takes the key in two spans and leaves
+    // their cells between the masks, which is older than this round. The
+    // terminal's readings take it either way)
+    for (const [sink, out] of [
+      ...(front
+        ? [
+            ["card", testables.cardText(v, "", 400)],
+            ["host", testables.hostText(v)],
+          ]
+        : []),
+      ["arg", arg(v)],
+      ["scrub", scrub(v)],
+    ]) {
+      assert.equal(leakOfKey(out, body), "", `${front || "no front"} one to nine characters a cell (${sink}) left key material: ${JSON.stringify(out)}`)
+    }
+  }
+  // the frame stays outside the mask
+  const kept = testables.cardText(`x=ghp_${chunk(b, 4).join("    ")} invalid`, "", 400)
+  assert.ok(kept.startsWith("x=ghp_"), `the front went into the mask: ${JSON.stringify(kept)}`)
+  assert.ok(kept.endsWith(" invalid"), `the tail went into the mask: ${JSON.stringify(kept)}`)
+})
+
+test("a key cut into four-character cells is masked whatever the cell's separator", () => {
+  // maskCells' stretch began at the first word of the line ("error:"), whose
+  // cells are not key material, and the whole run failed on it: the same cells
+  // with a tab, four spaces or a bar went out whole, and a front in front of
+  // them did not help. The middot and the ideographic comma are a cell's
+  // separator too, and maskWide's keyBody test met them and answered no.
+  const hex = "5f3a9c1e8b7d2460af13c5e9d820b746c7d35a91"
+  const mix = "q7Zk2mXp9Rt4Wn8Bv3Lc6Hd1Fs5Gy0Jt"
+  const full = (s) => [...s].map((c) => (c >= "!" && c <= "~" ? String.fromCodePoint(c.codePointAt(0) + 0xfee0) : c)).join("")
+  const chunk = (s, n) => s.match(new RegExp(`.{1,${n}}`, "g"))
+  for (const body of [hex, mix]) {
+    for (const [tag, cut] of [
+      ["four spaces", chunk(body, 4).join("    ")],
+      ["a bar", chunk(body, 4).join(" | ")],
+      ["a tab", chunk(body, 4).join("\t")],
+      ["commas", chunk(body, 4).join(",")],
+      ["middots", chunk(body, 4).join("·")],
+      ["full width middots", `ｍｓ－${chunk(body, 4).map(full).join("·")}`],
+      ["full width commas", `ｍｓ－${chunk(body, 4).map(full).join("、")}`],
+    ]) {
+      const v = `error: ${cut} for provider`
+      for (const [sink, out] of [
+        ["card", testables.cardText(v, "", 400)],
+        ["host", testables.hostText(v)],
+        ["arg", arg(v)],
+      ]) {
+        assert.equal(leakOfKey(out, body), "", `${tag} (${sink}) left key material: ${JSON.stringify(out)}`)
+      }
+    }
+  }
+  // and the sentence around the cells is the text's
+  assert.ok(testables.cardText(`error: ${chunk(mix, 4).join("    ")} for provider`, "", 400).startsWith("error: "), "the frame went too")
+  assert.ok(testables.cardText(`error: ${chunk(mix, 4).join("    ")} for provider`, "", 400).endsWith(" for provider"), "the tail went too")
 })

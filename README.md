@@ -239,7 +239,7 @@ It syncs the **domestic site only**: the built-in preset it reads is the
 | `--to-preset` | The other way round; a preset that already holds a different key needs `--force` |
 | `--force` | Replace a single existing plugin account whose key differs |
 | `--from <id>` | Pick the preset when more than one provider could be it |
-| `--dry-run` | Print the commands, masked, without running them or writing anything; no magpie binary needed. Exits 0 whether or not there is work — the verdict belongs to `--status`, which exits 1 when there is something to run |
+| `--dry-run` | Print the commands, masked, without running them or writing anything; no magpie binary needed. Exits 0 whether or not there is work — the verdict belongs to `--status`, which exits 1 when there is something to run. A plan it refuses (a mismatched key, a different `--dir`) still exits 1: the refusal is the answer |
 | `--dir <folder>` | Where magpie's config is (a portable install's `data` folder) |
 | `--magpie <path>` | Path to the magpie binary; a bare `magpie` is refused |
 | `--version` | Print the version (read from the package's own `package.json`) |
@@ -582,13 +582,17 @@ mask it is.
 Text from the server that carries a key cut by whitespace is masked the same
 way as the CLI's (`ghp_ 1234 AbCd …`, `sk-a nt-a pi03 …`), via the same
 reading: a run of words that joins back into a key. The cut it reads across
-is a space, a no-break or ideographic space, a line break, or a middot or a
-bullet (one or two in a row, at most one space either side) — a value copied
-out of a web page or a Chinese IME carries these as often as plain spaces. A
-middot is read across when a piece beside it is not a word (`A·K·I·A·…`,
-`9f8e·7d6c·…`, the pieces of a key cut in fours), and a run of single-character
-pieces is read whatever the separator (`A· K· I· A· …`). The card's own middot
-sits between words on both sides ("Qwen3-Max · 调用返还") and stays as written;
+is a space, a no-break or ideographic space, a line break, a middot or a
+bullet (one or two in a row, at most one space either side), or one of the
+marks a display cuts a key's cells with — a comma, an ideographic comma, a
+full-width stop, colon, comma or semicolon, a bar, a semicolon or a dash —
+and the same holds for cells separated by a tab, four spaces or a spaced bar.
+A value copied out of a web page or a Chinese IME carries these as often as
+plain spaces. A middot is read across when a piece beside it is not a word
+(`A·K·I·A·…`, `9f8e·7d6c·…`, the pieces of a key cut in fours), and a run of
+single-character pieces is read whatever the separator (`A· K· I· A· …`, `x=m
+s - LmNo 2468 …`). The card's own middot sits between words on both sides
+("Qwen3-Max · 调用返还") and stays as written;
 a middot inside a key stays in its mask when the mask shows only its ends,
 because the mask keeps everything between the first four characters and the
 last four. A full-width hyphen

@@ -711,7 +711,7 @@ function spacedKey(s) {
     const lead = strongNext || (strong && /^[^\sA-Za-z0-9\p{L}\p{N}]{1,2}[ \t\r\n\u00a0\u3000]+/u.test(v.slice(end))) ? framed.length : 0
     const piece = /^[A-Za-z0-9+/=_.-]*/.exec(pieces[idx].text.slice(lead))[0]
     if (!piece) break
-    if (VERNUM.test(piece) && !/\d/.test(bodyFrom(end))) break
+    if (VERNUM.test(piece) && !/\d/.test(bodyFrom(end)) && !/[A-Z]/.test(bodyFrom(end))) break
     // a piece of three or more letters is prose and ends the run ("no key
     // ms-… for provider" keeps its frame), unless it is the piece a bare
     // front was cut into ("sk" then "ant" is a cut, not a word)
@@ -1811,10 +1811,14 @@ export function arg(v) {
   // same question of the same characters: it is removed once and handed to each
   // ("glue" is the value with an invisible character between two key characters
   // taken out, so a key cut by one is put back together)
-  const glued0 = joinFramed(orig.replace(GLUE, ""))
+  const raw0 = orig.replace(GLUE, "")
   // the ms- front has its own joiner for pieces of any width (one to a
-  // character), and it reads the value as it was typed
-  const cut = spacedKey(glued0)
+  // character), and it reads the value as it was typed. It runs before
+  // joinFramed: the framed join masks a run up to the words it takes, and the
+  // "…" it writes stops spacedKey's walk where the key went on — measured,
+  // "x=m s - LmNo24 68Pq Rs1357Tu … Hi3597" came out "x=m s - LmNo24 68Pq
+  // Rs13…3597", sixteen body characters beside the key's own mask
+  const cut = spacedKey(raw0)
   // the body spans the gaps the pieces were cut with; the key is the
   // characters themselves, and mask() keeps its first and last four — a
   // three-character last piece ("… nop3 456") otherwise shows the gap in the
@@ -1831,19 +1835,29 @@ export function arg(v) {
     const keyBody = msKey(body, false) ? body : core !== body && msKey(core, false) ? core : ""
     if (keyBody) return argRun(cut.pre) + mask(keyBody.replace(/\s+/g, "")) + argRun(body.slice(keyBody.length) + cut.post)
   }
-  // a key with no ms-/sk- front, cut the same way: the pieces are joined and
-  // asked whether they read as one key (splitKey)
-  const split = splitKey(glued0)
-  if (split) return argRun(split.pre) + mask(split.body.replace(/\s+/g, "")) + arg(split.post)
   // full-width pieces fold to a key; an ellipsis folds to three dots and would
   // read as key material ("ms-a…5555" → "ms-a...5555"), so a value that
-  // already carries a mask is not asked again
-  const raw = glued0
-  if (!raw.includes("…")) {
-    const folded = foldedSpans(raw)
+  // already carries a mask is not asked again. Read on the typed value, before
+  // the framed join for the same reason spacedKey is: a mask the join writes
+  // first puts an ellipsis inside the span the fold would have taken.
+  // (before splitKey, which reads only ASCII: a full-width front with an ASCII
+  // tail cut every four cells is one key, and splitKey found the tail alone —
+  // the folded front went to argRun, masked to its own four ends, and the two
+  // masks side by side printed eight contiguous characters of the body)
+  if (!raw0.includes("…")) {
+    const folded = foldedSpans(raw0)
     if (folded) return folded
   }
-  return argRun(joinFramed(raw))
+  // the framed join runs before splitKey: its walk starts at the frame and
+  // takes the whole run, while splitKey's walk starts at the first piece that
+  // is key material on its own — "x=5f3a 9c1e … 5a91" was masked from "9c1e"
+  // and "5f3a" printed beside the mask
+  const raw = joinFramed(raw0)
+  // a key with no ms-/sk- front, cut the same way: the pieces are joined and
+  // asked whether they read as one key (splitKey)
+  const split = splitKey(raw)
+  if (split) return arg(split.pre) + mask(split.body.replace(/\s+/g, "")) + arg(split.post)
+  return argRun(raw)
 }
 
 // foldedSpans reads the words that fold (a full-width key, its spaces), and
@@ -1890,11 +1904,30 @@ const foldedSpans = (raw) => {
   // the same keyish test below, and a word that starts with a lowercase letter
   // is the sentence's ("… ODNN7EXAMPLE is invalid"), not the key's, so a
   // sentence's words are never taken.
-  const isCutGap = (g) => /^[ \t\r\n 　]+$/.test(g)
-  // a word that continues the key: key characters and carrying a digit or a
-  // capital. A word of lower-case letters is the sentence's ("… is invalid"),
-  // and "aaa1111-bbbb-…" (a body written in ASCII) carries digits, so it is.
+  // a full-width copy cuts a key with a punctuation mark as often as with a
+  // space ("ＬｍＮｏ、２４６８"), and the mark is the display's: a gap of one to
+  // three of them joins as a space does. A CJK word never passes keyishW, so a
+  // sentence's marks do not make a span (the marks are the cell readings' own
+  // set plus the middot)
+  const MARKGAP = /[\u00b7\u2022\u2219\u2027\u30fb\u22c5,\u3001\u3002\uff5c|;\uff1a\uff0c\uff1b\u2014\u2013\u200b\u200c\u2060\ufeff]/
+  const isCutGap = (g) => /^[ \t\r\n\u00a0\u3000]+$/.test(g) || (g.length <= 3 && /^[\u00b7\u2022\u2219\u2027\u30fb\u22c5,\u3001\u3002\uff5c|;\uff1a\uff0c\uff1b\u2014\u2013\u200b\u200c\u2060\ufeff]+$/.test(g))
   const keyMat = (t) => KEYCHARS.test(t) && (/\d/.test(t) || /[A-Z]/.test(t)) && !(PROSE.test(t) && !/^[A-Z]+$/.test(t) && !keyedBody(t))
+  // a word a display cut every few cells with a middot is the key's too (its
+  // cells are key material and the marks are the display's), and the whole
+  // span is masked as one: the folded front alone and the tail alone printed
+  // "…ＩｊＫｌ 9012…" — eight contiguous body characters at the seam.
+  const CELL_SPLIT = /[\u00b7\u2022\u2219\u2027\u30fb\u22c5,\u3001\u3002\uff5c|;\uff1a\uff0c\uff1b\u2014\u2013\u200b\u200c\u2060\ufeff]+/
+  const cells = (t) => t.split(CELL_SPLIT).every((cell) => keyMat(cell))
+  // a word cut by marks ends up in one word of the copy ("XyZa\u30014725\u3001BcDe"): its
+  // cells are judged as the walk judges a word, digit or capital, since a cell
+  // of four letters is a group of a cut key as often as a word
+  const cellsW = (t) => t.split(CELL_SPLIT).every((cell) => KEYCHARS.test(cell) && (/\d/.test(cell) || /[A-Z]/.test(cell)))
+  const contMat = (t) => keyMat(t) || ((/[\u00b7\u2022\u2219\u2027\u30fb\u22c5,\u3001\u3002\uff5c|;\uff1a\uff0c\uff1b\u2014\u2013]/.test(t)) && (cells(t) || cellsW(t)))
+  // a word shaped like key material but prose to keyMat ("TuVw", "LmNo") is a
+  // group of a cut key as often as a word: the walk below reads on over it
+  // until a reading takes the span, and a word of plain prose ("is", "invalid")
+  // does not clear the digit-or-capital floor at all
+  const keyishW = (t) => KEYCHARS.test(t) && (/\d/.test(t) || /[A-Z]/.test(t))
   const endAt = (w) => w.at + w.text.length
   let spans = 0
   for (let i = 0; i < words.length && spans < 128; i += 1) {
@@ -1907,10 +1940,24 @@ const foldedSpans = (raw) => {
     }
     // read on over the key-material words that follow the folded front (a cut
     // is a space or a wide space), and take the longest join that reads as a
-    // key; the fold-only span is the floor
+    // key; the fold-only span is the floor. The cut readings need a whole key
+    // to answer (argRun finds "…M s - LmNo 2468 PqRs 1357 TuVw…" only at the
+    // ninth word), so until the join reads as a key the walk goes on over the
+    // key material: stopping at the first word the readings do not take left
+    // "x=ｍｓ－ＬｍＮｏ ２４６８ ＰｑＲｓ 1357 ＴｕＶｗ…" eight body characters in the clear
+    let readsKey = false
     for (let k = j + 1; k < words.length && k - i <= 48 && endAt(words[k]) - words[i].at <= MAX_SPAN; k += 1) {
-      if (!isCutGap(raw.slice(endAt(words[k - 1]), words[k].at)) || !keyMat(words[k].text)) break
-      if (keyishOf(k)) j = k
+      if (!isCutGap(raw.slice(endAt(words[k - 1]), words[k].at))) break
+      const w = words[k].text
+      // a key-material word the join reads as a key through ("TuVw" after
+      // "1357") is the key's even when it is prose on its own; a word of the
+      // sentence is neither key material nor the key's, and ends the span
+      if ((contMat(w) || keyishW(w)) && keyishOf(k)) {
+        j = k
+        readsKey = true
+        continue
+      }
+      if (!(readsKey ? keyishW(w) : contMat(w))) break
     }
     // the same reading backward: an ASCII key front ("ms-a") with a full-width
     // body is one key too, and the front does not fold. A front of a vendor's
@@ -1944,6 +1991,156 @@ const foldedSpans = (raw) => {
   return parts.map((p) => (p.includes("…") ? p : argRun(p))).join("")
 }
 
+// markCut reads a key cut by punctuation: a comma, an ideographic comma, a
+// bar, a full-width stop or colon, a semicolon, a dash, or a joiner a copy
+// left between the pieces. The card reads these (maskSep) and the terminal did
+// not — splitKey's walk joins across spaces, middots and slashes only, so a
+// digest or a UUID written one group per cell was one piece to it and each
+// group a quarter of a key: measured, all 32 characters of
+// "0123,4567,89ab,cdef,…" went out on the terminal while the card masked it.
+//
+// The stretch is the key's alphabet and the marks; its marks are taken out and
+// the join is asked the card's own question — a body with no front has to read
+// as a key on its own, and the 20-character floor keeps a sentence's comma
+// from joining two ordinary words into one. runs = false: a join was never one
+// word, and the vowel-less arm would read a list of numerals as a key.
+// (the hyphen and the ASCII colon are the key alphabet, not a cell's
+// separator: a mark's set holding them made "key=ms-aaaa-…" one stretch and
+// took the variable's own name into the mask)
+const MARK_CUT = /[,、。｜|;：，；—–​‍⁠﻿]+/
+const MARK_CUT_ALL = new RegExp(MARK_CUT.source, "g")
+const MARK_STRETCH = /[A-Za-z0-9+/=_.:-]|[,、。｜|;：，；—–​‍⁠﻿]/
+function markCut(s) {
+  if (!MARK_CUT.test(s)) return s
+  const chars = [...s]
+  let out = ""
+  let at = 0
+  let k = 0
+  while (k < chars.length) {
+    if (!/[A-Za-z0-9]/.test(chars[k])) {
+      k += 1
+      continue
+    }
+    let end = k
+    while (end < chars.length && MARK_STRETCH.test(chars[end])) end += 1
+    const piece = chars.slice(k, end).join("")
+    // a stretch carrying no mark is the word passes' business
+    if (!MARK_CUT.test(piece)) {
+      k = end
+      continue
+    }
+    const flat = piece.replace(MARK_CUT_ALL, "")
+    const led = /^ms-/i.test(flat) && flat.length > 12 && /\d/.test(flat) && isKey(flat, false)
+    const bare = flat.length >= 20 && isKey(flat, false)
+    if (led || bare) out += s.slice(at, k) + mask(flat)
+    else out += s.slice(at, end)
+    at = end
+    k = end
+  }
+  return out + s.slice(at)
+}
+
+// cellCut reads a key cut into short cells by plain whitespace or a bar: a
+// digest or a UUID written one group per cell, with four spaces, a tab or
+// " | " between them. splitKey's walk takes a gap of one to three characters
+// and returns on any control character at all (a tab is one), and maskCut's
+// run walk takes at most two — the same 32 characters went out whole on the
+// terminal. The card reads this shape (maskCells); this is its copy here.
+const CELLCH = /[A-Za-z0-9+/=_-]/
+const CELL_GAP = /[ \t 　|]+/
+// a cell of letters that capitalises more than once is a group of a key as
+// often as a word ("EfGh", "LmNo", "AbCd"); a word capitalises once
+// ("Qwen"), and an all-capitals piece is the caps reading's own
+const CELL_CASEY = (c) => /^[A-Za-z+/=_.-]+$/.test(c) && /[a-z]/.test(c) && (c.match(/[A-Z]/g) ?? []).length >= 2 && (c.match(/[a-z]/g) ?? []).length >= 2
+const CELL_FRONT = /^(?:ms-|sk-|sk_|gh[pousr]_|xox[abposr]-|akia|asia|aida|aliyun|ssh-rsa)/i
+const CELL_OK = (c, first = false) => c.length <= 8 ? (/^[0-9a-fA-F]+$/.test(c) || (/\d/.test(c) && /^[A-Za-z0-9+/=_]+$/.test(c)) || CELL_CASEY(c) || (first && (CELL_FRONT.test(c) || VENDOR.test(c)))) : first && c.length <= 24 && (CELL_FRONT.test(c) || VENDOR.test(c)) && /^[A-Za-z0-9+/=_.-]+$/.test(c)
+function cellCut(s) {
+  if (s.length < 20 || !CELL_GAP.test(s)) return s
+  const chars = [...s]
+  let out = ""
+  let at = 0
+  let k = 0
+  // the end of the key-material run a position sits in: a run end found
+  // before is the end for every later position inside it, so the walk does not
+  // rescan the rest of a long word at each of its characters
+  let cellEnd = 0
+  while (k < chars.length) {
+    if (!CELLCH.test(chars[k])) {
+      k += 1
+      continue
+    }
+    // the run begins at a cell that is key material and ends at the first cell
+    // that is not: the word in front of the cells ("error:") and the word
+    // after them ("for") are stepped over, as maskCells steps over them
+    // a run that began inside a key cut into words ("ms -f or ei gn -012 …")
+    // masks a suffix of it, and a mask is opaque to the reading that owns the
+    // whole cut. A cell the text glued to the run before it, or one that
+    // follows a word with the key's own front cut off, is inside one; a cell
+    // behind the text's own punctuation ("error: 5f3a…") or led by the key's
+    // own front is not.
+    // a key material run's cells are eight characters at most and its first
+    // cell 24, so the head is read to 25 characters only: cutting the whole
+    // run's slice once per character of a 40 KB one made the walk square (a
+    // 40 KB body took 25-90 s against 0.3 s measured before the cells came)
+    if (k > 0 && CELLCH.test(chars[k - 1]) && !/[=:([{"'`]/.test(chars[k - 1])) {
+      k += 1
+      continue
+    }
+    // the end of the run is the same from every position inside it: a count
+    // in the loop keeps the walk linear
+    let c0 = k < cellEnd ? cellEnd : k
+    while (c0 < chars.length && CELLCH.test(chars[c0])) c0 += 1
+    if (c0 > cellEnd) cellEnd = c0
+    const head = chars.slice(k, Math.min(c0, k + 25)).join("")
+    let b = k
+    while (b > 0 && CELL_GAP.test(chars[b - 1])) b -= 1
+    if (b > 0 && /[A-Za-z0-9]/.test(chars[b - 1]) && !CELL_FRONT.test(head)) {
+      k += 1
+      continue
+    }
+    if (!CELL_OK(head, true)) {
+      k = c0
+      continue
+    }
+    const cells = []
+    let p = k
+    for (;;) {
+      let q = p
+      while (q < chars.length && CELLCH.test(chars[q])) q += 1
+      const cell = chars.slice(p, q).join("")
+      // a key cut one character at a time ("x=ms-A bCd1234E f Gh5678Ij …")
+      // has cells of one or two letters between the longer ones: inside a run
+      // that already carries twelve characters of key material they are the
+      // key's. A sentence's short word ("is a") needs no key in front of it
+      // and the run began at a cell that had to be key material. The run
+      // stops at the length a key can be, so a page of one-character words is
+      // read once, not to its end (measured: 32 KiB of "0 " took 1.8 s when
+      // the walk ran to the last cell)
+      if (!cell || !CELL_OK(cell, cells.length === 0)) break
+      cells.push(cell)
+      let g = q
+      while (g < chars.length && CELL_GAP.test(chars[g])) g += 1
+      if (g === q) {
+        p = q
+        break
+      }
+      p = g
+    }
+    const stop = p
+    const flat = cells.join("")
+    if (cells.length >= 3 && cells.length <= 24 && flat.length >= 20 && flat.length <= 96 && isKey(flat, false)) {
+      // the gap the cells were cut with stays outside the mask, as the card's
+      // reading keeps it
+      let e = stop
+      while (e > k && CELL_GAP.test(chars[e - 1])) e -= 1
+      out += s.slice(at, k) + mask(flat) + chars.slice(e, stop).join("")
+      at = stop
+    }
+    k = stop > k ? stop : c0
+  }
+  return out + s.slice(at)
+}
+
 // argRun is the whitespace routes of one value, tried until none finds more
 // ("ghp_ 1234 AbCd 5678…" is one body only from 1234 on, and the front is
 // part of a key-shaped piece by then): a run of words; a line break (or a
@@ -1957,14 +2154,15 @@ function argRun(text) {
   // only by a chunk-sized body, never by a whole page.
   if (text.length > 32 * 1024) return argWords(text)
   let s = text
-  // The two readings the body has are applied together, until neither finds
+  // The readings the body has are applied together, until none finds
   // anything: the whitespace routes (maskCut, and capsRun for a vendor key
   // written without its spaces, "AKIAIOSF ODNN7EXA MPLE") each mask what they
-  // join, and argWords then judges every word the join did not take. One
-  // pass of each per round, so a round over ordinary text is a couple of
-  // scans, not a dozen.
+  // join, markCut reads a key whose groups were cut by punctuation, cellCut a
+  // key whose cells were cut by four spaces, a tab or a bar, and argWords then
+  // judges every word the joins did not take. One pass of each per round, so a
+  // round over ordinary text is a couple of scans, not a dozen.
   for (let n = 0; n < 4; n += 1) {
-    const next = argWords(maskCut(capsRun(s)))
+    const next = argWords(maskCut(capsRun(cellCut(markCut(s)))))
     if (next === s) break
     s = next
   }
@@ -2008,7 +2206,13 @@ function joinFramed(s) {
   // allocation per word is the joined head, so the same 32 KiB bound the other
   // whole-text readings use applies here: an 8 KiB one left a cut key on a
   // 32 KiB line to the per-word pass, which has neither half's join.
-  if (s.length > 32 * 1024 || s.includes("…")) return s
+  if (s.length > 32 * 1024) return s
+  // (an ellipsis is one word's, not the line's: giving the whole value up
+  // because it carried a mask anywhere left an AWS secret cut by a space on
+  // the terminal — "token=wJalr…bPxRfi CYEXAMPLEKEY …" printed eight
+  // characters of its front. A word carrying one is skipped below: its
+  // ellipsis stands where key material was, and a join across it rebuilds a
+  // "key" out of the mask and the text round it)
   const words = []
   for (const m of s.matchAll(PIECE)) words.push({ text: m[0], at: m.index })
   if (words.length < 2) return s
@@ -2037,14 +2241,23 @@ function joinFramed(s) {
       const before = words[i].at > 0 ? s[words[i].at - 1] : ""
       if (before === "/" || before === "\\") continue
     }
-    // a head that is a key already is the passes' own business: joining it to
-    // the next word would move the four characters a mask is allowed to show
-    if (isKey(head)) continue
+    // a head that is a key already is the passes' own business — unless the
+    // words after it are pieces of itself. The walk below stops before a word
+    // that is a key on its own, so a head that reads as one and is followed by
+    // body material ("x=AKIAAbCd1234  EfGh5678  IjKl9012 …") is still joined,
+    // and one followed by a separate key is left alone there. Measured, a head
+    // this line skipped while the pieces after it were masked left eight
+    // contiguous body characters in the clear ("x=ghp_LmNo24 68Pq Rs1357Tu…"
+    // printed "68Pq" as written beside a mask); a short truncated key beside a
+    // whole one was read as the whole one's first half
+    // ("(ghp_Abcd1234Ef gh5678Ijkl…)" lost the first key's own four ends).
     // the same for the whole piece: a "=" inside a key's body is the key's own
     // ("--token=F5cYjKRtCxkl=K9m1+/lBV8ZjCPs6the", "NickName=[AKIAiXYDw=v/…"),
     // and reading from behind it masked the tail only and then left the front
-    // as written — the per-word pass owns the word whole
-    if (isKey(t0)) continue
+    // as written — the per-word pass owns the word whole. Only a word with a
+    // frame inside it is that case: with no frame the head IS the word, and
+    // the walk below decides whether the words after it are the same key
+    if (cut >= 0 && isKey(t0)) continue
     // and a frame with key material in front of it is not that value's frame:
     // eight characters of it is longer than any word a name is, and a short
     // head behind it is the key's own next character, not a new value's start.
@@ -2074,17 +2287,36 @@ function joinFramed(s) {
     let joined = head
     let best = ""
     let bestEnd = 0
-    for (let k = i + 1; k < words.length && k - i <= 8; k += 1) {
+    // the cells a key is cut into can be ten ("5f3a 9c1e … 5a91"), and a head
+    // that read eight of them masked the first eight and left the ninth as
+    // written: "x=5f3a…c7d3 5a91" is eight contiguous body characters across
+    // the mask's own tail. The cap is the length a key can be, as the other
+    // readings have it, and the word count is only a second bound — a word a
+    // cut leaves is one character, so a key cut one character at a time is as
+    // many words as it is long ("x=ghp_A b C d 1 2 3 4 …" stopped at the
+    // twenty-fourth and printed the rest as written, measured)
+    for (let k = i + 1; k < words.length && k - i <= 96 && joined.length <= 96; k += 1) {
       const gap = s.slice(words[k - 1].at + words[k - 1].text.length, words[k].at)
       if (!/^[ \t\r\n\u00a0\u3000/]{1,3}$/.test(gap)) break
       const stem = words[k].text.replace(STEM, "")
       if (!stem || !KEYCH.test(stem)) break
+      // a word that opens its own front, or that is a key on its own, is a
+      // second key and not the first one's body: joining them hid both ends
+      // behind one mask ("ms-aaaa…5555 ms-zzzz…5555" became one), and a
+      // truncated key beside a whole one lost its own four ends (splitKey's
+      // walk breaks at a front for the same reason)
+      if (VENDOR.test(stem) || /^(?:ms-|sk-)/i.test(stem) || (stem.length >= 12 && isKey(stem))) break
       // a word of prose ends the run: a value's body carries a digit or a
       // capital, a sentence's next word does not — unless the word is a piece
       // of a key cut into groups and the join so far already reads as one
       // ("ms-0123456 789abcd ef01234 56789ab cdef" stopped at "cdef" and left
       // the key's last four on the terminal, measured)
-      if (!/[0-9]/.test(stem) && !/[A-Z]/.test(stem) && stem.length < 12 && !(best && (keyPiecey(stem) || nextPiecey(words[k + 1]?.text)))) break
+      // (the piece rule holds before the join reads as a key too: "x=ghp_A
+      // bCd1234E f Gh5678Ij …" stopped at "f" while the join was under the
+      // floor, and the masked tail printed beside the head was fourteen
+      // contiguous body characters. A word that opens a phrase and no key
+      // ("for provider", "is a") has no key-shaped word after it either)
+      if (!/[0-9]/.test(stem) && !/[A-Z]/.test(stem) && stem.length < 12 && !(keyPiecey(stem) || nextPiecey(words[k + 1]?.text))) break
       joined += stem
       if (joined.length >= 12 && /[0-9]/.test(joined) && isKey(joined, false)) {
         best = joined
@@ -2672,7 +2904,6 @@ export function scrub(out, ...secrets) {
   for (const secret of secrets) {
     if (secret) s = maskEchoes(s.split(secret).join(mask(secret)), secret)
   }
-  if (s.length <= 32 * 1024) s = maskCut(s)
   // arg() over the whole text first: its run reading covers a key cut by a
   // line break or by spaces across the child's lines (a wrapped page, a
   // pretty-printed error), which a line at a time cannot see. Then per line,
@@ -2682,13 +2913,42 @@ export function scrub(out, ...secrets) {
   // read over the whole text here, before the lines are split. Measured: a UUID
   // cut at a line break went out whole, because each line held a piece under
   // every floor.
-  for (const join of [spacedKey, splitKey]) {
-    const cut = join(s)
-    if (cut && msKey(cut.body, false)) {
-      s = cut.pre + mask(cut.body.replace(/\s+/g, "")) + cut.post
-      break
+  // the folded and framed readings run before splitKey and before maskCut:
+  // each reads a key whole up to its own end, and a partial mask written first
+  // puts an ellipsis where they would have crossed. Measured, maskCut first:
+  // "x=5f3a 9c1e … 5a91" came out "x=5f3a 9c1e…5a91" (eight body characters
+  // beside the key's own mask); splitKey first: the same, its walk started at
+  // the second cell.
+  // (maskCut runs after the join readings only: it masks a key up to the
+  // cells it can read, and a mask it writes first is opaque to the joined
+  // whole. It runs before arg, which reads the cells again)
+  // spacedKey runs first here as it does in arg(): its walk starts at the
+  // front, and the framed join masks a run from the middle on, so the "…" it
+  // writes first stopped spacedKey where the key went on — measured, "x=m s -
+  // LmNo24 68Pq … Hi3597" went out "x=m s - LmNo24 68Pq Rs13…3597", the key's
+  // opening eight characters beside its own mask.
+  const sp = spacedKey(s)
+  if (sp && msKey(sp.body, false)) s = sp.pre + mask(sp.body.replace(/\s+/g, "")) + sp.post
+  if (s.length <= 32 * 1024) {
+    // (an ellipsis folds to three dots and would read as key material — a mask
+    // this tool wrote is opaque here, as it is inside arg)
+    if (!s.includes("…")) {
+      const folded = foldedSpans(s)
+      if (folded) s = folded
     }
+    s = joinFramed(s)
   }
+  const split = splitKey(s)
+  if (split && msKey(split.body, false)) {
+    s = split.pre + mask(split.body.replace(/\s+/g, "")) + split.post
+  }
+
+  // maskCut runs here, on the whole text: it reads a key cut by spaces or
+  // middots across a line break, which arg's per-line pass cannot see (a key
+  // the child wrapped). The cell reading is left to arg — its mask covers a
+  // share of a cut and is opaque to arg's readings, which read the same cut to
+  // its end
+  if (s.length <= 32 * 1024) s = maskCut(s)
   // a value a frame names is read across a line break too: the lines are split
   // for echoing, and a key cut by the break is one key ("{\"key\":\"123e" and
   // "4567-e89b-…" on the next line). joinFramed runs on the whole text for the
@@ -2966,10 +3226,12 @@ export async function main({
   if (!dir) {
     log(`✗ 没找到 magpie 的配置目录。`)
     log(`  试过 $XDG_CONFIG_HOME/magpie 和 ~/.config/magpie。便携版请用 --dir 指定它的 data 目录。`)
+    statusNote()
     return 1
   }
   if (!looksLikeMagpie(dir, exists)) {
     log(`✗ ${arg(dir)} 里没有 magpie 的配置文件（providers.json / plugins.json / plugin-auth.json）。`)
+    statusNote()
     return 1
   }
   // arg(), not show(): a token pasted into --dir is echoed here
@@ -2982,6 +3244,7 @@ export async function main({
   if (providersRaw === null) {
     log(`✗ ${showPath(dir, "providers.json")} 存在但读不出来（可能正在被写或已损坏）。`)
     log(`  不猜它的内容：先确认 magpie 正常，或备份后重试。`)
+    statusNote()
     return 1
   }
   const providers = providersRaw?.providers
@@ -2992,17 +3255,20 @@ export async function main({
   if (authRaw === null || !shaped(authRaw)) {
     log(`✗ ${showPath(dir, "plugin-auth.json")} 存在但读不出来（可能正在被写或已损坏）。`)
     log(`  不猜它的内容：先确认 magpie 正常，或备份后重试。`)
+    statusNote()
     return 1
   }
   if (providersRaw !== undefined && !shaped(providersRaw)) {
     log(`✗ ${showPath(dir, "providers.json")} 存在但不是 magpie 写的形状。`)
     log(`  不猜它的内容：先确认 magpie 正常，或备份后重试。`)
+    statusNote()
     return 1
   }
   // `providers` present but not a list is the same unreadable state one level in
   if (providers !== undefined && providers !== null && !Array.isArray(providers)) {
     log(`✗ ${showPath(dir, "providers.json")} 的 providers 不是列表。`)
     log(`  不猜它的内容：先确认 magpie 正常，或备份后重试。`)
+    statusNote()
     return 1
   }
   const accounts = pluginAccounts(authRaw)
@@ -3024,6 +3290,7 @@ export async function main({
     } else {
       log(`  用 --from <id> 指定。`)
     }
+    statusNote()
     return 1
   }
   const preset = cands[0] ?? null
