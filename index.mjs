@@ -4304,11 +4304,20 @@ export async function MsmoliPlugin(input) {
       },
 
       // The credits balance and today's usage, for the account card.
-      async usage(getAuth) {
+      async usage(getAuth, provider, opts) {
+        // A cancelled poll is an answer the host throws away: magpie hands the
+        // hook { signal } (host.js's usage wrapper, a.usage(getAuth, provider,
+        // signal ? { signal } : undefined)) and aborts it when the panel
+        // closes or a newer ask supersedes this one. Ignored, both reads and
+        // the write-back still went out — measured with the signal already
+        // aborted — and the ledger walk is the expensive half.
+        const cancelled = () => opts?.signal?.aborted === true
+        const stop = () => new Error("用量查询已取消")
         // everything the host could get wrong about the hand-over is the
         // card's problem alone: it must come back as {error}, never as a
         // rejection out of the hook
         const deadline = Date.now() + USAGE_BUDGET_MS
+        if (cancelled()) return { error: "用量查询已取消" }
         let auth, token
         try {
           const got = await bounded(Promise.resolve().then(getAuth), deadline - Date.now())
@@ -4371,6 +4380,12 @@ export async function MsmoliPlugin(input) {
           // read: it still goes to the outer catch, and the account is signed
           // out over it.
           try {
+            // a cancel that landed while the balance was read stops the walk
+            // here: the ledger is the expensive half (a page, then the pages
+            // after it), and the answer it would feed is already discarded.
+            // Thrown into the catch below, the balance that was read still
+            // answers, with the cancel said in place of the day's numbers.
+            if (cancelled()) throw stop()
             const tx = await json(profile.site, token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
             gate(profile, tx.res, tx.body, tx.parsed, token, "账单查询失败")
 

@@ -13198,3 +13198,51 @@ test("a ledger whose rows kept only rule_key is a body we do not understand", as
     assert.match(r.message, /账单/, `the reason is not the ledger's: ${r.message}`)
   }
 })
+
+test("a usage read the host cancelled before it started sends nothing", async () => {
+  // magpie hands usage a third argument, { signal } (host.js's usage wrapper:
+  // a.usage(getAuth, provider, signal ? { signal } : undefined)), and a
+  // cancelled poll — the panel closed, the ask superseded — is one the answer
+  // is thrown away for. Ignored, the read still went out: both requests
+  // measured after the signal was already aborted, and the write-back with
+  // them.
+  const ac = new AbortController()
+  ac.abort(new Error("panel closed"))
+  const calls = []
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return reply({ body: { success: true, data: { available_balance: 5, records: [] } } })
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-cancelledusage-0000-0000-1" }), { id: "msmoli" }, { signal: ac.signal })
+    assert.equal(calls.length, 0, `a cancelled poll must send nothing: ${JSON.stringify(calls)}`)
+    assert.match(u.error, /取消/, `the card should say the read was cancelled: ${JSON.stringify(u)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a usage read cancelled after the balance stops before the ledger", async () => {
+  // The ledger walk is the expensive half (a page, then the pages after it).
+  // A cancel that lands between the two reads stops the walk; the balance
+  // already read still answers, and says why the day's numbers are missing.
+  const ac = new AbortController()
+  const calls = []
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname
+    calls.push(path)
+    if (path.endsWith("/balance")) ac.abort(new Error("panel closed"))
+    return reply({ body: { success: true, data: { available_balance: 5, records: [] } } })
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-cancelledusage-0000-0000-2" }), { id: "msmoli" }, { signal: ac.signal })
+    assert.deepEqual(calls.filter((p) => p.endsWith("/balance")).length, 1, JSON.stringify(calls))
+    assert.equal(calls.filter((p) => p.endsWith("/transactions")).length, 0, `the ledger was read after the cancel: ${JSON.stringify(calls)}`)
+    assert.match(u.windows[0].display, /取消/, JSON.stringify(u.windows[0]))
+    assert.match(u.balance, /5/, "the balance that was already read must still answer")
+  } finally {
+    globalThis.fetch = real
+  }
+})
