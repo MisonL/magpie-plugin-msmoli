@@ -2174,7 +2174,13 @@ const maskWide = (s, letters) => {
   // (U+2060 is one), so the wide range alone stopped the stretch at it and the
   // key's tail went out as ordinary text — measured on the card and in the
   // host's log line.
-  const STRETCH = /[A-Za-z0-9\s 　-￿\p{Cf}]/u
+  // (the wide range reads the full-width forms of ASCII, and the extra marks a
+  // display draws round a key. It stops short of CJK: "毎日签到 ｍｓ－ＡＡＡＡ …"
+  // began the stretch at the Chinese character before the key, the folded
+  // window then opened on Chinese and /^ms-/ failed — measured on the card and
+  // in the host's log line, the whole key in the clear, and the name a server
+  // echoed stored by it)
+  const STRETCH = /[A-Za-z0-9\s\u00a0\u3000\uff01-\uff5e\p{Cf}]/u
   let out = ""
   let at = 0
   let k = 0
@@ -2185,12 +2191,22 @@ const maskWide = (s, letters) => {
     }
     let end = k
     while (end < chars.length && STRETCH.test(chars[end])) end += 1
+    // the window opens on the key's first character, not on the frame in front
+    // of it: a full-width colon or bracket the text put before the key is the
+    // text's, and folding it in left the window opening on ":" — "/^ms-/" then
+    // failed and the whole key went out (measured with "每日签到：ｍｓ－…")
+    let start = k
+    while (start < end && !/[A-Za-z0-9]/.test(chars[start]) && !/[A-Za-z0-9]/.test(chars[start].normalize("NFKC"))) start += 1
+    if (start >= end) {
+      k = end
+      continue
+    }
     // the key ends at its own last full-width or spaced piece: the ASCII words
     // after it ("for provider") are the text's, and a window that ran on to
     // them took them with the mask
     let stop = end
-    while (stop > k && !/[^\x00-\x7e]/.test(chars[stop - 1])) stop -= 1
-    while (stop > k && /\s/.test(chars[stop - 1])) stop -= 1
+    while (stop > start && !/[^\x00-\x7e]/.test(chars[stop - 1])) stop -= 1
+    while (stop > start && /\s/.test(chars[stop - 1])) stop -= 1
     if (stop <= k) {
       k = end
       continue
@@ -2212,7 +2228,15 @@ const maskWide = (s, letters) => {
       if (!piece || !/[\dA-Z]/.test(piece)) break
       wide = p
     }
-    const folded = chars.slice(k, wide).join("").normalize("NFKC")
+    // the closing frame a display drew ("（…）") is the display's: the window
+    // ends at the key's last letter or digit, and the bracket prints as typed
+    let tail = wide
+    while (tail > start && !/[A-Za-z0-9]/.test(chars[tail - 1]) && !/[A-Za-z0-9]/.test(chars[tail - 1].normalize("NFKC"))) tail -= 1
+    if (tail <= start) {
+      k = end
+      continue
+    }
+    const folded = chars.slice(start, tail).join("").normalize("NFKC")
     // A format character is not the key's either. The card's text() turns one
     // into a space by the time the string is shown, so a word joiner pasted
     // into a full-width key (chat clients and IMEs add them) split the folded
@@ -2220,12 +2244,31 @@ const maskWide = (s, letters) => {
     // behind a mask that covered its first four characters only — measured on
     // the card and in the host's log line.
     const flat = folded.replace(/[\s\p{Cf}]+/gu, "")
+    // the frame a display put round the key ("（…）", "。") is the display's,
+    // not the key's: a trailing one folded into the mask and printed as the
+    // mask's own last character ("（ms-A…DDD）" came out "（ms-A…DDD)")
+    const keyed = flat.replace(/^[^A-Za-z0-9]+/, "").replace(/[^A-Za-z0-9]+$/, "")
     // "－" is U+FF0D, which NFKC leaves alone; the shape test reads it as a
     // hyphen, and so does this one
-    const asked = flat.replace(/－/g, "-")
+    let asked = keyed.replace(/－/g, "-")
+    // a name and a frame in front of the key ("ＮｉｃｋＮａｍｅ＝［ｍｓ－…］") is
+    // the text's: the key begins behind the frame, as the ASCII readings have
+    // it (`NickName=[ms-…`). What is masked is the key, and what stands in
+    // front of it prints as typed.
+    let keyFrom = start
+    if (!/^ms-/i.test(asked)) {
+      const win = chars.slice(start, tail)
+      const found = win.findIndex((_, q) => win.slice(q, q + 3).join("").normalize("NFKC").toLowerCase() === "ms-")
+      if (found < 0) {
+        k = end
+        continue
+      }
+      keyFrom = start + found
+      asked = chars.slice(keyFrom, tail).join("").normalize("NFKC").replace(/[\s\p{Cf}]+/gu, "").replace(/－/g, "-")
+    }
     if (/^ms-/i.test(asked) && asked.length > 12 && keyBody.test(asked)) {
       // the mask stands for the key; the rest of the window is the text's
-      out += s.slice(at, k) + maskToken(asked) + chars.slice(wide, end).join("")
+      out += s.slice(at, keyFrom) + maskToken(asked) + chars.slice(tail, end).join("")
       at = end
     }
     k = end

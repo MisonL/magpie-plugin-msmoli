@@ -12865,6 +12865,39 @@ test("a full-width key grouped by spaces is masked on the card, in names and in 
   }
 })
 
+test("a full-width key beside Chinese text, or behind a full-width frame, is masked", () => {
+  // The wide reading's stretch began at any character from U+3000 up, CJK
+  // included. With a Chinese character in front of the key the window opened
+  // there, /^ms-/ failed, and the whole key went out — on the card, in the
+  // host's log line and, when a server echoed it as the nickname, into the
+  // stored name. A full-width colon or bracket in front did the same, and a
+  // closing bracket folded into the mask printed as the mask's last character.
+  const key = [..."ms-AAAA BBBB CCCC DDDD"].map((c) => {
+    const k = c.charCodeAt(0)
+    return k >= 0x21 && k <= 0x7e ? String.fromCharCode(k + 0xfee0) : c
+  }).join("")
+  const cases = [
+    [`每日签到 ${key}`, `每日签到 ms-A…DDDD`],
+    [`每日签到${key}`, `每日签到ms-A…DDDD`],
+    [`每日签到：${key}`, `每日签到：ms-A…DDDD`],
+    [`每日签到（${key}）`, `每日签到（ms-A…DDDD）`],
+    [`${key} 是无效的`, `ms-A…DDDD 是无效的`],
+    [`ＮｉｃｋＮａｍｅ＝［${key}］`, `ＮｉｃｋＮａｍｅ＝［ms-A…DDDD］`],
+  ]
+  for (const [v, want] of cases) {
+    for (const [tag, out] of [
+      ["card", testables.maskAll(v, true)],
+      ["host", testables.hostText(v)],
+      ["name", testables.nameText(v, "")],
+    ]) {
+      assert.equal(out, want, `${tag}: ${JSON.stringify(v)} → ${JSON.stringify(out)}`)
+    }
+  }
+  // ordinary Chinese, and full-width text that is no key, keep their shape
+  for (const t of ["今天天气不错，我们去公园散步吧。", "ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰ", "魔粒：每日签到可得 200"])
+    assert.equal(testables.maskAll(t, true), t, `ordinary text was masked: ${JSON.stringify(testables.maskAll(t, true))}`)
+})
+
 test("a key whose body carries a word, cut into groups, is masked whole", () => {
   // The front-plus-body shapes the cut readings were tightened for all have a
   // body with no word in it ("0123 4567 89ab …"). A real one can carry one:
