@@ -11623,7 +11623,11 @@ test("a 401 behind a frame's punctuation, a proxy's 403, and a key behind a colo
   assert.ok(String(risk.error).includes("风控"), `a site's own 403 is still risk control: ${risk.error}`)
 })
 
-test("the middot matrix: a key cut by any middot, in any frame, is masked whole", () => {
+// (the timeout is the test's own: six keys × eight separators × twelve widths
+// × four frames × two readings is 4 608 calls, about 6 s on this machine and
+// more on a loaded runner, and bun's default 5 s turned that into a random red
+// that blocks a release while the suite itself is fine — measured here)
+test("the middot matrix: a key cut by any middot, in any frame, is masked whole", { timeout: 120_000 }, () => {
   // The matrix CONTRIBUTING names: four frames × widths one to twelve × six
   // key shapes × eight separators, card and CLI. What is measured is the
   // compact key absent from the output, not the mask's own width: the second
