@@ -19,7 +19,7 @@
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 
-// Today's suite is 792 tests (the plain run); the floor leaves room for a
+// Today's suite is 793 tests (the plain run); the floor leaves room for a
 // legitimate consolidation while still catching a whole file that vanished.
 // (Keep this number current: a stale one reads as a suite that shrank. It sat
 // at 600 while the comment said 726, so about 160 tests could have gone

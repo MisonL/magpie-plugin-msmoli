@@ -13409,6 +13409,34 @@ test("an AWS key id cut by spaces keeps its front on the card, whatever the word
   assert.equal(testables.maskAll("key=AKIA IOSF ODNN 7EXA MPLE", true), "key=AKIA…MPLE")
 })
 
+test("an AWS secret cut by a space behind a frame is masked on the card", () => {
+  // maskSpaced read a framed word's head from its last letters and digits
+  // ("wJalrXUtnFEMI" of "token=wJalrXUtnFEMI/K7MDENG/bPxRfi"), and the join
+  // across the space then began at that half only: the card and the host's
+  // log line printed "token=wJalrXUtnFEMI/K7MDENG/bPxR…EKEY", eight
+  // contiguous body characters beside the mask. A framed word that is key
+  // material on its own is where the key begins, its own separators included.
+  // (the cut at 26 splits off "fiCYEXAMPLEKEY", thirteen characters of
+  // letters with one capital: the space-reading's prose rule ends the run
+  // there on e103944 as well, and it is recorded as a known boundary rather
+  // than widened here — a piece of that shape is a word to every reading.)
+  const key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  for (const pre of ["token=", "(token=", "key="]) {
+    const v = `${pre}${key.slice(0, 20)} ${key.slice(20)}`
+    for (const [tag, out] of [
+      ["card", testables.cardText(v, "")],
+      ["host", testables.hostText(v)],
+      ["arg", arg(v)],
+      ["scrub", scrub(v)],
+    ]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} ${JSON.stringify(v)}: ${JSON.stringify(out)}`)
+    }
+  }
+  // a path and a variable that holds one keep their shape
+  for (const prose of ["dir=/Users/mison/Documents/Project", "cfg=/etc/nginx/nginx.conf", "url=https://example.com/Api/V1/Users"])
+    assert.equal(testables.cardText(prose, ""), prose, `a path was masked: ${testables.cardText(prose, "")}`)
+})
+
 test("a digest, a UUID or a vendor key cut by marks is masked with no front to lead it", () => {
   // maskSep's own reading asked for an ms- front, and splitKey's walk splits
   // on spaces, middots and slashes: a digest or a UUID written one group per

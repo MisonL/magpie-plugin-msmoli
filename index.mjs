@@ -1656,8 +1656,18 @@ function maskSpaced(s, letters) {
     // mask allows four). The hex letters are what tells the piece from a date
     // ("2026-11-10" has digits and hyphens but no a–f) and from a word.
     const hexPiece = /^[0-9a-f]+(?:-[0-9a-f]+)*$/i.test(hp) && /\d/.test(hp) && /[a-f]/i.test(hp) && hp.length >= 8
-    const ht =
-      frameCut === 0 && (keyAt(hp, letters) || hexPiece)
+    // a framed value that is key material on its own ("token=wJalrXUtnFEMI/
+    // K7MDENG/bPxRfi") begins where the frame ends: read from its last letters
+    // and digits, the join across a space began at that half only, and the
+    // card and the host's log line printed eight body characters of an AWS
+    // secret beside the mask. A path keeps its shape: the slashes alone are
+    // not enough, the piece has to carry a capital and a lower-case letter, be
+    // key-alphabet only, and stand behind a frame's punctuation.
+    const framedKey =
+      frameCut > 0 && framed.length >= 12 && /^[A-Za-z0-9+/=_.-]+$/.test(framed) && /[/=+_.-]/.test(framed) && /[A-Z]/.test(framed) && /[a-z]/.test(framed)
+    const ht = framedKey
+      ? framed
+      : frameCut === 0 && (keyAt(hp, letters) || hexPiece)
         ? hp
         : hp.match(FRONT_IN)?.[0] ?? (frameCut > 0 && !frameWord && keyAt(framed, letters) ? framed : tailOf(hp) || hp)
     const hf = hp.slice(0, hp.length - ht.length)
