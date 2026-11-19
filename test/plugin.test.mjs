@@ -5225,6 +5225,37 @@ test("a balance field that is missing or not a number is a failure, not 0", asyn
   )
 })
 
+test("a sibling rule's unreadable amount does not keep an unclaimed day from claiming", async () => {
+  // The throw in byRule is for the row that carries the claim: a body we
+  // cannot read there says nothing about whether the day is open, and `failed`
+  // keeps the day open. It was the whole daily page, so an account whose one
+  // aliyun_bindlogin row had lost its amount answered `failed` before the
+  // touch — measured, zero login/info requests, every ask, forever, and the
+  // day never claimed at all.
+  const bad = { gmt_created: today, type: "EARN", rule_key: "aliyun_bindlogin", title: "绑定登录", count: 1 }
+  let touched = 0
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/api/v1/users/login/info")) touched += 1
+    const { reply: r } = {}
+    return new Response(
+      JSON.stringify(
+        String(url).includes("login/info")
+          ? { success: true, data: { name: "alice" } }
+          : { success: true, data: { records: [bad], total: 1 } },
+      ),
+      { status: 200 },
+    )
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+    assert.equal(touched, 1, `the touch never happened: ${JSON.stringify(r)}`)
+    assert.notEqual(r.outcome, "failed", `a sibling row's amount failed the day: ${JSON.stringify(r)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("a ledger amount we cannot read fails the read, it does not become 0", async () => {
   // A localized "1,200" (or a format change, or a null) is a body we do not
   // understand. Read as 0 it says it claimed 0 beside a balance that

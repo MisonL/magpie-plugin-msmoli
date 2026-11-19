@@ -3967,7 +3967,16 @@ export async function MsmoliPlugin(input) {
                 // row left out of the diff says "no change", which is the
                 // truth about that row. The claimed branch reports the
                 // total as unsaid.
-                if (!claimed || r?.rule_key === "daily_active") throw e
+                // (the claim itself is the one row that must read while the
+                // day is unclaimed — a body we cannot read there says nothing
+                // about whether the day is open, and the pinned answer is
+                // `failed` so the day stays open. Every other row is left out
+                // of the diff: a sibling rule's unreadable amount must not
+                // stop the touch, or an account with one bad row never claims
+                // at all — measured, zero login/info requests, every ask,
+                // forever. Once the claim has landed the row is not the fact
+                // either: the claimed branch reports the total as unsaid.)
+                if (r?.rule_key === "daily_active") throw e
                 continue
               }
               m.set(r?.rule_key, (m.get(r?.rule_key) ?? 0) + n)
