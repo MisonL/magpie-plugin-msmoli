@@ -3263,7 +3263,7 @@ const rowKey = (r) => stable(r)
 const idOf = (r) =>
   r?.id !== undefined && r?.id !== null && r.id !== "" ? `id:${String(r.id)}` : ""
 
-async function dayRows(profile, token, day, first, deadline, body, { expiry = true } = {}) {
+async function dayRows(profile, token, day, first, deadline, body, { expiry = true, signal = null } = {}) {
   // A page can repeat an aggregate within itself — the same id twice, the
   // same grant twice — and the walk below only merges an id it has seen on a
   // LATER page: the first page went in as it came, so a 200 grant on it was
@@ -3288,7 +3288,13 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
   // login/info requests), while a claimed one printed "账单未读完，数字偏低"
   // over a ledger it had in fact finished.
   const firstDupes = first.length - all.length
-  let rows = all
+  // the page the proofs below read: the page as the server sent it, repeats
+  // and all. Handed the deduped `all`, a 50-row page that repeated one id
+  // counted 49 and read as "room to spare" — with no `total` to say otherwise
+  // the walk proved a day it had not finished, and a later page's grant was
+  // never read (measured: usage showed "领 50" beside a 200 grant on page 2).
+  // The later pages pass `raw` for the same reason.
+  let rows = first
   let pages = 1
   // A page seen before is the page number being ignored, and a row seen before
   // is the server shifting its window between reads: the same grant then sits
@@ -3305,7 +3311,13 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
     const id = idOf(r)
     if (id && !byId.has(id)) byId.set(id, i)
   })
-  let { total, contradicted } = totalOf(body, all)
+  // the page as the server sent it, not the deduped copy: a page with no
+  // `total` synthesises one from the rows beside it (totalOf), and the deduped
+  // count is one short of what the page said — 50 rows with one id twice became
+  // "total 49" beside 49 counted rows, which the walk read as "the rows account
+  // for it" and stopped on (measured: page two's 200 grant answered "领 50").
+  // The later pages already ask `raw` for the same reason.
+  let { total, contradicted } = totalOf(body, first)
   let complete = false
   // Two questions end this walk, and they are not the same one. The day's
   // numbers are proven complete by a page older than the day, a total the rows
@@ -3401,6 +3413,11 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
       // is low, and the check-in retries
       break
     }
+    // a cancel that landed while the previous page was read stops the walk
+    // before the next request: the page count is the walk's cost, and the
+    // answer it feeds is already discarded by the host. Thrown out of here,
+    // it reaches the caller's catch and the card says the read was cancelled.
+    if (signal?.aborted) throw new Error("用量查询已取消")
     let got
     try {
       got = await json(profile.site, token, `${TXNS}?page=${pages + 1}&page_size=${PAGE_SIZE}`, deadline)
@@ -3506,6 +3523,9 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
     const fresh = []
     const added = []
     let changed = false
+    // whether a row on this page was merged into another (its key is still
+    // added to `seenRows`: the spelling was read, it just is not a row of its
+    // own)
     for (const r of raw) {
       const k = rowKey(r)
       if (seenRows.has(k)) continue
@@ -3513,9 +3533,16 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
       // the same id seen before is the same aggregate: the later read replaces
       // it. Rows the server gives no id for are never merged — two rows that
       // share a tuple are still two rows.
-      const at = id && byId.has(id) ? byId.get(id) : undefined
-      if (at !== undefined) {
-        all[at] = r
+      // The slot `byId` names is either in `all` or in this page's `fresh`:
+      // the first page's repeats were merged at the top, and a repeat inside
+      // this page must replace its own first copy, not write a second one.
+      // (Written into `all` alone, a duplicate id on this page pointed past
+      // `all`'s end and the copy survived: page two's +10 and +20 under one id
+      // answered credit 30.)
+      if (id && byId.has(id)) {
+        const slot = byId.get(id)
+        if (slot >= all.length) fresh[slot - all.length] = r
+        else all[slot] = r
         added.push(k)
         changed = true
         continue
@@ -4172,7 +4199,11 @@ export async function MsmoliPlugin(input) {
             let after = null
             if (touched) {
               try {
-                after = await todayEarn(token, deadline, { expiry: false })
+                // noted() like every other post-touch read: a 401 refused on a
+                // courtesy page (the numbers already proven) is reported
+                // through `refused`, not thrown, and without this the card
+                // kept saying "今日已领取" for a token the server had refused.
+                after = noted(await todayEarn(token, deadline, { expiry: false }))
               } catch (e) {
                 if (signedOut(e)) marks.expired = true
                 after = null
@@ -4390,7 +4421,7 @@ export async function MsmoliPlugin(input) {
             gate(profile, tx.res, tx.body, tx.parsed, token, "账单查询失败")
 
             const day = todayCN()
-            const walked = await dayRows(profile, token, day, recordsOf(tx.body), deadline, tx.body)
+            const walked = await dayRows(profile, token, day, recordsOf(tx.body), deadline, tx.body, { signal: opts?.signal })
             let earned = 0
             let spent = 0
             let earliest = ""

@@ -13246,3 +13246,113 @@ test("a usage read cancelled after the balance stops before the ledger", async (
     globalThis.fetch = real
   }
 })
+
+test("a later page that repeats an id inside itself replaces the row, not sums it", async () => {
+  // The first page's repeats are merged as they come; a later page's are not.
+  // The duplicate on the later page finds its own id in `byId` pointing at a
+  // slot in `fresh` — an index past the end of `all`, which is only extended
+  // after the page is looped — so `all[at] = r` wrote a second copy and the
+  // first was pushed after it. Measured: page two holding +10 and +20 under
+  // one id answered done with credit 30.
+  const spend = (i) => ({ id: `s-${i}`, gmt_created: today, type: "SPEND_CONFIRM", rule_key: "api_inference", total_amount: 0, count: 1 })
+  const grant = (amount) => ({ id: "grant-x", gmt_created: today, type: "EARN", rule_key: "daily_active", title: "注册并登录", total_amount: amount, count: 1 })
+  const page1 = Array.from({ length: 50 }, (_, i) => spend(i))
+  const r = await withFetch(
+    {
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "alice" } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: page1, total: 52 } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: [grant(10), grant(20)], total: 52 } } },
+    },
+    async () => auth.checkin(async () => ({ type: "api", key: "ms-laterdup-0000-0000-0001" })),
+  )
+  assert.equal(r.credit, 20, `the later read must replace the earlier one: ${JSON.stringify(r)}`)
+})
+
+test("a first page that repeats a row is not a short page when it prints no total", async () => {
+  // The short-page proof read the deduped `all`: 50 rows sent with one id
+  // twice became 49 counted rows, read as "room to spare" with no `total` to
+  // say otherwise, and the walk proved a day it had not finished — a later
+  // page's grant never read. The page as sent is what the proof is about (the
+  // comment at `rows = raw` says so for later pages); the first page was
+  // handed over deduped.
+  const grantAt = (on, amount, id) => ({ id, gmt_created: on, type: "EARN", rule_key: "daily_active", title: "注册并登录", total_amount: amount, count: 1 })
+  const spend = (i) => ({ id: `s-${i}`, gmt_created: today, type: "SPEND_CONFIRM", rule_key: "api_inference", total_amount: 0, count: 1 })
+  const page1 = [...Array.from({ length: 48 }, (_, i) => spend(i)), grantAt(today, 50, "g1"), grantAt(today, 50, "g1")]
+  const page2 = [grantAt(today, 200, "g2")]
+  const u = await withFetch(
+    {
+      "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 300 } } },
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: page1 } } },
+      "/openapi/v1/magicubes/transactions?page=2&page_size=50": { body: { success: true, data: { records: page2 } } },
+    },
+    async () => auth.usage(async () => ({ type: "api", key: "ms-firstdup-0000-0000-0002" })),
+  )
+  assert.match(u.windows[0].display, /领 250/, `the second page's grant was not read: ${JSON.stringify(u.windows[0])}`)
+})
+
+test("a refusal on the claimed branch's second read still reaches the card", async () => {
+  // Every other post-touch read goes through noted(), so a 401 met on a
+  // courtesy page (the numbers already proven) marks the account expired.
+  // This one did not: measured, the same refusal answered done with no signIn
+  // when it landed on the second read instead of the baseline, and the user
+  // was never told to sign in again.
+  const day = (over = {}) => ({ gmt_created: today, type: "EARN", rule_key: "daily_active", title: "注册并登录", total_amount: 0, count: 1, ...over })
+  const page1 = Array.from({ length: 50 }, (_, i) => ({ id: `p1-${i}`, ...day() }))
+  const page2 = [
+    { id: "a", ...day({ rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50 }) },
+    { id: "b", ...day({ rule_key: "aliyun_bindlogin", title: "绑定阿里云账号", total_amount: 50 }) },
+  ]
+  let page2reads = 0
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes("login/info")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+    const p = new URL(u)
+    if (p.searchParams.get("page") === "2") {
+      page2reads += 1
+      // the post-touch re-read is the second page-two read
+      if (page2reads === 2) return reply({ status: 401, body: { message: "unauthorized" } })
+      return reply({ body: { success: true, data: { records: page2, total: 52 } } })
+    }
+    return reply({ body: { success: true, data: { records: page1, total: 52 } } })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-after401-0000-0000-0003" }))
+    assert.ok(page2reads >= 2, `the second read never ran: ${page2reads} page-2 read(s), ${JSON.stringify(r)}`)
+    assert.equal(r.signIn, "expired", `the refusal on the second read was swallowed: ${JSON.stringify(r)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a usage read cancelled mid-walk stops reading pages", async () => {
+  // The cancel was only checked at the entry and after the balance, so a
+  // panel closed while the ledger walk was running still read every page the
+  // cap allowed — measured: page 2 requested after the signal fired, three
+  // requests in all, and a card the host throws away. The walk is where the
+  // cost is; it takes the signal too.
+  const ac = new AbortController()
+  const calls = []
+  const row = (i) => ({ id: `f-${i}`, gmt_created: today, type: "EARN", rule_key: "daily_active", title: "注册并登录", total_amount: 1, count: 1 })
+  const page1 = Array.from({ length: 50 }, (_, i) => row(i))
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const p = new URL(url)
+    calls.push(p.pathname + p.search)
+    if (p.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 5 } } })
+    if (p.searchParams.get("page") === "1") {
+      // the walk runs after this answer; the cancel fires before page 2
+      queueMicrotask(() => ac.abort(new Error("panel closed")))
+      return reply({ body: { success: true, data: { records: page1, total: 120 } } })
+    }
+    return reply({ body: { success: true, data: { records: [row(99)], total: 120 } } })
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-cancelwalk-0000-0004" }), { id: "msmoli" }, { signal: ac.signal })
+    const pages = calls.filter((c) => c.includes("page=2"))
+    assert.equal(pages.length, 0, `a page was read after the cancel: ${JSON.stringify(calls)}`)
+    assert.match(u.windows[0].display, /取消/, JSON.stringify(u.windows[0]))
+  } finally {
+    globalThis.fetch = real
+  }
+})
