@@ -1453,7 +1453,10 @@ function maskSpaced(s, letters) {
       const readOn = piecey(x) || moreKey || (k + 1 < words.length && piecey(words[k + 1][0]))
       // (a middot's pieces are read whatever they would read as alone: the
       // separator is a cut's, and "sk-a·nt-a·pi03" is a key)
-      const prose = !mid && /^[a-z]{4,}$/.test(x) && (x.length > 4 || !frontHead || !moreKey) && !(j > i && MAYKEY(body) && readOn)
+      // (a run that began at a key's front reads on before it has read a key:
+      // "ms-foreign-0123 4567" cut into groups hides a word inside the body,
+      // and the front plus a key-shaped piece after it is the evidence)
+      const prose = !mid && /^[a-z]{4,}$/.test(x) && (x.length > 4 || !frontHead || !moreKey) && !(readOn && (headFront || (j > i && MAYKEY(body))))
       const fronty = front(keyFrontOf(x)) || STEM.test(x)
       // a word of the run's own text ends it once a cut has been read ("see
       // AKIA… here", "ms-foreign-… for provider"), and before that if the run
@@ -1468,7 +1471,7 @@ function maskSpaced(s, letters) {
       // not found", "ms-0123 for provider"), unless it is a piece of the key
       // cut into groups — "ms-01 23 45 67 89 ab …" ("in", "of" are pieces by
       // the same reading; the safe direction is to keep them in the mask)
-      if (/^[a-z]{1,3}$/.test(x) && (j > i || (body.length >= 12 && MAYKEY(body) && isKeyWord(body, letters))) && !(j > i && MAYKEY(body) && readOn)) break
+      if (/^[a-z]{1,3}$/.test(x) && (j > i || (body.length >= 12 && MAYKEY(body) && isKeyWord(body, letters))) && !(readOn && (headFront || (j > i && MAYKEY(body))))) break
       // (a middot's pieces are the key's: "9f8e·7d6c·…" is one key whatever
       // case its pieces are written in, and the run goes on to its end)
       if (j === i && body.length >= 4 * RUNCUT) break
@@ -1477,7 +1480,7 @@ function maskSpaced(s, letters) {
       // four is a piece as readily as a word ("ms-v qmjh 75qa …" is a key cut
       // into fours), so it ends the run only when the run does not start at a
       // key's front
-      if (x.length >= 4 && /^[a-z]{4,}$/.test(x) && !/\d/.test(body) && !mid && (x.length > 4 || !frontHead)) break
+      if (x.length >= 4 && /^[a-z]{4,}$/.test(x) && !/\d/.test(body) && !mid && (x.length > 4 || !frontHead) && !(readOn && headFront)) break
       body += x
       pieces.push(x)
       readTo = k

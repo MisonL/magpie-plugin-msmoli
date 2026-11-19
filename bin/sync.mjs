@@ -736,7 +736,7 @@ function spacedKey(s) {
       PROSE.test(piece) &&
       (frontLen === 0 || keySoFar.length >= frontLen) &&
       !(/^\/+$/.test(v.slice(end, pieces[idx].at)) && keySoFar.length >= 12 && isKey(keySoFar)) &&
-      !(soFarKey && (keyPiecey(piece) || nextPiecey(pieces[idx + 1]?.text)))
+      !((soFarKey || frontLen > 0) && (keyPiecey(piece) || nextPiecey(pieces[idx + 1]?.text)))
     ) break
     end = pieces[idx].at + lead + piece.length
     bare = bare || FRONT_PIECE.test(piece)
@@ -1212,7 +1212,23 @@ function splitKey(s) {
       // the rule maskCut applies once a cut is found: a word of one to three
       // lower-case letters after it is the text's ("no key ghp_… for
       // provider" keeps its "for", and "… Y3z9 x x x" keeps its x's)
-      if (best > 0 && /^[a-z]{1,3}$/.test(pieces[k].text)) break
+      // (a piece of a key cut after its own front goes on where a piece of it
+      // sits: "ms-foreign-…" cut into threes has "cde" and "f" for its last
+      // pieces, and the run stopped at "9ab" — measured, twenty-four
+      // characters of the body stayed on the terminal)
+      if (
+        best > 0 &&
+        /^[a-z]{1,3}$/.test(pieces[k].text) &&
+        !(
+          keyPiecey(pieces[k].text) ||
+          nextPiecey(pieces[k + 1]?.text) ||
+          // a one-character piece is a piece of a cut once the run so far
+          // reads as a key and the character is hex ("…9ab cde f": the card's
+          // own piece rule, and the narrow spelling keeps a sentence's "a"
+          // out of it)
+          (pieces[k].text.length === 1 && /^[0-9a-f]$/i.test(pieces[k].text) && isKey(joined, false))
+        )
+      ) break
       joined += pieces[k].text
       if (joined.length < 12) continue
       if (/\d/.test(joined) && isKey(joined, false)) best = k
@@ -1439,7 +1455,16 @@ const maskCut = (s) => {
       // (a run whose body already reads as a key is complete: the word after
       // it is the frame's — "ghp_…Qrst, for provider" read "for" into the
       // mask, and the mask ended ",for")
-      if (/^[a-z]{1,3}$/.test(x) && !VENDOR.test(x) && (j > i || isKey(body))) break
+      // (a piece of a key cut after its own front is read on where a piece of
+      // it sits — the same reading the cut walk above takes: "ms-foreign-…"
+      // cut into threes ends at "9ab" without it, and twenty-four characters
+      // of the body stay on the terminal)
+      if (
+        /^[a-z]{1,3}$/.test(x) &&
+        !VENDOR.test(x) &&
+        (j > i || isKey(body)) &&
+        !(keyPiecey(x) || nextPiecey(words[k + 1]?.[0]) || (x.length === 1 && /^[0-9a-f]$/i.test(x) && isKey(body)))
+      ) break
       last = k
       if (/[0-9]/.test(x) || VENDOR.test(x)) sawKey = true
       // every piece is short enough or a vendor front; a word of a sentence in

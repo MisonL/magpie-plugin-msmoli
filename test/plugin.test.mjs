@@ -12865,6 +12865,42 @@ test("a full-width key grouped by spaces is masked on the card, in names and in 
   }
 })
 
+test("a key whose body carries a word, cut into groups, is masked whole", () => {
+  // The front-plus-body shapes the cut readings were tightened for all have a
+  // body with no word in it ("0123 4567 89ab …"). A real one can carry one:
+  // "ms-foreign-0123 4567 …" has "foreign" for its first pieces, and the run
+  // stopped there — measured, the card kept five characters of the body in the
+  // clear at width 5 and the CLI kept nine at width 3, while widths 4 and 8 of
+  // the same key were masked. A piece of a key cut into groups is the key's
+  // wherever it sits, once the run has its front; whether there is a key is
+  // still the cut's own check.
+  const key = "ms-foreign-0123456789abcdef0123456789abcdef"
+  const body = key.slice(3).replace(/[^A-Za-z0-9]/g, "")
+  const flat = (x) => String(x).normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "")
+  for (let w = 1; w <= 8; w += 1) {
+    const v = key.match(new RegExp(`.{1,${w}}`, "g")).join(" ")
+    for (const [tag, out] of [
+      ["card", testables.maskAll(v, true)],
+      ["arg", arg(v)],
+    ]) {
+      const o = flat(out)
+      let leak = ""
+      for (let i = 0; i + 8 <= body.length; i += 1) if (o.includes(body.slice(i, i + 8))) leak = body.slice(i, i + 8)
+      assert.equal(leak, "", `${key.slice(0, 12)} cut ${w} by spaces leaked ${leak} in ${tag}: ${out}`)
+    }
+  }
+  // and the sentence a key like that sits in keeps its frame
+  for (const [tag, fn] of [
+    ["card", (x) => testables.cardText(x, "ms-zzzz0000zzzz0000zzzz0000", 400)],
+    ["host", (x) => testables.hostText(x)],
+    ["arg", (x) => arg(x)],
+  ]) {
+    const said = fn(`no key ${key} for provider`)
+    assert.ok(said.endsWith(" for provider"), `${tag}: the frame went too: ${said}`)
+    assert.ok(!flat(said).includes(flat(body).slice(4, 20)), `${tag}: the body is in the clear: ${said}`)
+  }
+})
+
 test("a key cut by a comma, a bar or a full-width stop is masked on the card", () => {
   // CONTRIBUTING names these cuts ("what masks a key cut by a comma, a bar or
   // a full-width stop"), and the card did none of them: the word walk sees
