@@ -2269,7 +2269,19 @@ test("a config that is there but cannot be read keeps the claim off, not on a ma
       return
     }
     const p = await MsmoliPlugin({ directory: dir })
-    const r = await p.auth.checkin(async () => ({ type: "api", key: "ms-unreadable" }))
+    // the window is off, so this ask goes out: it must not leave the machine.
+    // Without the stub the check-in really called modelscope, and on a runner
+    // whose network hangs the test timed out — and a timed-out test never runs
+    // its finally, so MAGPIE_MSMOLI_CONFIG stayed deleted and the four window
+    // tests after it read the default 08:30-10:00 and failed too.
+    const real = globalThis.fetch
+    globalThis.fetch = async () => reply({ body: { success: true, data: { records: [] } } })
+    let r
+    try {
+      r = await p.auth.checkin(async () => ({ type: "api", key: "ms-unreadable" }))
+    } finally {
+      globalThis.fetch = real
+    }
     // the window is off, so the ask goes out now instead of being deferred to
     // a default the user never named — whatever the answer, it is not the
     // countdown line
