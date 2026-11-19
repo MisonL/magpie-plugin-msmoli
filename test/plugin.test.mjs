@@ -7849,6 +7849,34 @@ test("a login answer with no data still finishes the check-in", async () => {
   assert.equal(r.credit, 200)
 })
 
+test("a page one row the server counted twice does not make the page look short", async () => {
+  // The dedupe keeps a repeated aggregate once — right — but the page's `total`
+  // was printed beside the page as the server sent it, duplicates included.
+  // Comparing the deduped length against it made the page short of its own
+  // total: the walk never proved the end, and an unclaimed day answered
+  // `failed / 账单读取不完整` before the touch — measured, zero login/info
+  // requests, every ask, forever — while a claimed one printed "账单未读完，
+  // 数字偏低" over a ledger it had finished.
+  const dup = { id: 9, gmt_created: today, type: "EARN", rule_key: "aliyun_bindlogin", title: "绑定登录", total_amount: 50, count: 1 }
+  let touched = 0
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes("login/info")) touched += 1
+    const body = u.includes("login/info")
+      ? { success: true, data: { name: "alice" } }
+      : { success: true, data: { records: [dup, dup], total: 2 } }
+    return new Response(JSON.stringify(body), { status: 200 })
+  }
+  try {
+    const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
+    assert.equal(touched, 1, `the touch never happened: ${JSON.stringify(r)}`)
+    assert.notEqual(r.outcome, "failed", `a repeated row failed the day: ${JSON.stringify(r)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("a grant the first page carries twice is summed once", async () => {
   // The walk merges an aggregate that comes back on a LATER page with the copy
   // it already has, by the server's own id. The first page went in as it came,

@@ -3274,6 +3274,14 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
     if (id) firstSeen.set(id, all.length)
     all.push(r)
   }
+  // The rows page one carried twice are still rows the server counted: its
+  // `total` is printed beside the page as it sent it. Comparing the deduped
+  // length against that number made the page look short of its own total — the
+  // walk never proved the end, and an unclaimed day answered `failed` before
+  // the touch (measured: a duplicate id on page one and total 2, zero
+  // login/info requests), while a claimed one printed "账单未读完，数字偏低"
+  // over a ledger it had in fact finished.
+  const firstDupes = first.length - all.length
   let rows = all
   let pages = 1
   // A page seen before is the page number being ignored, and a row seen before
@@ -3337,7 +3345,7 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
       // The number the page printed beside its rows is the whole ledger's
       // count: when the rows in hand already account for it, there is no next
       // page to read for the day's numbers, whether this page was full or not.
-      else if (!contradicted && total !== null && all.length >= total) dayDone = true
+      else if (!contradicted && total !== null && all.length + firstDupes >= total) dayDone = true
     }
     // A full page with no `total` that the walk stopped reading (the page cap,
     // the budget) is a truncation, not an end: the ledger may continue past
@@ -3364,7 +3372,7 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
     // a `total` below the rows beside it is the ledger contradicting itself:
     // it proves neither "this is the end" nor "there is more", so the page is
     // walked on like a short page with no total at all
-    if (!dayDone && rows.length < PAGE_SIZE && !contradicted && (total === null || all.length >= total)) dayDone = true
+    if (!dayDone && rows.length < PAGE_SIZE && !contradicted && (total === null || all.length + firstDupes >= total)) dayDone = true
     if (dayDone) {
       // A near-running grant must have landed within the last 24 hours, so it
       // sits in yesterday's rows or today's. Another page is worth reading
@@ -3477,7 +3485,7 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
     // being ignored, and summing it again would inflate the day's numbers.
     const stamp = stable(raw)
     if (!raw.length || seenPages.has(stamp)) {
-      complete = dayDone || (!raw.length && total === null ? true : total !== null && all.length >= total)
+      complete = dayDone || (!raw.length && total === null ? true : total !== null && all.length + firstDupes >= total)
       // an empty page is the end of the ledger: no running grant can follow it.
       // A repeated page is the server ignoring the page number — the rows are
       // the ones already read, and a grant older than them (which runs 24 hours
@@ -3521,7 +3529,7 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
       // numbers, not about the window: another page can still hold a running
       // grant, so the countdown's scan is cut here unless it was asked not to
       // scan at all (a cut scan is a floor, and the card says so)
-      complete = dayDone || (total !== null && all.length >= total)
+      complete = dayDone || (total !== null && all.length + firstDupes >= total)
       break
     }
     // the page-end proof asks the page that the server sent, not the rows this
