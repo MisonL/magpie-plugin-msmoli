@@ -39,7 +39,7 @@ const FILES = ["test/plugin.test.mjs", "test/sync.test.mjs", "test/style.test.mj
 // mode passed" at 762 — the line-ending, trailing-whitespace and indentation
 // checks had silently gone, and the publish went out on a suite missing a
 // file's worth of guards. So each file is also run on its own and held to a
-// floor of its own. The numbers are today's counts (471 / 314 / 7) less room
+// floor of its own. The numbers are today's counts (472 / 314 / 7) less room
 // for a legitimate consolidation; keep them current the way MIN_TESTS is.
 const PER_FILE = [
   { file: "test/plugin.test.mjs", min: 430 },
