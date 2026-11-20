@@ -2361,7 +2361,7 @@ const maskCellCut = (s, letters = true) => {
       continue
     }
     const strong = cells.filter((c, i) => /\d/.test(c) || CELL_CASEY(c) || (i === 0 && (CELL_FRONT.test(c) || VENDOR.test(c)))).length
-    if (grid && cells.length >= 4 && cells.length <= 512 && strong >= 2 && flat.length >= 20 && flat.length <= 2048 && !cellWideBeside(s, k, -1) && !cellWideBeside(s, stop, 1) && isKeyWord(flat, letters)) {
+    if (grid && cells.length >= 3 && cells.length <= 512 && strong >= 2 && flat.length >= 20 && flat.length <= 2048 && !cellWideBeside(s, k, -1) && !cellWideBeside(s, stop, 1) && isKeyWord(flat, letters)) {
       out += s.slice(at, bodyAt) + maskToken(flat)
       at = stop
       k = stop
