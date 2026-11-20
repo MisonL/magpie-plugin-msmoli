@@ -33,7 +33,7 @@
   ],
   "license": "MIT",
   "engines": {
-    "node": ">=18.13"
+    "node": ">=18.19"
   },
   "magpie": {
     "icon": "https://modelscope.cn/favicon.ico"

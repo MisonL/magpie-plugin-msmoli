@@ -276,15 +276,16 @@ clock makes a fixture pinned to the calendar day it runs break. The bun run is
 what closes the gap between the tests' Node and magpie's real runtime. CI also
 runs macOS- and Windows-specific jobs — see `.github/workflows/test.yml`.
 
-Node 18.13 and 18.14 are inside the engine floor but cannot run this suite:
-their TAP reader throws `ERR_TAP_LEXER_ERROR` on a name with Chinese in it
-("Unexpected character: 魔"), so `node --test` fails without any test having
-failed. It does not take a top-level name — a nested one is enough. Two names
-here have it ("a growth of one 魔粒…"), and from 18.15 the reader is fixed;
-CI's `18` matrix entry tracks the latest 18.x, which is past that. Running the
-file as a plain script (`node test/plugin.test.mjs`, no `--test`) bypasses the
-reader and passes on 18.13, which is how the failure was narrowed to the
-reporter rather than to a test.
+The engine floor is Node 18.19, and both of the suite's 18.x limits are why.
+18.13 and 18.14's TAP reader throws `ERR_TAP_LEXER_ERROR` on a name with
+Chinese in it ("Unexpected character: 魔"), so `node --test` fails without any
+test having failed — it does not take a top-level name, a nested one is
+enough, and two names here have it ("a growth of one 魔粒…"); 18.15 fixes that
+reader. From 18.15 to 18.18 `node --test` then does not exit when a test file
+keeps a referenced `setInterval` and clears it in `after()` (this one does, as
+a keep-alive), which 18.19 fixes; both were reproduced on the 18.x binaries
+this repository's CI matrix entry would otherwise call the latest of. CI's
+`18` matrix entry tracks the latest 18.x, which is past both.
 
 The tests stub `fetch`; nothing here talks to ModelScope. Fixtures follow the
 clock, so they don't expire on a given day. The check-in window reads
