@@ -7,6 +7,13 @@
 #
 # The tests are the only place such strings live, so they are what this
 # config sets aside. Everything else in the repository is scanned as usual.
+#
+# This file is read by ggshield and the pre-commit hook, not by GitGuardian's
+# GitHub App: an App scan of a push ignores it, and its filepath exclusions
+# live in the dashboard instead (Settings -> Secrets detection -> Filepath
+# exclusions), where a new exclusion also applies to incidents already open.
+# The fixtures are low-entropy on purpose so neither scan has a reason to
+# fire; keep them that way rather than relying on this file.
 version: 2
 secret:
   ignored-paths:

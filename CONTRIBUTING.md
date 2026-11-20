@@ -276,6 +276,16 @@ clock makes a fixture pinned to the calendar day it runs break. The bun run is
 what closes the gap between the tests' Node and magpie's real runtime. CI also
 runs macOS- and Windows-specific jobs — see `.github/workflows/test.yml`.
 
+Node 18.13 and 18.14 are inside the engine floor but cannot run this suite:
+their TAP reader throws `ERR_TAP_LEXER_ERROR` on a name with Chinese in it
+("Unexpected character: 魔"), so `node --test` fails without any test having
+failed. It does not take a top-level name — a nested one is enough. Two names
+here have it ("a growth of one 魔粒…"), and from 18.15 the reader is fixed;
+CI's `18` matrix entry tracks the latest 18.x, which is past that. Running the
+file as a plain script (`node test/plugin.test.mjs`, no `--test`) bypasses the
+reader and passes on 18.13, which is how the failure was narrowed to the
+reporter rather than to a test.
+
 The tests stub `fetch`; nothing here talks to ModelScope. Fixtures follow the
 clock, so they don't expire on a given day. The check-in window reads
 `msmoli.json` from the folder magpie reports as `input.directory`; the suite
