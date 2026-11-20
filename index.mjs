@@ -2295,7 +2295,7 @@ const maskCellCut = (s, letters = true) => {
       if (body.length < 2 || body.length > cap || !/[A-Za-z0-9]/.test(body)) break
       cells.push(body)
       ends.push(q)
-      if (cells.length >= 64) break
+      if (cells.length >= 512) break
       let g = q
       while (g < s.length && g - q <= 8 && CELLRUN_GAPCH.test(s[g])) g += 1
       if (g === q || g >= s.length || !CELLRUN_CH.test(s[g])) break
@@ -2340,15 +2340,18 @@ const maskCellCut = (s, letters = true) => {
     // a candidate that hit the cell limit has not seen the cut's end: the
     // text behind it is a cell of the same grid ("AKIAREPORT " + a long grid),
     // not a longer cut the readings after this one own
-    const continues = cells.length < 64 && contCell.length >= 2 && /[A-Za-z0-9]/.test(contCell) && !cellProse(contCell) && !contCell.includes("=")
+    const continues = cells.length < 512 && contCell.length >= 2 && /[A-Za-z0-9]/.test(contCell) && !cellProse(contCell) && !contCell.includes("=")
     if (continues || precedes) {
       k = Math.max(k + 1, readEnd)
       continue
     }
     const fr0 = cells.length > 0 ? cellFront(cells[0]) : null
     const fronted = fr0 !== null
-    const width = cells.length > 1 ? cells[cells.length - 1].length : 0
-    const grid = cells.length > 0 && cells.every((c, i) => c.length === width || (i === 0 && fronted))
+    // the grid's width is its cells' (the second one: the first may be a
+    // front-led one of another width), and a key's last group may be short
+    // ("… MnOp3456 | QrSt")
+    const width = cells.length > 1 ? cells[1].length : 0
+    const grid = cells.length > 0 && cells.every((c, i) => c.length === width || (i === 0 && fronted) || (i === cells.length - 1 && c.length < width))
     const flat = cells.join("")
     // every arm of the key test needs a letter: a page of numerals is no key,
     // and walking it cell by cell spent the hook's budget (32 KB of "12 34 "
@@ -2358,7 +2361,7 @@ const maskCellCut = (s, letters = true) => {
       continue
     }
     const strong = cells.filter((c, i) => /\d/.test(c) || CELL_CASEY(c) || (i === 0 && (CELL_FRONT.test(c) || VENDOR.test(c)))).length
-    if (grid && cells.length >= 4 && cells.length <= 64 && strong >= 2 && flat.length >= 20 && flat.length <= 256 && !cellWideBeside(s, k, -1) && !cellWideBeside(s, stop, 1) && isKeyWord(flat, letters)) {
+    if (grid && cells.length >= 4 && cells.length <= 512 && strong >= 2 && flat.length >= 20 && flat.length <= 2048 && !cellWideBeside(s, k, -1) && !cellWideBeside(s, stop, 1) && isKeyWord(flat, letters)) {
       out += s.slice(at, bodyAt) + maskToken(flat)
       at = stop
       k = stop

@@ -13888,3 +13888,40 @@ test("a grid longer than the old 24-cell bound is masked whole", () => {
     assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
   }
 })
+
+test("a three-cell grid and a short last group are masked whole", () => {
+  // Measured on 35122f9: a grid of three cells was too short to read, and a
+  // key whose last group is shorter than the rest ("… MnOp3456 | QrSt") was
+  // split into two masks with eight characters between them.
+  const cases = [
+    ["LmNo2468 | LmNo2468 | LmNo2468", "LmNo2468LmNo2468LmNo2468"],
+    ["AbCd1234 | EfGh5678 | IjKl9012 | MnOp3456 | QrSt", "AbCd1234EfGh5678IjKl9012MnOp3456QrSt"],
+    ["2026-11-21 token AbCd1234 | EfGh5678 | IjKl9012 | MnOp3456 | QrSt", "AbCd1234EfGh5678IjKl9012MnOp3456QrSt"],
+  ]
+  for (const [v, key] of cases) {
+    for (const [tag, out] of [
+      ["card", testables.cardText(v, "", 600)],
+      ["host", testables.hostText(v)],
+      ["arg", arg(v)],
+      ["scrub", scrub(`child: ${v}`)],
+    ]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    }
+  }
+})
+
+test("a front-led cut and the grid after it are one mask", () => {
+  // Measured on 35122f9: the cut's own reading ended at a group and the grid
+  // reading started at the next, and the two masks printed the eight
+  // characters between them.
+  const v = "x=m s - LmNo24 68LmNo 2468Lm No2468 LmNo2468 LmNo2468 LmNo2468"
+  const key = "LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468"
+  for (const [tag, out] of [
+    ["card", testables.cardText(v, "", 600)],
+    ["host", testables.hostText(v)],
+    ["arg", arg(v)],
+    ["scrub", scrub(`child: ${v}`)],
+  ]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+})

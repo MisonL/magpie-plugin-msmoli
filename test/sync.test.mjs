@@ -7590,3 +7590,16 @@ test("a grid longer than the old 24-cell bound is masked whole", () => {
     assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
   }
 })
+
+test("a three-cell grid, a short last group and the cut before it are one mask", () => {
+  const cases = [
+    ["LmNo2468 | LmNo2468 | LmNo2468", "LmNo2468LmNo2468LmNo2468"],
+    ["AbCd1234 | EfGh5678 | IjKl9012 | MnOp3456 | QrSt", "AbCd1234EfGh5678IjKl9012MnOp3456QrSt"],
+    ["x=m s - LmNo24 68LmNo 2468Lm No2468 LmNo2468 LmNo2468 LmNo2468", "LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468"],
+  ]
+  for (const [v, key] of cases) {
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    }
+  }
+})

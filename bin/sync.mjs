@@ -1848,7 +1848,7 @@ const cellGrid = (s, from = 0) => {
       if (body.length < 2 || body.length > cap || !/[A-Za-z0-9]/.test(body)) break
       cells.push(body)
       ends.push(q)
-      if (cells.length >= 64) break
+      if (cells.length >= 512) break
       let g = q
       while (g < s.length && g - q <= 8 && CELL_GRIDGAP.test(s[g])) g += 1
       if (g === q || g >= s.length || !CELLCH.test(s[g])) break
@@ -1874,15 +1874,18 @@ const cellGrid = (s, from = 0) => {
     while (beforeAt >= 0 && before - beforeAt < 32 && CELLCH.test(s[beforeAt])) beforeAt -= 1
     const beforeCell = before >= 0 ? s.slice(beforeAt + 1, before + 1) : ""
     const precedes = beforeGap.length > 0 && !/\s/.test(beforeGap) && beforeCell.length >= 4 && /[A-Za-z0-9]/.test(beforeCell) && !cellGridProse(beforeCell)
-    const continues = cells.length < 64 && contCell.length >= 2 && /[A-Za-z0-9]/.test(contCell) && !cellGridProse(contCell) && !contCell.includes("=")
+    const continues = cells.length < 512 && contCell.length >= 2 && /[A-Za-z0-9]/.test(contCell) && !cellGridProse(contCell) && !contCell.includes("=")
     if (continues || precedes) {
       k = Math.max(k + 1, readEnd)
       continue
     }
-    const width = cells.length > 1 ? cells[cells.length - 1].length : 0
+    // the grid's width is its cells' (the second one: the first may be a
+    // front-led one of another width), and a key's last group may be short
+    // ("… MnOp3456 | QrSt")
+    const width = cells.length > 1 ? cells[1].length : 0
     const fr0 = cells.length > 0 ? cellGridFront(cells[0]) : null
     const fronted = fr0 !== null
-    const grid = cells.length > 0 && cells.every((c, i) => c.length === width || (i === 0 && fronted))
+    const grid = cells.length > 0 && cells.every((c, i) => c.length === width || (i === 0 && fronted) || (i === cells.length - 1 && c.length < width))
     const flat = cells.join("")
     // every arm of the key test needs a letter (see the card's reading)
     if (!/[A-Za-z]/.test(flat)) {
@@ -1895,7 +1898,7 @@ const cellGrid = (s, from = 0) => {
     // front and msKey are the same judgement its own body reading makes. Only
     // the ms- front gets it: sk- is a flag's prefix too ("sk-preset linux
     // macos amd64" was masked as a key)
-    if (grid && cells.length >= 4 && cells.length <= 64 && strong >= 2 && flat.length >= 20 && flat.length <= 256 && !cellGridWideBeside(s, k, -1) && !cellGridWideBeside(s, stop, 1) && (isKey(flat) || (/^ms-/i.test(flat) && msKey(flat)))) {
+    if (grid && cells.length >= 3 && cells.length <= 512 && strong >= 2 && flat.length >= 20 && flat.length <= 2048 && !cellGridWideBeside(s, k, -1) && !cellGridWideBeside(s, stop, 1) && (isKey(flat) || (/^ms-/i.test(flat) && msKey(flat)))) {
       // the gap before a closing bracket is the frame's, as in every other
       // reading: "(ghp_…7890)", not "(ghp_…7890 )"
       let end = stop
@@ -1908,6 +1911,26 @@ const cellGrid = (s, from = 0) => {
   }
   return null
 }
+
+// the walk stops at a word, but a key's own groups after it are not words: a
+// short group carrying a digit or a capital continues the cut ("… 3456 | QrSt"
+// printed its last group beside the mask, eight characters of the body)
+const CELL_TAIL = /^([ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027]{1,8})([A-Za-z0-9+/=_.-]{2,8})(?![A-Za-z0-9+/=_.-])/
+const extendCut = (body, post) => {
+  let joined = body
+  let rest = post
+  for (let n = 0; n < 24; n += 1) {
+    const m = CELL_TAIL.exec(rest)
+    if (!m) break
+    const cell = m[2]
+    const keyish = /\d/.test(cell) || /[A-Z]/.test(cell) || (!/[aeiouy]/.test(cell) && !/^[0-9a-f]+$/.test(cell))
+    if (!keyish) break
+    joined += m[1] + cell
+    rest = rest.slice(m[0].length)
+  }
+  return { body: joined, rest }
+}
+const keyJoin = (body) => body.replace(/[\s\u00a0\u3000|\u00b7\u2022\u2219\u2027]+/g, "")
 
 export function arg(v) {
   return argInner(String(v ?? ""), true)
@@ -1988,10 +2011,27 @@ function argInner(v, allowGrid) {
       hits.push(g)
       k = g.bodyEnd
     }
-    if (hits.length > 0) {
+    // a front-led cut that has begun before a grid owns that grid too: the
+    // cells are the rest of the same cut ("x=m s - LmNo24 68LmNo … LmNo2468"
+    // printed two masks with the cut's own characters between them). The
+    // reading runs from the cut's front through the grid's end.
+    const sp0 = spacedKey(raw0)
+    const kept = []
+    for (const g of hits) {
+      if (!sp0) { kept.push(g); continue }
+      const from = sp0.pre.length
+      const to = from + sp0.body.length
+      if (g.bodyEnd <= to) continue
+      if (g.preEnd >= from && g.preEnd - to <= 32 && /^[^A-Za-z0-9]*$/.test(raw0.slice(to, g.preEnd))) {
+        kept.push({ preEnd: g.preEnd, bodyAt: from, body: raw0.slice(from, g.bodyEnd).replace(/[^A-Za-z0-9+/=_.-]/g, ""), bodyEnd: g.bodyEnd })
+        continue
+      }
+      kept.push(g)
+    }
+    if (kept.length > 0) {
       let out = ""
       let at = 0
-      for (const g of hits) {
+      for (const g of kept) {
         out += raw0.slice(at, g.bodyAt) + mask(g.body)
         at = g.bodyEnd
       }
@@ -2017,10 +2057,11 @@ function argInner(v, allowGrid) {
     // as key material, and "…ABCDEF." failed msKey while the halves were left
     // to the per-word pass. A body that reads as a key once its trailing
     // punctuation is set aside is the key; the punctuation prints as typed
-    const body = cut.body
+    const ext = extendCut(cut.body, cut.post)
+    const body = ext.body
     const core = body.replace(/[._-]+$/, "")
     const keyBody = msKey(body, false) ? body : core !== body && msKey(core, false) ? core : ""
-    if (keyBody) return argRun(cut.pre) + mask(keyBody.replace(/\s+/g, "")) + argRun(body.slice(keyBody.length) + cut.post)
+    if (keyBody) return argRun(cut.pre) + mask(keyJoin(keyBody)) + argRun(body.slice(keyBody.length) + ext.rest)
   }
   // full-width pieces fold to a key; an ellipsis folds to three dots and would
   // read as key material ("ms-a…5555" → "ms-a...5555"), so a value that
@@ -3135,10 +3176,23 @@ export function scrub(out, ...secrets) {
       hits.push(g)
       k = g.bodyEnd
     }
-    if (hits.length > 0) {
+    const sp0 = spacedKey(s)
+    const kept = []
+    for (const g of hits) {
+      if (!sp0) { kept.push(g); continue }
+      const from = sp0.pre.length
+      const to = from + sp0.body.length
+      if (g.bodyEnd <= to) continue
+      if (g.preEnd >= from && g.preEnd - to <= 32 && /^[^A-Za-z0-9]*$/.test(s.slice(to, g.preEnd))) {
+        kept.push({ preEnd: g.preEnd, bodyAt: from, body: s.slice(from, g.bodyEnd).replace(/[^A-Za-z0-9+/=_.-]/g, ""), bodyEnd: g.bodyEnd })
+        continue
+      }
+      kept.push(g)
+    }
+    if (kept.length > 0) {
       let out = ""
       let at = 0
-      for (const g of hits) {
+      for (const g of kept) {
         out += s.slice(at, g.bodyAt) + mask(g.body)
         at = g.bodyEnd
       }
@@ -3146,7 +3200,12 @@ export function scrub(out, ...secrets) {
     }
   }
   const sp = spacedKey(s)
-  if (sp && msKey(sp.body, false)) s = sp.pre + mask(sp.body.replace(/\s+/g, "")) + sp.post
+  if (sp) {
+    const ext = extendCut(sp.body, sp.post)
+    const core = ext.body.replace(/[._-]+$/, "")
+    const keyBody = msKey(ext.body, false) ? ext.body : core !== ext.body && msKey(core, false) ? core : ""
+    if (keyBody) s = sp.pre + mask(keyJoin(keyBody)) + (ext.body.slice(keyBody.length) + ext.rest)
+  }
   if (s.length <= 32 * 1024) {
     // (an ellipsis folds to three dots and would read as key material — a mask
     // this tool wrote is opaque here, as it is inside arg)
