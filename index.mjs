@@ -2217,15 +2217,53 @@ const maskCaps = (s, letters) => {
 // the joined run still has to prove itself key material — two cells with a
 // digit, mixed case, hex or a vendor front on the first.
 const CELLRUN_CH = /[A-Za-z0-9+/=_.-]/
-const CELLRUN_GAPCH = /[ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027]/
+const CELLRUN_GAPCH = /[ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027\r\n]/
+const CELL_MS = /^ms-/i
+// a value a person wrote behind its name ("x=…", "MS_TOKEN=…") keeps the name:
+// a run of letters, digits and underscores with a lower-case letter or an
+// underscore in it. An all-capitals run ("AKIA=…") is not a name — it is the
+// key's own front with an "=" after it, and the cells are read from there
+const CELL_NAME = /^([A-Za-z_][A-Za-z0-9_]{0,23})=(\S.*)$/
+const cellNamed = (cell) => {
+  const m = CELL_NAME.exec(cell)
+  return m && /[a-z_]/.test(m[1]) && /[A-Za-z0-9]/.test(m[2]) ? m[2] : ""
+}
+// a plain lower-case word ("for", "provider", "invalid", "not"): a vowel in
+// it, and no hex — a piece of a key cut into groups has no vowel ("bcd",
+// "wxyz", "qrst") or is hex ("cdef"), and stays a cell
+const cellProse = (w) => /^[a-z]+$/.test(w) && /[aeiouy]/.test(w) && !/^[0-9a-f]+$/i.test(w)
+// a candidate's neighbours: a full-width character beside the cells is the
+// span foldedSpans owns, and a grid read on its ASCII pieces beside a mask
+// split that span ("x=ｍｓ－ＬｍＮｏ ２４６８…")
+const cellWide = (c) => c !== undefined && c.charCodeAt(0) > 0x7f
+// a full-width character that is key material folded ("ｍｓ－ＬｍＮｏ"): the
+// span foldedSpans reads, which a grid on its ASCII pieces would split
+const cellWideKey = (c) => cellWide(c) && /[A-Za-z0-9+/=_.-]/.test(c.normalize("NFKC"))
+// a wide key character near the candidate, across the cells and gaps before
+// and after it ("… ＬｍＮｏ 2468 LmNo 2468 …" is one folded span)
+const cellWideBeside = (s, from, dir) => {
+  for (let n = 0, i = from + dir; n < 64 && i >= 0 && i < s.length; n += 1) {
+    const c = s[i]
+    if (CELLRUN_GAPCH.test(c) || CELLRUN_CH.test(c)) { i += dir; continue }
+    return cellWideKey(c)
+  }
+  return false
+}
+// the front a first cell leads with, unless what follows it is a plain word
+// ("sk-preset", "sk-foreign"): a front carries a body, not a word
+const cellFront = (cell) => {
+  const m = CELL_FRONT.exec(cell) || VENDOR.exec(cell)
+  if (!m) return null
+  const tail = cell.slice(m[0].length)
+  return /^[a-z]+$/.test(tail) && /[aeiouy]/.test(tail) && !/^[0-9a-f]+$/i.test(tail) ? null : m
+}
 const maskCellCut = (s, letters = true) => {
   if (typeof s !== "string" || s.length < 20) return s
-  const chars = [...s]
   let out = ""
   let at = 0
   let k = 0
-  while (k < chars.length) {
-    if (!/[A-Za-z0-9]/.test(chars[k]) || (k > 0 && /[A-Za-z0-9]/.test(chars[k - 1]))) {
+  while (k < s.length) {
+    if (!/[A-Za-z0-9]/.test(s[k]) || (k > 0 && /[A-Za-z0-9]/.test(s[k - 1]))) {
       k += 1
       continue
     }
@@ -2236,63 +2274,91 @@ const maskCellCut = (s, letters = true) => {
     // kept as written and the cells are read from what follows the "="
     let bodyAt = k
     for (;;) {
+      // the scan stops one character past the longest cell any cap allows: a
+      // run of hyphens ("a-a-a-…") made each candidate read to the value's end
+      // at every start, 16 KB in 27 s (measured)
       let q = p
-      while (q < chars.length && CELLRUN_CH.test(chars[q])) q += 1
-      let body = chars.slice(p, q).join("")
-      if (cells.length === 0) {
-        const named = /^[A-Za-z_][A-Za-z0-9_]{0,23}=(.+)$/.exec(body)
-        if (named && /[A-Za-z0-9]/.test(named[1])) { body = named[1]; bodyAt = q - body.length }
+      while (q < s.length && q - p <= 25 && CELLRUN_CH.test(s[q])) q += 1
+      let body = s.slice(p, q)
+      if (cells.length === 0 && q - p <= 26) {
+        const named = cellNamed(body)
+        if (named) { body = named; bodyAt = q - body.length }
+      } else if (cells.length > 0 && cellNamed(body)) {
+        // a second value behind its own name ("x=… y=…") ends the grid: its
+        // "=" joined the cell and the widths no longer matched
+        break
       }
-      const cap = cells.length === 0 ? (CELL_FRONT.test(body) || VENDOR.test(body) ? 24 : 8) : 8
+      // the first cell may carry the front plus one cell of the grid
+      // ("x=AKIA" + eight characters); eight is every other cell's limit
+      const fr = cells.length === 0 ? cellFront(body) : null
+      const cap = fr ? 24 : 8
       if (body.length < 2 || body.length > cap || !/[A-Za-z0-9]/.test(body)) break
       cells.push(body)
       ends.push(q)
       if (cells.length >= 24) break
       let g = q
-      while (g < chars.length && CELLRUN_GAPCH.test(chars[g])) g += 1
-      if (g === q || g >= chars.length || !CELLRUN_CH.test(chars[g])) break
+      while (g < s.length && g - q <= 8 && CELLRUN_GAPCH.test(s[g])) g += 1
+      if (g === q || g >= s.length || !CELLRUN_CH.test(s[g])) break
       p = g
     }
-    // the walk resumes past everything it read: the trim below drops the
-    // prose tail, and resuming from the trimmed end re-read that tail at every
-    // word — 20 KB of prose took 14 s (measured)
     const readEnd = ends.length > 0 ? ends[ends.length - 1] : k
     // the prose behind a grid is not the grid's: a trailing word of plain
-    // lower-case letters that is no hex ("for", "provider", "invalid") is
-    // dropped back off, so a grid followed by a sentence keeps its words and
-    // a second pass sees the same grid the first one did
-    while (cells.length > 1) {
-      const last = cells[cells.length - 1]
-      if (/^[a-z]+$/.test(last) && !/^[0-9a-f]+$/i.test(last)) { cells.pop(); ends.pop() } else break
+    // lower-case letters that is no hex and is of a width the grid's own
+    // cells are not ("… yz01 invalid") is dropped back off. A word of the
+    // grid's width is a cell of it — "… 3456 | wxyz | qrst" left eight
+    // characters of the key in the clear when it was taken for prose
+    while (cells.length > 1 && cellProse(cells[cells.length - 1])) {
+      cells.pop()
+      ends.pop()
     }
     const stop = ends.length > 0 ? ends[ends.length - 1] : k
     // a grid that is a piece of a longer cut is not read here: the readings
-    // below own the whole cut, and a mask written over the grid's piece split
-    // it for them — "x=AKIA…1234    AbCd…1234 invalid" and
+    // after this one own the whole cut, and a mask written over the grid's
+    // piece split it for them — "x=AKIA…1234    AbCd…1234 invalid" and
     // "ms-f…gH01…qR06 not found" each printed two masks with key characters
-    // between them. A continuation that is prose (a trailing word) was
-    // trimmed above and does not count.
+    // between them. Only key material continues a cut: a mark (" --"), a word
+    // and another value behind its own name ("y=…") are text around the grid
     let cont = stop
-    while (cont < chars.length && CELLRUN_GAPCH.test(chars[cont])) cont += 1
+    while (cont < s.length && cont - stop <= 8 && CELLRUN_GAPCH.test(s[cont])) cont += 1
     let contEnd = cont
-    while (contEnd < chars.length && CELLRUN_CH.test(chars[contEnd])) contEnd += 1
-    const contCell = chars.slice(cont, contEnd).join("")
-    if (contCell.length >= 2 && !(/^[a-z]+$/.test(contCell) && !/^[0-9a-f]+$/i.test(contCell))) {
+    while (contEnd < s.length && contEnd - cont <= 24 && CELLRUN_CH.test(s[contEnd])) contEnd += 1
+    const contCell = s.slice(cont, contEnd)
+    // the cells before the candidate are the same question asked backwards:
+    // a key cut into groups whose first group is too long to be a cell of its
+    // own ("ms-foReiGn01aBcDeF·gH01·…") is one cut, and the readings after
+    // this one own it — reading the tail alone printed two masks with "gH01"
+    // between them
+    let before = k - 1
+    for (let n = 0; n < 8 && before >= 0 && CELLRUN_GAPCH.test(s[before]); n += 1) before -= 1
+    let beforeAt = before
+    while (beforeAt >= 0 && before - beforeAt < 32 && CELLRUN_CH.test(s[beforeAt])) beforeAt -= 1
+    const beforeCell = before >= 0 ? s.slice(beforeAt + 1, before + 1) : ""
+    const precedes = beforeCell.length >= 4 && /[A-Za-z0-9]/.test(beforeCell) && !cellProse(beforeCell)
+    // a candidate that hit the 24-cell limit has not seen the cut's end: the
+    // text behind it is a cell of the same grid ("AKIAREPORT " + 24 cells),
+    // not a longer cut the readings after this one own
+    const continues = cells.length < 24 && contCell.length >= 2 && /[A-Za-z0-9]/.test(contCell) && !cellProse(contCell) && !contCell.includes("=")
+    if (continues || precedes) {
       k = Math.max(k + 1, readEnd)
       continue
     }
+    const fr0 = cells.length > 0 ? cellFront(cells[0]) : null
+    const fronted = fr0 !== null
     const width = cells.length > 1 ? cells[cells.length - 1].length : 0
-    const fronted = cells.length > 0 && (CELL_FRONT.test(cells[0]) || VENDOR.test(cells[0]))
     const grid = cells.length > 0 && cells.every((c, i) => c.length === width || (i === 0 && fronted))
     const flat = cells.join("")
     const strong = cells.filter((c, i) => /\d/.test(c) || CELL_CASEY(c) || (i === 0 && (CELL_FRONT.test(c) || VENDOR.test(c)))).length
-    if (grid && cells.length >= 3 && cells.length <= 24 && strong >= 2 && flat.length >= 20 && flat.length <= 96 && isKeyWord(flat, letters)) {
+    if (grid && cells.length >= 4 && cells.length <= 24 && strong >= 2 && flat.length >= 20 && flat.length <= 96 && !cellWideBeside(s, k, -1) && !cellWideBeside(s, stop, 1) && isKeyWord(flat, letters)) {
       out += s.slice(at, bodyAt) + maskToken(flat)
       at = stop
       k = stop
       continue
     }
-    k = Math.max(k + 1, readEnd)
+    // the walk resumes past everything it read when a cut may go on, and past
+    // the first cell otherwise: the tail was re-read at every word when the
+    // trimmed end was the resume point, and resuming past a long candidate
+    // stepped over a grid that began inside it
+    k = Math.max(k + 1, strong === 0 && !fronted ? readEnd : ends.length > 0 ? ends[0] : k)
   }
   return out + s.slice(at)
 }
@@ -2505,7 +2571,7 @@ const maskCells = (s, letters = true) => {
     const nextCell = chars.slice(nx, ne).join("")
     const continues = nextCell !== "" && (CELL_OK(nextCell, true) || /^[A-Za-z]{1,2}$/.test(nextCell))
     const flat = cells.join("")
-    if (!continues && cells.length >= 3 && cells.length <= 24 && flat.length >= 20 && flat.length <= 96 && isKeyWord(flat, letters)) {
+    if (!continues && cells.length >= 4 && cells.length <= 24 && flat.length >= 20 && flat.length <= 96 && isKeyWord(flat, letters)) {
       // the gap the cells were cut with is the display's, and stays: the mask
       // stands for the key, and a word behind it keeps the space in front of
       // it ("… for provider")
@@ -3030,7 +3096,11 @@ const cardText = (value, token, max = 200) => {
   // over the first half, and a mask is opaque to every reading after it —
   // measured, the other half printed on the card while maskAll alone masked
   // the whole key
-  s = maskSep(maskEchoes(s, token), true).replace(tokenShaped, maskShaped)
+  // the cell reading runs before the shape pass too: tokenShaped takes the
+  // first whole cell of a grid and writes a mask over it, and a mask is opaque
+  // to the cell reading — "x=ms-aaaa1111bbbb    qrst …" left 24 characters of
+  // the key beside its mask on the card
+  s = maskCellCut(maskSep(maskEchoes(s, token), true), true).replace(tokenShaped, maskShaped)
   return text(maskAll(s, true), max)
 }
 // The account's own name is text the user picked, not a server's message: a
@@ -3045,7 +3115,7 @@ const nameText = (value, token, max = 200) => {
   // so the case-mix arm has to stay on. The punctuation-cut reading runs
   // before the shape pass for the reason cardText's does: a mask the shape
   // pass writes first is opaque to the readings that follow it.
-  return text(maskAll(maskSep(maskEchoes(s, token), !token).replace(tokenShaped, maskShaped), !token), max)
+  return text(maskAll(maskCellCut(maskSep(maskEchoes(s, token), !token), !token).replace(tokenShaped, maskShaped), !token), max)
 }
 
 // hostText is cardText for the two exits where there is no token to split on:

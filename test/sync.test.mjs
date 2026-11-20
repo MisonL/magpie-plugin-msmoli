@@ -7515,3 +7515,59 @@ test("a product name with its build number is not a key in the argument", () => 
     assert.equal(scrub(`child: ${v}`), `child: ${v}`, `the scrub masked a name: ${JSON.stringify(v)}`)
   }
 })
+
+test("a grid is not skipped for the marks and prose around it", () => {
+  // Measured on 35f9053 in the CLI: a mark after a grid (" --") stopped the
+  // reading, and a value with any full-width character in it skipped the grid
+  // reading for the whole text — "警告: Ab | Cd | …" printed whole.
+  const g = ["Ab", "Cd", "12", "34", "Ef", "Gh", "56", "78", "Ij", "Kl"].join(" | ")
+  const key = "AbCd1234EfGh5678IjKl"
+  for (const v of [g + " --", "警告: " + g, "Ab | Cd | 12 | 34 | Ef\nGh | 56 | 78 | Ij | Kl"]) {
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    }
+  }
+})
+
+test("a grid's own groups are not prose, and a key-shaped name is not a name", () => {
+  const cases = [
+    ["AbCd | 1234 | EfGh | 5678 | IjKl | 9012 | MnOp | 3456 | wxyz | qrst", "AbCd1234EfGh5678IjKl9012MnOp3456wxyzqrst"],
+    ["AKIA=11 | 22 | 33 | 44 | 55 | 66 | 77 | 88 | 99 | AA | BB | CC | DD", "112233445566778899AABBCCDD"],
+  ]
+  for (const [v, key] of cases) {
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    }
+  }
+  // a command's words are not a grid of a key
+  for (const v of ["sk-preset linux macos amd64"]) assert.equal(arg(v), v, `the CLI masked a command: ${JSON.stringify(arg(v))}`)
+})
+
+test("a grid is not lost behind a word of its own, and a mark between grids splits them", () => {
+  const g24 = ["ab", "cd", "12", "34", "ef", "gh", "56", "78", "ij", "kl", "90", "12", "mn", "op", "34", "56", "qr", "st", "78", "90", "Ab", "Cd", "56", "78"].join(" | ")
+  const key = "abcd1234efgh5678ijkl9012mnop3456qrst7890AbCd5678"
+  for (const [tag, out] of [["arg", arg("AKIAREPORT " + g24)], ["scrub", scrub("child: AKIAREPORT " + g24)]]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+  const g = ["Ab", "Cd", "12", "34", "Ef", "Gh", "56", "78", "Ij", "Kl"].join(" | ")
+  const v = `x=${g} y=${g}`
+  for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+    assert.equal(leakOfKey(out, "AbCd1234EfGh5678IjKl"), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+})
+
+test("a page of hyphenated words is read in linear time", () => {
+  // Measured on 35f9053: every letter after a hyphen began a candidate whose
+  // scan ran to the value's end, and the continuation scan read the same tail
+  // again — 16 KB in 24 s. The scan now stops one character past the longest
+  // cell a cap allows, and a failed candidate that read nothing key-shaped
+  // moves the walk past what it read.
+  for (const kb of [4, 8, 16]) {
+    const s = "a-".repeat(kb * 512)
+    const started = process.cpuUsage()
+    arg(s)
+    const spent = process.cpuUsage(started)
+    const ms = (spent.user + spent.system) / 1000
+    assert.ok(ms < 3000, `${kb} KB of hyphenated words took ${Math.round(ms)} ms of CPU`)
+  }
+})

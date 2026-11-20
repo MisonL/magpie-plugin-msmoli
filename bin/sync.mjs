@@ -1787,92 +1787,129 @@ function chunked(text) {
   return pieces
 }
 
-const CELL_GRIDGAP = /[ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027]/
+const CELL_GRIDGAP = /[ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027\r\n]/
 // cellGrid is maskCellCut's walk on the CLI side: a grid of three or more
 // equal cells of key characters, joined by whitespace, a bar or a middle dot,
 // whose joined body reads as a key. The first cell may be a front-led one of
 // another width ("ms-abcd efgh …").
-const cellGrid = (s) => {
+//
+// It reports absolute indices, so a caller masks the body in place and keeps
+// the text around it without copying the suffix at every match.
+const CELL_GRIDNAME = /^([A-Za-z_][A-Za-z0-9_]{0,23})=(\S.*)$/
+const cellGridNamed = (cell) => {
+  const m = CELL_GRIDNAME.exec(cell)
+  return m && /[a-z_]/.test(m[1]) && /[A-Za-z0-9]/.test(m[2]) ? m[2] : ""
+}
+const cellGridProse = (w) => /^[a-z]+$/.test(w) && /[aeiouy]/.test(w) && !/^[0-9a-f]+$/i.test(w)
+const cellGridWide = (c) => c !== undefined && c.charCodeAt(0) > 0x7f
+const cellGridWideKey = (c) => cellGridWide(c) && /[A-Za-z0-9+/=_.-]/.test(c.normalize("NFKC"))
+const cellGridWideBeside = (s, from, dir) => {
+  for (let n = 0, i = from + dir; n < 64 && i >= 0 && i < s.length; n += 1) {
+    const c = s[i]
+    if (CELL_GRIDGAP.test(c) || CELLCH.test(c)) { i += dir; continue }
+    return cellGridWideKey(c)
+  }
+  return false
+}
+const cellGridFront = (cell) => {
+  const m = CELL_FRONT.exec(cell) || VENDOR.exec(cell)
+  if (!m) return null
+  const tail = cell.slice(m[0].length)
+  return /^[a-z]+$/.test(tail) && /[aeiouy]/.test(tail) && !/^[0-9a-f]+$/i.test(tail) ? null : m
+}
+const cellGrid = (s, from = 0) => {
   if (s.length < 20) return null
-  const chars = [...s]
-  let k = 0
-  while (k < chars.length) {
-    if (!/[A-Za-z0-9]/.test(chars[k]) || (k > 0 && /[A-Za-z0-9]/.test(chars[k - 1]))) {
+  let k = Math.max(0, from)
+  while (k < s.length) {
+    if (!/[A-Za-z0-9]/.test(s[k]) || (k > 0 && /[A-Za-z0-9]/.test(s[k - 1]))) {
       k += 1
       continue
     }
     const cells = []
     const ends = []
     let p = k
-    // a value behind its name ("x=AKIA    IOSF …") is cut there, as on the card
     let bodyAt = k
     for (;;) {
+      // as on the card, the scan stops one character past the longest cap
       let q = p
-      while (q < chars.length && CELLCH.test(chars[q])) q += 1
-      let body = chars.slice(p, q).join("")
-      if (cells.length === 0) {
-        const named = /^[A-Za-z_][A-Za-z0-9_]{0,23}=(.+)$/.exec(body)
-        if (named && /[A-Za-z0-9]/.test(named[1])) { body = named[1]; bodyAt = q - body.length }
+      while (q < s.length && q - p <= 25 && CELLCH.test(s[q])) q += 1
+      let body = s.slice(p, q)
+      if (cells.length === 0 && q - p <= 26) {
+        const named = cellGridNamed(body)
+        if (named) { body = named; bodyAt = q - body.length }
+      } else if (cells.length > 0 && cellGridNamed(body)) {
+        // a second value behind its own name ("x=… y=…") ends the grid: its
+        // "=" joined the cell and the widths no longer matched
+        break
       }
-      const cap = cells.length === 0 && CELL_FRONT.test(body) ? 24 : 8
+      // as on the card, the first cell may carry the front plus one cell
+      const fr = cells.length === 0 ? cellGridFront(body) : null
+      const cap = fr ? 24 : 8
       if (body.length < 2 || body.length > cap || !/[A-Za-z0-9]/.test(body)) break
       cells.push(body)
       ends.push(q)
       if (cells.length >= 24) break
       let g = q
-      while (g < chars.length && CELL_GRIDGAP.test(chars[g])) g += 1
-      if (g === q || g >= chars.length || !CELLCH.test(chars[g])) break
+      while (g < s.length && g - q <= 8 && CELL_GRIDGAP.test(s[g])) g += 1
+      if (g === q || g >= s.length || !CELLCH.test(s[g])) break
       p = g
     }
-    // the walk resumes past everything it read: the trim below drops the
-    // prose tail, and resuming from the trimmed end re-read that tail at
-    // every word — see maskCellCut
     const readEnd = ends.length > 0 ? ends[ends.length - 1] : k
-    // the prose behind a grid is the text's (see maskCellCut)
-    while (cells.length > 1) {
-      const last = cells[cells.length - 1]
-      if (/^[a-z]+$/.test(last) && !/^[0-9a-f]+$/i.test(last)) { cells.pop(); ends.pop() } else break
+    while (cells.length > 1 && cellGridProse(cells[cells.length - 1])) {
+      cells.pop()
+      ends.pop()
     }
     const stop = ends.length > 0 ? ends[ends.length - 1] : k
-    // a grid that is a piece of a longer cut is not read here: the readings
-    // below own the whole cut, and a mask written over the grid's piece split
-    // it for them — "x=AKIA…1234    AbCd…1234 invalid" and
-    // "ms-f…gH01…qR06 not found" each printed two masks with key characters
-    // between them. A continuation that is prose (a trailing word) was
-    // trimmed above and does not count.
+    // a continuation is the same cut going on only when it is key material of
+    // its own: a mark, a word and another value behind its name are text
     let cont = stop
-    while (cont < chars.length && CELL_GRIDGAP.test(chars[cont])) cont += 1
+    while (cont < s.length && cont - stop <= 8 && CELL_GRIDGAP.test(s[cont])) cont += 1
     let contEnd = cont
-    while (contEnd < chars.length && CELLCH.test(chars[contEnd])) contEnd += 1
-    const contCell = chars.slice(cont, contEnd).join("")
-    if (contCell.length >= 2 && !(/^[a-z]+$/.test(contCell) && !/^[0-9a-f]+$/i.test(contCell))) {
+    while (contEnd < s.length && contEnd - cont <= 24 && CELLCH.test(s[contEnd])) contEnd += 1
+    const contCell = s.slice(cont, contEnd)
+    let before = k - 1
+    for (let n = 0; n < 8 && before >= 0 && CELL_GRIDGAP.test(s[before]); n += 1) before -= 1
+    let beforeAt = before
+    while (beforeAt >= 0 && before - beforeAt < 32 && CELLCH.test(s[beforeAt])) beforeAt -= 1
+    const beforeCell = before >= 0 ? s.slice(beforeAt + 1, before + 1) : ""
+    const precedes = beforeCell.length >= 4 && /[A-Za-z0-9]/.test(beforeCell) && !cellGridProse(beforeCell)
+    const continues = cells.length < 24 && contCell.length >= 2 && /[A-Za-z0-9]/.test(contCell) && !cellGridProse(contCell) && !contCell.includes("=")
+    if (continues || precedes) {
       k = Math.max(k + 1, readEnd)
       continue
     }
     const width = cells.length > 1 ? cells[cells.length - 1].length : 0
-    const fronted = cells.length > 0 && CELL_FRONT.test(cells[0])
+    const fr0 = cells.length > 0 ? cellGridFront(cells[0]) : null
+    const fronted = fr0 !== null
     const grid = cells.length > 0 && cells.every((c, i) => c.length === width || (i === 0 && fronted))
     const flat = cells.join("")
     const strong = cells.filter((c, i) => /\d/.test(c) || CELL_CASEY(c) || (i === 0 && CELL_FRONT.test(c))).length
     // a front-led body is the shape spacedKey masks, and a lower-case one cut
     // in cells carries no case or digit for isKey ("ms-abcd efgh … yz01"): the
-    // front and msKey are the same judgement its own body reading makes
-    if (grid && cells.length >= 3 && cells.length <= 24 && strong >= 2 && flat.length >= 20 && flat.length <= 96 && (isKey(flat) || (CELL_FRONT.test(flat) && msKey(flat)))) {
+    // front and msKey are the same judgement its own body reading makes. Only
+    // the ms- front gets it: sk- is a flag's prefix too ("sk-preset linux
+    // macos amd64" was masked as a key)
+    if (grid && cells.length >= 4 && cells.length <= 24 && strong >= 2 && flat.length >= 20 && flat.length <= 96 && !cellGridWideBeside(s, k, -1) && !cellGridWideBeside(s, stop, 1) && (isKey(flat) || (/^ms-/i.test(flat) && msKey(flat)))) {
       // the gap before a closing bracket is the frame's, as in every other
       // reading: "(ghp_…7890)", not "(ghp_…7890 )"
       let end = stop
       let t = end
-      while (t < chars.length && /[ \t\u00a0\u3000]/.test(chars[t])) t += 1
-      if (t > end && /[)\]}"'`>]/.test(chars[t] ?? "")) end = t
-      return { pre: s.slice(0, bodyAt), body: flat, post: s.slice(end) }
+      while (t < s.length && /[ \t\u00a0\u3000]/.test(s[t])) t += 1
+      if (t > end && /[)\]}"'`>]/.test(s[t] ?? "")) end = t
+      return { preEnd: k, bodyAt, body: flat, bodyEnd: end }
     }
-    k = Math.max(k + 1, readEnd)
+    k = Math.max(k + 1, strong === 0 && !fronted ? readEnd : ends.length > 0 ? ends[0] : k)
   }
   return null
 }
 
 export function arg(v) {
-  const orig = String(v ?? "")
+  return argInner(String(v ?? ""), true)
+}
+// allowGrid is off on the second pass: the text handed back already carries
+// this reading's masks, and asking it again only re-read them
+function argInner(v, allowGrid) {
+  const orig = v
   // A value far longer than any value a person types — a child process's
   // verbose error, a page dumped to stderr — is cut into chunks and each
   // chunk read through this function. Every whole-text reading below skips a
@@ -1934,8 +1971,28 @@ export function arg(v) {
   // (a value with full-width characters is foldedSpans' whole cut: a grid read
   // on its ASCII pieces split the span and left the full-width ones beside the
   // mask — "x=ｍｓ－ＬｍＮｏ ２４６８ ＬｍＮｏ 2468…2468 invalid")
-  const grid = /[^\x00-\x7F]/.test(raw0) ? null : cellGrid(raw0)
-  if (grid) return arg(grid.pre) + mask(grid.body) + arg(grid.post)
+  // every hit is masked in one pass over the value: recursing on the text
+  // behind each hit copied the whole suffix again, and a page of grids was
+  // read to its square (640 grids in 1 MiB took 15 s at 8× the copies)
+  if (allowGrid) {
+    const hits = []
+    for (let k = 0; ; ) {
+      const g = cellGrid(raw0, k)
+      if (!g) break
+      hits.push(g)
+      k = g.bodyEnd
+    }
+    if (hits.length > 0) {
+      let out = ""
+      let at = 0
+      for (const g of hits) {
+        out += raw0.slice(at, g.bodyAt) + mask(g.body)
+        at = g.bodyEnd
+      }
+      out += raw0.slice(at)
+      if (out !== raw0) return argInner(out, false)
+    }
+  }
   // the ms- front has its own joiner for pieces of any width (one to a
   // character), and it reads the value as it was typed. It runs before
   // joinFramed: the framed join masks a run up to the words it takes, and the
@@ -2252,7 +2309,7 @@ function cellCut(s) {
     }
     const stop = p
     const flat = cells.join("")
-    if (cells.length >= 3 && cells.length <= 24 && flat.length >= 20 && flat.length <= 96 && isKey(flat, false)) {
+    if (cells.length >= 4 && cells.length <= 24 && flat.length >= 20 && flat.length <= 96 && isKey(flat, false)) {
       // the gap the cells were cut with stays outside the mask, as the card's
       // reading keeps it
       let e = stop
@@ -3061,6 +3118,27 @@ export function scrub(out, ...secrets) {
   // writes first stopped spacedKey where the key went on — measured, "x=m s -
   // LmNo24 68Pq … Hi3597" went out "x=m s - LmNo24 68Pq Rs13…3597", the key's
   // opening eight characters beside its own mask.
+  // a grid of cells runs before the joins: spacedKey stops at the first word
+  // of the grid and masks a piece ("x=ms-aaaa1111bbbb    qrst …" left 24
+  // characters beside the mask), and a mask written first is opaque here
+  {
+    const hits = []
+    for (let k = 0; ; ) {
+      const g = cellGrid(s, k)
+      if (!g) break
+      hits.push(g)
+      k = g.bodyEnd
+    }
+    if (hits.length > 0) {
+      let out = ""
+      let at = 0
+      for (const g of hits) {
+        out += s.slice(at, g.bodyAt) + mask(g.body)
+        at = g.bodyEnd
+      }
+      s = out + s.slice(at)
+    }
+  }
   const sp = spacedKey(s)
   if (sp && msKey(sp.body, false)) s = sp.pre + mask(sp.body.replace(/\s+/g, "")) + sp.post
   if (s.length <= 32 * 1024) {

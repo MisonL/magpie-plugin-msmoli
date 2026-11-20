@@ -13718,3 +13718,135 @@ test("a product name with its build number is not a key", () => {
     assert.equal(testables.maskAll(v, true), v, `the card masked a name: ${JSON.stringify(v)} -> ${JSON.stringify(testables.maskAll(v, true))}`)
   }
 })
+
+test("a grid is not skipped for the marks and prose around it", () => {
+  // Measured on 35f9053: the continuation after a grid was judged by "has a
+  // letter or digit", so a mark (" --") stopped the reading and the grid went
+  // out whole on all four sinks; a full-width sentence in front silenced the
+  // CLI's grid reading for the whole value; and a second value behind its own
+  // name ("y=…") ended the grid as if it were the same cut.
+  const g = ["Ab", "Cd", "12", "34", "Ef", "Gh", "56", "78", "Ij", "Kl"].join(" | ")
+  const key = "AbCd1234EfGh5678IjKl"
+  const cases = [
+    g + " --",
+    "警告: " + g,
+    "Ab | Cd | 12 | 34 | Ef\nGh | 56 | 78 | Ij | Kl",
+    `x=${g} y=${g}`,
+  ]
+  for (const v of cases.slice(0, 2).concat(cases.slice(3))) {
+    for (const [tag, out] of [
+      ["card", testables.cardText(v, "", 400)],
+      ["host", testables.hostText(v)],
+      ["arg", arg(v)],
+      ["scrub", scrub(`child: ${v}`)],
+    ]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    }
+  }
+  for (const [tag, out] of [
+    ["card", testables.cardText(cases[2], "", 400)],
+    ["host", testables.hostText(cases[2])],
+    ["arg", arg(cases[2])],
+    ["scrub", scrub(`child: ${cases[2]}`)],
+  ]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material across a line break: ${JSON.stringify(cases[2])} -> ${JSON.stringify(out)}`)
+  }
+})
+
+test("a grid whose tail is a key's own groups keeps every one of them", () => {
+  // Measured on 35f9053: a trailing lower-case group ("wxyz") was dropped as
+  // prose, and the eight characters beside the mask printed. A group of the
+  // grid's own width with no vowel is a cell; a word with a vowel is not.
+  const v = "AbCd | 1234 | EfGh | 5678 | IjKl | 9012 | MnOp | 3456 | wxyz | qrst"
+  const key = "AbCd1234EfGh5678IjKl9012MnOp3456wxyzqrst"
+  for (const [tag, out] of [
+    ["card", testables.cardText(v, "", 400)],
+    ["host", testables.hostText(v)],
+    ["arg", arg(v)],
+    ["scrub", scrub(`child: ${v}`)],
+  ]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+})
+
+test("a value behind a key-shaped name is not a name", () => {
+  // Measured on 35f9053: "AKIA=11 | 22 | …" was read as a name and its value,
+  // and the plain characters of the key went from four to eight. A name has a
+  // lower-case letter or an underscore in it; an all-capitals run is the key's
+  // own front.
+  const v = "AKIA=11 | 22 | 33 | 44 | 55 | 66 | 77 | 88 | 99 | AA | BB | CC | DD"
+  const key = "112233445566778899AABBCCDD"
+  for (const [tag, out] of [
+    ["card", testables.cardText(v, "", 400)],
+    ["host", testables.hostText(v)],
+    ["arg", arg(v)],
+    ["scrub", scrub(`child: ${v}`)],
+  ]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+})
+
+test("a command's own words are not a grid of a key", () => {
+  // Measured on 35f9053: "sk-preset linux macos amd64" was masked as a key on
+  // every sink — a front-led first cell exempt from the width and a lower-case
+  // body the CLI's msKey accepted. The front carries a body, not a word.
+  const v = "sk-preset linux macos amd64"
+  for (const [tag, out] of [
+    ["card", testables.cardText(v, "", 400)],
+    ["host", testables.hostText(v)],
+    ["arg", arg(v)],
+    ["scrub", scrub(`child: ${v}`)],
+  ]) {
+    assert.equal(out.includes(v), true, `${tag} masked a command's words: ${JSON.stringify(out)}`)
+  }
+})
+
+test("a grid is not lost behind a word of its own", () => {
+  // Measured on 35f9053: a long front-led word in front of a 24-cell grid read
+  // the word as the first cell and then stepped over the grid's own start.
+  const g24 = ["ab", "cd", "12", "34", "ef", "gh", "56", "78", "ij", "kl", "90", "12", "mn", "op", "34", "56", "qr", "st", "78", "90", "Ab", "Cd", "56", "78"].join(" | ")
+  const v = "AKIAREPORT " + g24
+  const key = "abcd1234efgh5678ijkl9012mnop3456qrst7890AbCd5678"
+  for (const [tag, out] of [
+    ["card", testables.cardText(v, "", 400)],
+    ["host", testables.hostText(v)],
+    ["arg", arg(v)],
+    ["scrub", scrub(`child: ${v}`)],
+  ]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+})
+
+test("a character outside the BMP does not shift the grid's own coordinates", () => {
+  // Measured on 35f9053 and before: the cell walk counted code points and the
+  // mask was written back by UTF-16 offset, so a surrogate pair in front of a
+  // grid ate the "=" beside it and left an orphaned half. Measured: "x=𠀀; y=…"
+  // came out "x=𠀀; yAKIA…DDDDD".
+  const v = "x=" + String.fromCodePoint(0x20000) + "; y=AKIA    AAAA    BBBB    1CCC    DDDD"
+  const key = "AKIAAAABBBB1CCCDDDD"
+  for (const [tag, out] of [
+    ["card", testables.cardText(v, "", 400)],
+    ["host", testables.hostText(v)],
+    ["arg", arg(v)],
+    ["scrub", scrub(`child: ${v}`)],
+  ]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+    assert.ok(out.includes("y="), `${tag} lost the name's "=": ${JSON.stringify(out)}`)
+  }
+})
+
+test("the card and the host mask a grid before their shape pass", () => {
+  // Measured on 35f9053: tokenShaped took the grid's first cell and wrote a
+  // mask over it, and the mask was opaque to the cell reading — 24 characters
+  // of the key stayed beside it on the card and in the host's text.
+  const v = "x=ms-aaaa1111bbbb    qrst    uvwx    yz01    2345    6789"
+  const key = "ms-aaaa1111bbbbqrstuvwxyz0123456789"
+  for (const [tag, out] of [
+    ["card", testables.cardText(v, "", 400)],
+    ["host", testables.hostText(v)],
+    ["arg", arg(v)],
+    ["scrub", scrub(`child: ${v}`)],
+  ]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+})
