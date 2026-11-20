@@ -87,18 +87,32 @@ const modes = [
 // looks like the runner's own "ℹ pass 999" — arrives before the runner's
 // summary. Reading the first match let that line stand in for the count
 // (measured: a decoy *.test.mjs printing the summary cleared the floor).
-const passedOf = (out) => {
-  const matches = [
-    ...[...out.matchAll(/^ℹ pass (\d+)$/gm)].map((m) => m[1]),
-    ...[...out.matchAll(/^# pass (\d+)$/gm)].map((m) => m[1]),
-    ...[...out.matchAll(/^\s*(\d+) pass$/gm)].map((m) => m[1]),
-  ]
-  return Number(matches.at(-1) ?? NaN)
+// ...and the last summary line of ANY form in output order, not the last of
+// each form: a decoy printing Bun's " 999 pass" ahead of the runner's own
+// "ℹ pass 3" stood in for the count when the forms were collected per format
+const SUMMARY_PASS = [/^ℹ pass (\d+)$/, /^# pass (\d+)$/, /^\s*(\d+) pass$/]
+const SUMMARY_FAIL = [/^ℹ fail (\d+)$/, /^# fail (\d+)$/, /^\s*(\d+) fail$/]
+const lastSummary = (out, forms) => {
+  let seen = NaN
+  for (const line of out.split("\n")) {
+    for (const form of forms) {
+      const m = form.exec(line)
+      if (m) seen = Number(m[1])
+    }
+  }
+  return seen
 }
+const passedOf = (out) => lastSummary(out, SUMMARY_PASS)
 // and a zero-fail line beside it: exit 0 is the runner's word, but a summary
-// that names a failure is the gate's own evidence either way
-const failedOf = (out) =>
-  Number([...out.matchAll(/^\s*(?:ℹ |# )?fail (\d+)$/gm)].at(-1)?.[1] ?? 0)
+// that names a failure is the gate's own evidence either way. Bun writes
+// " 1 fail", Node writes "ℹ fail 1" and the TAP form "# fail 1"
+const failedOf = (out) => lastSummary(out, SUMMARY_FAIL) || 0
+// the probe's own name has to be reported as a test, not merely printed: a
+// decoy's log line carrying the name stood in for the probe itself
+const probeRan = (out, name) => {
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return new RegExp(`(?:^|\\s)(?:[✔✖✓✗]|ok \\d+|not ok \\d+)[^\\n]*${esc}`, "m").test(out)
+}
 
 let failed = false
 let plain = null
@@ -145,7 +159,7 @@ for (const m of modes) {
   // the count is a weak proof on its own: a stray *.test.mjs in the folder is
   // collected by `node --test` and clears the "+1" without the probe running.
   // The probe test's own name has to appear in this mode's output.
-  if (m.probe && !out.includes(m.probe)) {
+  if (m.probe && !probeRan(out, m.probe)) {
     process.stdout.write(`FAILED: ${m.name}: the mode's probe test ${JSON.stringify(m.probe)} did not run; its clock shim may be inert.\n`)
     failed = true
   }
