@@ -7619,3 +7619,27 @@ test("a page of long grids is read in linear time", () => {
   const ms = (spent.user + spent.system) / 1000
   assert.ok(ms < 5000, `${Math.round(page.length / 1024)} KB of long grids took ${Math.round(ms)} ms of CPU`)
 })
+
+test("a grid past the bounds is masked whole, a page of words is not", () => {
+  // Measured on db9c8e5: a run past the cell or flat bound was skipped, so a
+  // 513-cell grid and a 4111-character one printed whole. A key is not longer
+  // than the bounds, but a run that is one is masked whole — the safe
+  // direction; a page of words and a page of numerals are not key-shaped and
+  // still pass through.
+  const cells = Array.from({ length: 513 }, (_, i) => "Ab" + String(1000 + i))
+  const grid = cells.join("    ")
+  const key = cells.join("")
+  for (const [tag, out] of [["arg", arg(grid)], ["scrub", scrub(`child: ${grid}`)]]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material past the bound: ${JSON.stringify(out)}`)
+  }
+  const flat = "AbCd1234".repeat(514)
+  for (const [tag, out] of [["arg", arg(flat)], ["scrub", scrub(`child: ${flat}`)]]) {
+    assert.equal(leakOfKey(out, flat), "", `${tag} left key material past the flat bound: ${JSON.stringify(out)}`)
+  }
+  const words = "word ".repeat(800)
+  assert.equal(arg(words), words, "a page of words was masked")
+  let page = ""
+  while (page.length < 16 * 1024) page += "12 34 "
+  page = page.slice(0, 16 * 1024)
+  assert.equal(arg(page), page, "a page of numerals was masked")
+})

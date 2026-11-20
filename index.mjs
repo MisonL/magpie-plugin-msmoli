@@ -2277,6 +2277,8 @@ const maskCellCut = (s, letters = true) => {
     // stops collecting at the bound and skips what it read (a 4 KB run of
     // equal cells rescanned its own tail from every start: 20 s at 320 KB)
     let flatLen = 0
+    let over = false
+    let runEnd = k
     for (;;) {
       // the scan stops one character past the longest cell any cap allows: a
       // run of hyphens ("a-a-a-…") made each candidate read to the value's end
@@ -2297,18 +2299,32 @@ const maskCellCut = (s, letters = true) => {
       const fr = cells.length === 0 ? cellFront(body) : null
       const cap = fr ? 24 : 8
       if (body.length < 2 || body.length > cap || !/[A-Za-z0-9]/.test(body)) break
-      cells.push(body)
-      ends.push(q)
+      if (!over) {
+        cells.push(body)
+        ends.push(q)
+      }
       flatLen += body.length
-      if (cells.length >= 512 || flatLen > 4096) break
+      runEnd = q
+      if (!over && (cells.length >= 512 || flatLen > 4096)) over = true
       let g = q
       while (g < s.length && g - q <= 8 && CELLRUN_GAPCH.test(s[g])) g += 1
       if (g === q || g >= s.length || !CELLRUN_CH.test(s[g])) break
       p = g
     }
     const readEnd = ends.length > 0 ? ends[ends.length - 1] : k
-    if (flatLen > 4096) {
-      k = Math.max(k + 1, readEnd)
+    // a run past the bounds is masked whole when it is key-shaped (a key is
+    // not longer than this; a table row that is one is masked, the safe
+    // direction) and skipped in one step when it is not ("word word …")
+    if (over) {
+      const flat = s.slice(bodyAt, runEnd).replace(/[^A-Za-z0-9+/=_.-]/g, "")
+      const strong = cells.filter((c, i) => /\d/.test(c) || CELL_CASEY(c) || (i === 0 && (CELL_FRONT.test(c) || VENDOR.test(c)))).length
+      if (strong >= 2 && isKeyWord(flat, letters)) {
+        out += s.slice(at, bodyAt) + maskToken(flat)
+        at = runEnd
+        k = runEnd
+        continue
+      }
+      k = Math.max(k + 1, runEnd)
       continue
     }
     // the prose behind a grid is not the grid's: a trailing word of plain

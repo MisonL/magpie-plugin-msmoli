@@ -13925,3 +13925,22 @@ test("a front-led cut and the grid after it are one mask", () => {
     assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
   }
 })
+
+test("a grid past the card's bounds is masked whole", () => {
+  // Measured on db9c8e5: a 513-cell grid and a 4111-character flat body were
+  // skipped at the bound and printed whole on the card and in the host text.
+  const cells = Array.from({ length: 513 }, (_, i) => "Ab" + String(1000 + i))
+  const grid = cells.join("    ")
+  const key = cells.join("")
+  const flat = "AbCd1234".repeat(514)
+  for (const [v, k] of [[grid, key], [flat, flat]]) {
+    for (const [tag, out] of [
+      ["card", testables.cardText(v, "", 12000)],
+      ["host", testables.hostText(v)],
+      ["arg", arg(v)],
+      ["scrub", scrub(`child: ${v}`)],
+    ]) {
+      assert.equal(leakOfKey(out, k), "", `${tag} left key material past the bound: ${JSON.stringify(out)}`)
+    }
+  }
+})

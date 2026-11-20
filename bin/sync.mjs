@@ -1833,6 +1833,8 @@ const cellGrid = (s, from = 0) => {
     // stops collecting at the bound and skips what it read (a 4 KB run of
     // equal cells rescanned its own tail from every start: 20 s at 320 KB)
     let flatLen = 0
+    let over = false
+    let runEnd = k
     for (;;) {
       // as on the card, the scan stops one character past the longest cap
       let q = p
@@ -1850,18 +1852,26 @@ const cellGrid = (s, from = 0) => {
       const fr = cells.length === 0 ? cellGridFront(body) : null
       const cap = fr ? 24 : 8
       if (body.length < 2 || body.length > cap || !/[A-Za-z0-9]/.test(body)) break
-      cells.push(body)
-      ends.push(q)
+      if (!over) {
+        cells.push(body)
+        ends.push(q)
+      }
       flatLen += body.length
-      if (cells.length >= 512 || flatLen > 4096) break
+      runEnd = q
+      if (!over && (cells.length >= 512 || flatLen > 4096)) over = true
       let g = q
       while (g < s.length && g - q <= 8 && CELL_GRIDGAP.test(s[g])) g += 1
       if (g === q || g >= s.length || !CELLCH.test(s[g])) break
       p = g
     }
     const readEnd = ends.length > 0 ? ends[ends.length - 1] : k
-    if (flatLen > 4096) {
-      k = Math.max(k + 1, readEnd)
+    if (over) {
+      const flat = s.slice(bodyAt, runEnd).replace(/[^A-Za-z0-9+/=_.-]/g, "")
+      const strong = cells.filter((c, i) => /\d/.test(c) || CELL_CASEY(c) || (i === 0 && CELL_FRONT.test(c))).length
+      if (strong >= 2 && (isKey(flat) || (/^ms-/i.test(flat) && msKey(flat)))) {
+        return { preEnd: k, bodyAt, body: flat, bodyEnd: runEnd }
+      }
+      k = Math.max(k + 1, runEnd)
       continue
     }
     while (cells.length > 1 && cellGridProse(cells[cells.length - 1])) {
