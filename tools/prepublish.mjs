@@ -82,12 +82,23 @@ const modes = [
 // "ℹ pass 676", Node 18 and 22 print the TAP form "# pass 676", and Bun prints
 // " 676 pass". Node 18 is the engine floor in package.json, so a summary this
 // could not read was a gate that passed on a count it never had.
+// The LAST summary line, not the first: a stray test file beside the suite is
+// collected by `node --test` too, and anything it prints — even a line that
+// looks like the runner's own "ℹ pass 999" — arrives before the runner's
+// summary. Reading the first match let that line stand in for the count
+// (measured: a decoy *.test.mjs printing the summary cleared the floor).
 const passedOf = (out) => {
-  const node = /^ℹ pass (\d+)$/m.exec(out)
-  const tap = /^# pass (\d+)$/m.exec(out)
-  const bun = /^\s*(\d+) pass$/m.exec(out)
-  return Number(node?.[1] ?? tap?.[1] ?? bun?.[1] ?? NaN)
+  const matches = [
+    ...[...out.matchAll(/^ℹ pass (\d+)$/gm)].map((m) => m[1]),
+    ...[...out.matchAll(/^# pass (\d+)$/gm)].map((m) => m[1]),
+    ...[...out.matchAll(/^\s*(\d+) pass$/gm)].map((m) => m[1]),
+  ]
+  return Number(matches.at(-1) ?? NaN)
 }
+// and a zero-fail line beside it: exit 0 is the runner's word, but a summary
+// that names a failure is the gate's own evidence either way
+const failedOf = (out) =>
+  Number([...out.matchAll(/^\s*(?:ℹ |# )?fail (\d+)$/gm)].at(-1)?.[1] ?? 0)
 
 let failed = false
 let plain = null
@@ -116,6 +127,11 @@ for (const m of modes) {
   }
   // exit 0 is not enough: a run that found nothing is not a green suite
   const passed = passedOf(out)
+  if (failedOf(out) > 0) {
+    process.stdout.write(`FAILED: ${m.name}: the summary names ${failedOf(out)} failing tests.\n`)
+    failed = true
+    continue
+  }
   if (!Number.isFinite(passed) || passed < MIN_TESTS) {
     process.stdout.write(`FAILED: ${m.name}: the summary reports ${Number.isFinite(passed) ? `${passed} passing tests` : "no test count"}, below the ${MIN_TESTS} floor; the suite did not run.\n`)
     failed = true
@@ -149,6 +165,11 @@ for (const { file, min } of PER_FILE) {
     continue
   }
   const passed = passedOf(out)
+  if (failedOf(out) > 0) {
+    process.stdout.write(`FAILED: ${file}: the summary names ${failedOf(out)} failing tests.\n`)
+    failed = true
+    continue
+  }
   if (r.status !== 0) {
     process.stdout.write(out)
     process.stdout.write(`FAILED: ${file} exited ${r.status}\n`)
