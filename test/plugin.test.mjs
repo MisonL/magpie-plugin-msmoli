@@ -13870,3 +13870,21 @@ test("a grid is masked behind the words of the sentence before it", () => {
     }
   }
 })
+
+test("a grid longer than the old 24-cell bound is masked whole", () => {
+  // Measured on 681f7a9: 26 groups (208 characters) were cut into two masks
+  // and the eight characters between them printed. The bound is the reader's
+  // own (64 cells / 256 characters), and the walk stops one character past
+  // each cap, so raising it does not reintroduce the hyphen-page scan.
+  const groups = Array.from({ length: 26 }, (_, i) => "AbCd" + String(1000 + i))
+  const v = groups.join("    ")
+  const key = groups.join("")
+  for (const [tag, out] of [
+    ["card", testables.cardText(v, "", 800)],
+    ["host", testables.hostText(v)],
+    ["arg", arg(v)],
+    ["scrub", scrub(`child: ${v}`)],
+  ]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+})

@@ -1848,7 +1848,7 @@ const cellGrid = (s, from = 0) => {
       if (body.length < 2 || body.length > cap || !/[A-Za-z0-9]/.test(body)) break
       cells.push(body)
       ends.push(q)
-      if (cells.length >= 24) break
+      if (cells.length >= 64) break
       let g = q
       while (g < s.length && g - q <= 8 && CELL_GRIDGAP.test(s[g])) g += 1
       if (g === q || g >= s.length || !CELLCH.test(s[g])) break
@@ -1874,7 +1874,7 @@ const cellGrid = (s, from = 0) => {
     while (beforeAt >= 0 && before - beforeAt < 32 && CELLCH.test(s[beforeAt])) beforeAt -= 1
     const beforeCell = before >= 0 ? s.slice(beforeAt + 1, before + 1) : ""
     const precedes = beforeGap.length > 0 && !/\s/.test(beforeGap) && beforeCell.length >= 4 && /[A-Za-z0-9]/.test(beforeCell) && !cellGridProse(beforeCell)
-    const continues = cells.length < 24 && contCell.length >= 2 && /[A-Za-z0-9]/.test(contCell) && !cellGridProse(contCell) && !contCell.includes("=")
+    const continues = cells.length < 64 && contCell.length >= 2 && /[A-Za-z0-9]/.test(contCell) && !cellGridProse(contCell) && !contCell.includes("=")
     if (continues || precedes) {
       k = Math.max(k + 1, readEnd)
       continue
@@ -1884,13 +1884,18 @@ const cellGrid = (s, from = 0) => {
     const fronted = fr0 !== null
     const grid = cells.length > 0 && cells.every((c, i) => c.length === width || (i === 0 && fronted))
     const flat = cells.join("")
+    // every arm of the key test needs a letter (see the card's reading)
+    if (!/[A-Za-z]/.test(flat)) {
+      k = Math.max(k + 1, readEnd)
+      continue
+    }
     const strong = cells.filter((c, i) => /\d/.test(c) || CELL_CASEY(c) || (i === 0 && CELL_FRONT.test(c))).length
     // a front-led body is the shape spacedKey masks, and a lower-case one cut
     // in cells carries no case or digit for isKey ("ms-abcd efgh … yz01"): the
     // front and msKey are the same judgement its own body reading makes. Only
     // the ms- front gets it: sk- is a flag's prefix too ("sk-preset linux
     // macos amd64" was masked as a key)
-    if (grid && cells.length >= 4 && cells.length <= 24 && strong >= 2 && flat.length >= 20 && flat.length <= 96 && !cellGridWideBeside(s, k, -1) && !cellGridWideBeside(s, stop, 1) && (isKey(flat) || (/^ms-/i.test(flat) && msKey(flat)))) {
+    if (grid && cells.length >= 4 && cells.length <= 64 && strong >= 2 && flat.length >= 20 && flat.length <= 256 && !cellGridWideBeside(s, k, -1) && !cellGridWideBeside(s, stop, 1) && (isKey(flat) || (/^ms-/i.test(flat) && msKey(flat)))) {
       // the gap before a closing bracket is the frame's, as in every other
       // reading: "(ghp_…7890)", not "(ghp_…7890 )"
       let end = stop

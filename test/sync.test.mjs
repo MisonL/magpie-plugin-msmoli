@@ -7581,3 +7581,12 @@ test("a grid is masked behind the words of the sentence before it", () => {
     }
   }
 })
+
+test("a grid longer than the old 24-cell bound is masked whole", () => {
+  const groups = Array.from({ length: 26 }, (_, i) => "AbCd" + String(1000 + i))
+  const v = groups.join("    ")
+  const key = groups.join("")
+  for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+})
