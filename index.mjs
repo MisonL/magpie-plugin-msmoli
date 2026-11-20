@@ -2328,12 +2328,15 @@ const maskCellCut = (s, letters = true) => {
     // own ("ms-foReiGn01aBcDeF·gH01·…") is one cut, and the readings after
     // this one own it — reading the tail alone printed two masks with "gH01"
     // between them
+    // only a mark joins the two runs into one cut: a space is the text's own
+    // separator ("VERSION2 AKIA …" is a word and a grid, not one cut)
     let before = k - 1
     for (let n = 0; n < 8 && before >= 0 && CELLRUN_GAPCH.test(s[before]); n += 1) before -= 1
+    const beforeGap = s.slice(before + 1, k)
     let beforeAt = before
     while (beforeAt >= 0 && before - beforeAt < 32 && CELLRUN_CH.test(s[beforeAt])) beforeAt -= 1
     const beforeCell = before >= 0 ? s.slice(beforeAt + 1, before + 1) : ""
-    const precedes = beforeCell.length >= 4 && /[A-Za-z0-9]/.test(beforeCell) && !cellProse(beforeCell)
+    const precedes = beforeGap.length > 0 && !/\s/.test(beforeGap) && beforeCell.length >= 4 && /[A-Za-z0-9]/.test(beforeCell) && !cellProse(beforeCell)
     // a candidate that hit the 24-cell limit has not seen the cut's end: the
     // text behind it is a cell of the same grid ("AKIAREPORT " + 24 cells),
     // not a longer cut the readings after this one own

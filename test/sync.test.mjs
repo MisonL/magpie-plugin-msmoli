@@ -7571,3 +7571,13 @@ test("a page of hyphenated words is read in linear time", () => {
     assert.ok(ms < 3000, `${kb} KB of hyphenated words took ${Math.round(ms)} ms of CPU`)
   }
 })
+
+test("a grid is masked behind the words of the sentence before it", () => {
+  const g = ["Ab", "Cd", "12", "34", "Ef", "Gh", "56", "78", "Ij", "Kl"].join(" | ")
+  const key = "AbCd1234EfGh5678IjKl"
+  for (const v of ["VERSION2 " + g, "WARNING " + g, "2026-11-20 token " + g]) {
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+    }
+  }
+})

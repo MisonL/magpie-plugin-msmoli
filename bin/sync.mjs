@@ -1869,10 +1869,11 @@ const cellGrid = (s, from = 0) => {
     const contCell = s.slice(cont, contEnd)
     let before = k - 1
     for (let n = 0; n < 8 && before >= 0 && CELL_GRIDGAP.test(s[before]); n += 1) before -= 1
+    const beforeGap = s.slice(before + 1, k)
     let beforeAt = before
     while (beforeAt >= 0 && before - beforeAt < 32 && CELLCH.test(s[beforeAt])) beforeAt -= 1
     const beforeCell = before >= 0 ? s.slice(beforeAt + 1, before + 1) : ""
-    const precedes = beforeCell.length >= 4 && /[A-Za-z0-9]/.test(beforeCell) && !cellGridProse(beforeCell)
+    const precedes = beforeGap.length > 0 && !/\s/.test(beforeGap) && beforeCell.length >= 4 && /[A-Za-z0-9]/.test(beforeCell) && !cellGridProse(beforeCell)
     const continues = cells.length < 24 && contCell.length >= 2 && /[A-Za-z0-9]/.test(contCell) && !cellGridProse(contCell) && !contCell.includes("=")
     if (continues || precedes) {
       k = Math.max(k + 1, readEnd)

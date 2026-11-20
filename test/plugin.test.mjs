@@ -13850,3 +13850,23 @@ test("the card and the host mask a grid before their shape pass", () => {
     assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
   }
 })
+
+test("a grid is masked behind the words of the sentence before it", () => {
+  // Measured on c0153ee: the backward question ("is the run before this a
+  // cut of the same key?") was answered across a space, so a word with a
+  // digit ("VERSION2"), an all-capitals word ("WARNING") or a timestamp
+  // ("2026-11-20 token") in front made the grid unread — all four sinks
+  // printed it whole. Only a mark joins two runs into one cut.
+  const g = ["Ab", "Cd", "12", "34", "Ef", "Gh", "56", "78", "Ij", "Kl"].join(" | ")
+  const key = "AbCd1234EfGh5678IjKl"
+  for (const v of ["VERSION2 " + g, "WARNING " + g, "2026-11-20 token " + g, "error token " + g]) {
+    for (const [tag, out] of [
+      ["card", testables.cardText(v, "", 400)],
+      ["host", testables.hostText(v)],
+      ["arg", arg(v)],
+      ["scrub", scrub(`child: ${v}`)],
+    ]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    }
+  }
+})
