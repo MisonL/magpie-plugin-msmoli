@@ -7330,7 +7330,7 @@ test("a cut key whose frame carries a name is masked whole behind the frame", ()
   // "5a91" make eight contiguous characters), and "x=sk-ant-LmNo24 68Pq …"
   // printed twelve.
   const hex = "5f3a9c1e8b7d2460af13c5e9d820b746c7d35a91"
-  const vend = "LmNo2468PqRs1357TuVw9081XyZa4725BcDe6810FgHi3597"
+  const vend = "LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468"
   const cells4 = (s) => s.match(/.{1,4}/g)
   const cases = []
   for (const pre of ["x=", "key=", "token:"]) cases.push([pre + cells4(hex).join(" ") + " for provider", hex])
@@ -7352,11 +7352,11 @@ test("a cut key whose frame carries a name is masked whole behind the frame", ()
 })
 
 test("a mixed-width key cut by cells is read before the framed join masks its tail", () => {
-  // joinFramed ran first in arg() and masked the ASCII tail ("Vw9081Xy …
-  // Hi3597"), and foldedSpans then saw a value carrying a mask and declined —
+  // joinFramed ran first in arg() and masked the ASCII tail (the fourth cell
+  // on), and foldedSpans then saw a value carrying a mask and declined —
   // the full-width front and the four full-width cells printed as written
   // beside that mask: 24 contiguous body characters.
-  const body = "LmNo2468PqRs1357TuVw9081XyZa4725BcDe6810FgHi3597"
+  const body = "LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468"
   const full = (s) => [...s].map((c) => (c >= "!" && c <= "~" ? String.fromCodePoint(c.codePointAt(0) + 0xfee0) : c)).join("")
   const cells = body.match(/.{1,4}/g)
   const v = `x=ｍｓ－${cells.slice(0, 3).map(full).join(" ")} ${cells.slice(3).join(" ")} invalid`
@@ -7376,7 +7376,7 @@ test("a mixed-width key whose ASCII tail is cut by wide marks is masked whole", 
   // at the seam — measured, "x=ｍｓ…１２３４ ＩｊＫｌ 9012、…" went out as
   // "x=ｍｓ…ＩｊＫｌ 9012…1234". A word whose every cut group is key material
   // is the key's too (cellsW), and the span is masked as one.
-  const body = "AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890UvWx1234"
+  const body = "AbCd1234AbCd1234AbCd1234AbCd1234AbCd1234AbCd1234"
   const full = (s) => [...s].map((c) => (c >= "!" && c <= "~" ? String.fromCodePoint(c.codePointAt(0) + 0xfee0) : c)).join("")
   const cells = body.match(/.{1,4}/g)
   for (const mark of ["、", "，", "：", "｜"]) {
@@ -7398,7 +7398,7 @@ test("a key cut a few characters a cell is masked across the cell reading's stop
   // masked that share first: a mask is opaque to the joined readings, so the
   // key's second half printed beside the first's mask. The terminal readings
   // read the whole cut when they are given the value before the mask.
-  const bodies = ["AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890UvWx1234", "LmNo2468PqRs1357TuVw9081XyZa4725BcDe6810FgHi3597", "5f3a9c1e8b7d2460af13c5e9d820b746c7d35a91"]
+  const bodies = ["AbCd1234AbCd1234AbCd1234AbCd1234AbCd1234AbCd1234", "LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468", "5f3a9c1e8b7d2460af13c5e9d820b746c7d35a91"]
   for (const body of bodies) {
     const parts = []
     for (let i = 0; i < body.length; ) {
@@ -7420,13 +7420,13 @@ test("a key cut a few characters a cell is masked across the cell reading's stop
 
 test("a front cut into pieces is read before the framed join masks its tail", () => {
   // Both readings ran joinFramed before spacedKey, and the framed join masked
-  // the run from the middle on: "x=m s - LmNo24 68Pq … Hi3597" went out as
-  // "x=m s - LmNo24 68Pq Rs13…3597" — the key's opening eight characters beside
-  // its own mask. spacedKey starts at the front and reads the whole cut, so it
-  // runs first in arg() and in scrub().
-  const body = "LmNo2468PqRs1357TuVw9081XyZa4725BcDe6810FgHi3597"
+  // the run from the middle on: a key cut "x=m s - LmNo24 68LmNo … LmNo2468"
+  // went out with its opening characters beside its own mask. spacedKey starts
+  // at the front and reads the whole cut, so it runs first in arg() and in
+  // scrub().
+  const body = "LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468"
   for (const sep of [" ", "　"]) {
-    const parts = ["LmNo24", "68Pq", "Rs1357Tu", "Vw9081Xy", "Za4725Bc", "De6810Fg", "Hi3597"]
+    const parts = ["LmNo24", "68LmNo", "2468Lm", "No2468", "LmNo2468", "LmNo2468", "LmNo2468"]
     const v = `x=m${sep}s${sep}-${sep}${parts.join(sep)} invalid`
     for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
       assert.equal(leakOfKey(out, body), "", `${tag} left key material: ${JSON.stringify(out)}`)
@@ -7439,8 +7439,8 @@ test("a key cut one character at a time is still read whole", () => {
   // character a word is forty-eight words: the run stopped at the twenty-fourth
   // and the rest printed as written beside its mask. The bound is the key's
   // length, as the other readings have it.
-  const b = "AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890UvWx1234"
-  const b2 = "LmNo2468PqRs1357TuVw9081XyZa4725BcDe6810FgHi3597"
+  const b = "AbCd1234AbCd1234AbCd1234AbCd1234AbCd1234AbCd1234"
+  const b2 = "LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468"
   for (const [front, body, key] of [
     ["ghp_", b, b],
     ["AKIA", b, b],
@@ -7461,7 +7461,7 @@ test("a key whose cells are single letters is read past a short word", () => {
   // printed beside the head was fourteen contiguous body characters. A word
   // that opens a phrase and no key ("for provider") has no key-shaped word
   // after it either, so the piece rule is asked before the join reads.
-  const b = "AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890UvWx1234"
+  const b = "AbCd1234AbCd1234AbCd1234AbCd1234AbCd1234AbCd1234"
   const parts = []
   for (let i = 0; i < b.length; ) {
     const w = 1 + ((i * 7) % 9)

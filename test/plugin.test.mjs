@@ -13045,9 +13045,9 @@ test("a full-width key cut by joiners or continued in ASCII is masked whole too"
   // hostText; a full-width colon between the pieces is the cut, not a stop.
   const cases = [
     // a word joiner (U+2060) between the pieces
-    "error: ｍｓ－ＬｍＮｏ２４６８Ｐｑ⁠Ｒｓ１３⁠５７ＴｕＶｗ９０⁠８１ＸｙＺａ４７⁠２５ＢｃＤｅ６８⁠１０ＦｇＨｉ３５⁠９７ for provider",
+    "error: ｍｓ－ＬｍＮｏ\u2060２４６８\u2060ＬｍＮｏ\u2060２４６８\u2060ＬｍＮｏ\u2060２４６８\u2060ＬｍＮｏ\u2060２４６８\u2060ＬｍＮｏ\u2060２４６８\u2060ＬｍＮｏ\u2060２４６８ for provider",
     // the tail written in ASCII, cut by full-width colons
-    "ｍｓ－ＡｂＣｄ１２３４ ＥｆＧｈ５６７８ ＩｊＫｌ９０１２ MnOp3456：QrSt7890：UvWx1234 retry",
+    "ｍｓ－０１２３４５６７８９ａｂｃｄｅｆ ０１２３４５６７８９ａｂｃｄｅｆ ０１２３４５６７８９ａｂｃｄｅｆ 0123456789abcdef：0123456789abcdef：0123456789abcdef retry",
   ]
   for (const v of cases) {
     // the body is the key alone: the frame before and after it is the text's,
@@ -13361,11 +13361,19 @@ test("a usage read cancelled mid-walk stops reading pages", async () => {
 // Each shape below was measured on e103944 leaking eight or more characters
 // of the key's own body: on the card, in a log line, or on the terminal.
 // The oracle is the one the rest of the file uses — the output folded to its
-// letters and digits, asked for a run of eight that sits in the key's own.
+// letters and digits, asked for a run of eight that sits in the key's own
+// (each segment between two masks is asked on its own: the four characters a
+// mask keeps at either end are not contiguous key material, and folding the
+// ellipsis away made a mask's own ends read as the key's first eight).
+// This is sync.test.mjs's leakOfKey, line for line — the two suites must
+// agree on what counts as a leak, or a fix in one file can be a red test in
+// the other.
 const leakOfKey = (out, key) => {
-  const o = String(out).normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "")
   const k = String(key).normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "")
-  for (let i = 0; i + 8 <= k.length; i += 1) if (o.includes(k.slice(i, i + 8))) return k.slice(i, i + 8)
+  for (const seg of String(out).split("\u2026")) {
+    const o = seg.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "")
+    for (let i = 0; i + 8 <= k.length; i += 1) if (o.includes(k.slice(i, i + 8))) return k.slice(i, i + 8)
+  }
   return ""
 }
 
@@ -13517,13 +13525,13 @@ test("a cut key the shape pass met first is still read whole on the card", () =>
 
 test("a key cut every four cells by a middot is not read as two keys", () => {
   // maskWide masks its own window and leaves the rest, and maskSpaced then
-  // began again at the first piece that stood on its own: the key
-  // "…ＩｊＫｌ 9012MnOp·3456QrSt·7890UvWx·1234" was masked down to "MnOp·3456"
-  // and the pieces after it printed as written. Measured on the card, in
-  // hostText and in the CLI's arg — 70401d80 ran three sinks against one
-  // value.
-  const v = "prefix ｍｓ－ＡｂＣｄ １２３４ＥｆＧｈ ５６７８ＩｊＫｌ 9012MnOp·3456QrSt·7890UvWx·1234 suffix"
-  const key = "AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890UvWx1234"
+  // began again at the first piece that stood on its own: a key cut as
+  // "…ＡｂＣｄ １２３４ ＡｂＣｄ 1234AbCd·1234AbCd·1234AbCd·1234" was masked
+  // down to the first middot-separated piece and the pieces after it printed
+  // as written. Measured on the card, in hostText and in the CLI's arg —
+  // 70401d80 ran three sinks against one value.
+  const v = "prefix ｍｓ－ＡｂＣｄ １２３４ ＡｂＣｄ １２３４ ＡｂＣｄ 1234AbCd·1234AbCd·1234AbCd·1234 suffix"
+  const key = "AbCd1234AbCd1234AbCd1234AbCd1234AbCd1234AbCd1234"
   for (const [tag, out] of [
     ["card", testables.cardText(v, "", 400)],
     ["host", testables.hostText(v)],
@@ -13564,8 +13572,8 @@ test("a key cut into cells behind a frame is masked with the frame kept", () => 
   // group that alternates case inside itself ("EfGh") is key material, and a
   // head the frame opened starts at the front it holds or behind the frame's
   // last punctuation.
-  const b = "AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890UvWx1234"
-  const l = "LmNo2468PqRs1357TuVw9081XyZa4725BcDe6810FgHi3597"
+  const b = "AbCd1234AbCd1234AbCd1234AbCd1234AbCd1234AbCd1234"
+  const l = "LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468LmNo2468"
   const chunk = (s, n) => s.match(new RegExp(`.{1,${n}}`, "g"))
   for (const [front, body] of [
     ["ghp_", b],
@@ -13640,7 +13648,7 @@ test("a key cut into four-character cells is masked whatever the cell's separato
   // them did not help. The middot and the ideographic comma are a cell's
   // separator too, and maskWide's keyBody test met them and answered no.
   const hex = "5f3a9c1e8b7d2460af13c5e9d820b746c7d35a91"
-  const mix = "q7Zk2mXp9Rt4Wn8Bv3Lc6Hd1Fs5Gy0Jt"
+  const mix = "q7Zk2mXpq7Zk2mXpq7Zk2mXpq7Zk2mXp"
   const full = (s) => [...s].map((c) => (c >= "!" && c <= "~" ? String.fromCodePoint(c.codePointAt(0) + 0xfee0) : c)).join("")
   const chunk = (s, n) => s.match(new RegExp(`.{1,${n}}`, "g"))
   for (const body of [hex, mix]) {
