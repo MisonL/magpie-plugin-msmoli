@@ -857,13 +857,17 @@ const show = (s) =>
 // part would be the wrong trade for a folder the user typed.
 const RUN = /[A-Za-z0-9]+/g
 const keyRun = (r) =>
-  (r.length >= 16 && /[a-z]/.test(r) && /[A-Z]/.test(r)) ||
+  // (a product name with its build number — "ModelScope20261031" — is a name
+  // here as it is on the card: its words are capitalised and its tail is a
+  // number, which is no key's rhythm)
+  !/^[A-Z][a-z]{2,}(?:[A-Z][a-z]{2,})+\d{4,8}$/.test(r) &&
+  ((r.length >= 16 && /[a-z]/.test(r) && /[A-Z]/.test(r)) ||
   (r.length >= 32 && /\d/.test(r) && /[A-Za-z]/.test(r)) ||
   (r.length >= 16 && /\d/.test(r) && /[A-Z]/.test(r)) ||
   // 16+ of hex with both a letter and a digit in it: a digest, a session id, a
   // fragment of a key. Not a word (abcdefgh… carries letters that are not hex,
   // modelscope20261031 carries more than hex), and not a number
-  (r.length >= 16 && /^[0-9a-fA-F]+$/.test(r) && /\d/.test(r) && /[a-fA-F]/.test(r))
+  (r.length >= 16 && /^[0-9a-fA-F]+$/.test(r) && /\d/.test(r) && /[a-fA-F]/.test(r)))
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 // one word, and something in it looks like a key
 const PATHY = /^(?:[~/.]|[A-Za-z]:[\\/]|\\\\)/
@@ -968,6 +972,13 @@ const isKey = (word, runs = true) => {
   // This is most of a child's prose, and the guard keeps the dozen regexes
   // below off it.
   if (word.length < 12 && !/[0-9A-Z]/.test(word)) return false
+  // a product or a path segment with its build number ("ModelScope20261031",
+  // "SomeFolderName2024") is a name, not a key: two or more capitalised words
+  // and then a four-to-eight digit number. Keys alternate case inside a few
+  // characters and do not spell words. Measured: both were masked to
+  // "Mode…1031" and "Some…2024" on the card and in the CLI while ordinary
+  // names beside them stayed.
+  if (/^[A-Z][a-z]{2,}(?:[A-Z][a-z]{2,})+\d{4,8}$/.test(word)) return false
   // an upper-cased vendor key is the same key, and its pieces are too short
   // for the run floors ("SK-ANT-API03-EYAI1PKJRF_KBWT"); the rhythm a key has
   // (a capital beside a digit) tells it from a sentence in capitals

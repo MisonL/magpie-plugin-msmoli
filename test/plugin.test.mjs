@@ -13704,3 +13704,13 @@ test("a key written as a grid of equal cells is masked on every sink", () => {
     assert.equal(testables.maskAll(v, true), v, `ordinary text was masked: ${JSON.stringify(v)} -> ${JSON.stringify(testables.maskAll(v, true))}`)
   }
 })
+
+test("a product name with its build number is not a key", () => {
+  // Measured on 144cc09: "ModelScope20261031" came out "Mode…1031" on the card
+  // and in the CLI, and "SomeFolderName2024/report" lost its middle. A name's
+  // words are capitalised and its tail is a number; a key's case alternates
+  // inside a few characters.
+  for (const v of ["ModelScope20261031", "path/SomeFolderName2024/report"]) {
+    assert.equal(testables.maskAll(v, true), v, `the card masked a name: ${JSON.stringify(v)} -> ${JSON.stringify(testables.maskAll(v, true))}`)
+  }
+})

@@ -1790,7 +1790,11 @@ const RUN = /[A-Za-z0-9]+/g
 // the frame around it ("…", a trailing full stop, a comma)
 const IDCH = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_.-")
 const keyRun = (r, letters = true) =>
-  (letters && r.length >= 16 && /[a-z]/.test(r) && /[A-Z]/.test(r)) ||
+  // (a product name with its build number is a name here too:
+  // "ModelScope20261031" reads as a mixed-case run beside a numeral, and the
+  // caption guard in isKeyWord never saw it because this arm answers first)
+  !/^[A-Z][a-z]{2,}(?:[A-Z][a-z]{2,})+\d{4,8}$/.test(r) &&
+  ((letters && r.length >= 16 && /[a-z]/.test(r) && /[A-Z]/.test(r)) ||
   (r.length >= 32 && /\d/.test(r) && /[A-Za-z]/.test(r)) ||
   // (a nickname is judged without the case-mix arms — WangXiaoming2026 is a
   // word — but an all-caps id with a digit in it is still a key, and it is the
@@ -1799,7 +1803,7 @@ const keyRun = (r, letters = true) =>
   // 16+ of hex with both a letter and a digit in it: a digest, a session id, a
   // fragment of a key. Not a word (abcdefgh… carries letters that are not hex,
   // modelscope20261031 carries more than hex), and not a number
-  (r.length >= 16 && /^[0-9a-fA-F]+$/.test(r) && /\d/.test(r) && /[a-fA-F]/.test(r))
+  (r.length >= 16 && /^[0-9a-fA-F]+$/.test(r) && /\d/.test(r) && /[a-fA-F]/.test(r)))
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
 // under 12 characters there is no key to hide and maskToken would have to
@@ -1949,6 +1953,13 @@ const vendorSpanOf = (w) => {
 const vendorBodyKey = (w) => vendorSpanOf(w) !== null
 const isKeyWord = (w, letters = true) => {
   if (w.length < 12) return false
+  // a product or a path segment with its build number ("ModelScope20261031",
+  // "SomeFolderName2024") is a name, not a key: two or more capitalised words
+  // and then a four-to-eight digit number. Keys alternate case inside a few
+  // characters and do not spell words. Measured: both were masked to
+  // "Mode…1031" and "Some…2024" on the card and in the CLI while ordinary
+  // names beside them stayed.
+  if (/^[A-Z][a-z]{2,}(?:[A-Z][a-z]{2,})+\d{4,8}$/.test(w)) return false
   // (a word followed by its numeral — "d8e3a6f0b5c9" — is no match: the
   // letters there are not a word)
   if (LISTY.test(w) && /[A-Za-z]{3,}/.test(w)) return false

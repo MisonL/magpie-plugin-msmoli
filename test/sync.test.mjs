@@ -7507,3 +7507,10 @@ test("a key written as a grid of equal cells is masked in the argument and the s
     assert.equal(arg(v), v, `ordinary text was masked: ${JSON.stringify(v)} -> ${JSON.stringify(arg(v))}`)
   }
 })
+
+test("a product name with its build number is not a key in the argument", () => {
+  for (const v of ["ModelScope20261031", "path/SomeFolderName2024/report"]) {
+    assert.equal(arg(v), v, `the CLI masked a name: ${JSON.stringify(v)} -> ${JSON.stringify(arg(v))}`)
+    assert.equal(scrub(`child: ${v}`), `child: ${v}`, `the scrub masked a name: ${JSON.stringify(v)}`)
+  }
+})
