@@ -13684,6 +13684,10 @@ test("a key written as a grid of equal cells is masked on every sink", () => {
   // behind a bar and an AWS secret cut by bullets all went out whole.
   const cases = [
     ["AKIAIOSFODNN7EXAMPLE", "AKIA    IOSF    ODNN    7EXA    MPLE"],
+    // the value's name keeps its shape: measured on 3eeab42, "x=AKIA    IOSF
+    // …" printed whole on the card while the CLI beside it masked it
+    ["AKIAIOSFODNN7EXAMPLE", "x=AKIA    IOSF    ODNN    7EXA    MPLE"],
+    ["ms-abcdefghijklmnopqrstuvwxyz0123456789", "MS_TOKEN=ms-abcd efgh ijkl mnop qrst uvwx yz01"],
     ["AKIAIOSFODNN7EXAMPLE", "AKIA | IOSF | ODNN | 7EXA | MPLE"],
     ["ms-abcdefghijklmnopqrstuvwxyz0123456789", "ms-abcd efgh ijkl mnop qrst uvwx yz01 2345 6789"],
     ["AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890", "Ab | Cd | 12 | 34 | Ef | Gh | 56 | 78 | Ij | Kl | 90 | 12 | Mn | Op | 34 | 56 | Qr | St | 78 | 90"],

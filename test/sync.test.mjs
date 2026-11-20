@@ -7496,6 +7496,7 @@ test("a key written as a grid of equal cells is masked in the argument and the s
   const cases = [
     ["AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890", "Ab | Cd | 12 | 34 | Ef | Gh | 56 | 78 | Ij | Kl | 90 | 12 | Mn | Op | 34 | 56 | Qr | St | 78 | 90"],
     ["AKIAIOSFODNN7EXAMPLE", "AKIA    IOSF    ODNN    7EXA    MPLE"],
+    ["AKIAIOSFODNN7EXAMPLE", "x=AKIA    IOSF    ODNN    7EXA    MPLE"],
     ["ms-abcdefghijklmnopqrstuvwxyz0123456789", "ms-abcd efgh ijkl mnop qrst uvwx yz01 2345 6789"],
   ]
   for (const [key, v] of cases) {

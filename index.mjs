@@ -2232,31 +2232,67 @@ const maskCellCut = (s, letters = true) => {
     const cells = []
     const ends = []
     let p = k
+    // a value behind its name ("x=AKIA    IOSF …") is cut there: the name is
+    // kept as written and the cells are read from what follows the "="
+    let bodyAt = k
     for (;;) {
       let q = p
       while (q < chars.length && CELLRUN_CH.test(chars[q])) q += 1
-      const cell = chars.slice(p, q).join("")
-      if (cell.length < 2 || cell.length > 8 || !/[A-Za-z0-9]/.test(cell)) break
-      cells.push(cell)
+      let body = chars.slice(p, q).join("")
+      if (cells.length === 0) {
+        const named = /^[A-Za-z_][A-Za-z0-9_]{0,23}=(.+)$/.exec(body)
+        if (named && /[A-Za-z0-9]/.test(named[1])) { body = named[1]; bodyAt = q - body.length }
+      }
+      const cap = cells.length === 0 ? (CELL_FRONT.test(body) || VENDOR.test(body) ? 24 : 8) : 8
+      if (body.length < 2 || body.length > cap || !/[A-Za-z0-9]/.test(body)) break
+      cells.push(body)
       ends.push(q)
+      if (cells.length >= 24) break
       let g = q
       while (g < chars.length && CELLRUN_GAPCH.test(chars[g])) g += 1
       if (g === q || g >= chars.length || !CELLRUN_CH.test(chars[g])) break
       p = g
     }
+    // the walk resumes past everything it read: the trim below drops the
+    // prose tail, and resuming from the trimmed end re-read that tail at every
+    // word — 20 KB of prose took 14 s (measured)
+    const readEnd = ends.length > 0 ? ends[ends.length - 1] : k
+    // the prose behind a grid is not the grid's: a trailing word of plain
+    // lower-case letters that is no hex ("for", "provider", "invalid") is
+    // dropped back off, so a grid followed by a sentence keeps its words and
+    // a second pass sees the same grid the first one did
+    while (cells.length > 1) {
+      const last = cells[cells.length - 1]
+      if (/^[a-z]+$/.test(last) && !/^[0-9a-f]+$/i.test(last)) { cells.pop(); ends.pop() } else break
+    }
     const stop = ends.length > 0 ? ends[ends.length - 1] : k
+    // a grid that is a piece of a longer cut is not read here: the readings
+    // below own the whole cut, and a mask written over the grid's piece split
+    // it for them — "x=AKIA…1234    AbCd…1234 invalid" and
+    // "ms-f…gH01…qR06 not found" each printed two masks with key characters
+    // between them. A continuation that is prose (a trailing word) was
+    // trimmed above and does not count.
+    let cont = stop
+    while (cont < chars.length && CELLRUN_GAPCH.test(chars[cont])) cont += 1
+    let contEnd = cont
+    while (contEnd < chars.length && CELLRUN_CH.test(chars[contEnd])) contEnd += 1
+    const contCell = chars.slice(cont, contEnd).join("")
+    if (contCell.length >= 2 && !(/^[a-z]+$/.test(contCell) && !/^[0-9a-f]+$/i.test(contCell))) {
+      k = Math.max(k + 1, readEnd)
+      continue
+    }
     const width = cells.length > 1 ? cells[cells.length - 1].length : 0
     const fronted = cells.length > 0 && (CELL_FRONT.test(cells[0]) || VENDOR.test(cells[0]))
     const grid = cells.length > 0 && cells.every((c, i) => c.length === width || (i === 0 && fronted))
     const flat = cells.join("")
     const strong = cells.filter((c, i) => /\d/.test(c) || CELL_CASEY(c) || (i === 0 && (CELL_FRONT.test(c) || VENDOR.test(c)))).length
     if (grid && cells.length >= 3 && cells.length <= 24 && strong >= 2 && flat.length >= 20 && flat.length <= 96 && isKeyWord(flat, letters)) {
-      out += s.slice(at, k) + maskToken(flat)
+      out += s.slice(at, bodyAt) + maskToken(flat)
       at = stop
       k = stop
       continue
     }
-    k = Math.max(k + 1, stop)
+    k = Math.max(k + 1, readEnd)
   }
   return out + s.slice(at)
 }
