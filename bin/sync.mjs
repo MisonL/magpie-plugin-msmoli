@@ -1776,6 +1776,54 @@ function chunked(text) {
   return pieces
 }
 
+const CELL_GRIDGAP = /[ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027]/
+// cellGrid is maskCellCut's walk on the CLI side: a grid of three or more
+// equal cells of key characters, joined by whitespace, a bar or a middle dot,
+// whose joined body reads as a key. The first cell may be a front-led one of
+// another width ("ms-abcd efgh …").
+const cellGrid = (s) => {
+  const chars = [...s]
+  let k = 0
+  while (k < chars.length) {
+    if (!/[A-Za-z0-9]/.test(chars[k]) || (k > 0 && /[A-Za-z0-9]/.test(chars[k - 1]))) {
+      k += 1
+      continue
+    }
+    const cells = []
+    const ends = []
+    let p = k
+    for (;;) {
+      let q = p
+      while (q < chars.length && CELLCH.test(chars[q])) q += 1
+      const cell = chars.slice(p, q).join("")
+      if (cell.length < 2 || cell.length > 8 || !/[A-Za-z0-9]/.test(cell)) break
+      cells.push(cell)
+      ends.push(q)
+      let g = q
+      while (g < chars.length && CELL_GRIDGAP.test(chars[g])) g += 1
+      if (g === q || g >= chars.length || !CELLCH.test(chars[g])) break
+      p = g
+    }
+    const stop = ends.length > 0 ? ends[ends.length - 1] : k
+    const width = cells.length > 1 ? cells[cells.length - 1].length : 0
+    const fronted = cells.length > 0 && CELL_FRONT.test(cells[0])
+    const grid = cells.length > 0 && cells.every((c, i) => c.length === width || (i === 0 && fronted))
+    const flat = cells.join("")
+    const strong = cells.filter((c, i) => /\d/.test(c) || CELL_CASEY(c) || (i === 0 && CELL_FRONT.test(c))).length
+    if (grid && cells.length >= 3 && cells.length <= 24 && strong >= 2 && flat.length >= 20 && flat.length <= 96 && isKey(flat)) {
+      // the gap before a closing bracket is the frame's, as in every other
+      // reading: "(ghp_…7890)", not "(ghp_…7890 )"
+      let end = stop
+      let t = end
+      while (t < chars.length && /[ \t\u00a0\u3000]/.test(chars[t])) t += 1
+      if (t > end && /[)\]}"'`>]/.test(chars[t] ?? "")) end = t
+      return { pre: s.slice(0, k), body: flat, post: s.slice(end) }
+    }
+    k = Math.max(k + 1, stop)
+  }
+  return null
+}
+
 export function arg(v) {
   const orig = String(v ?? "")
   // A value far longer than any value a person types — a child process's
@@ -1830,6 +1878,14 @@ export function arg(v) {
   // ("glue" is the value with an invisible character between two key characters
   // taken out, so a key cut by one is put back together)
   const raw0 = orig.replace(GLUE, "")
+  // a key the text wrote as a grid of equal cells ("Ab | Cd | 12 | …",
+  // "AKIA    IOSF    ODNN    …", a bullet-cut AWS secret) is read first: the
+  // readings below look for the ms- front, a frame or a run of words, and a
+  // two-character grid behind a bar met none of them and printed whole. The
+  // grid's evidence is the sameness of its cells — a sentence's words have no
+  // one width — and the joined run still has to read as a key.
+  const grid = cellGrid(raw0)
+  if (grid) return arg(grid.pre) + mask(grid.body) + arg(grid.post)
   // the ms- front has its own joiner for pieces of any width (one to a
   // character), and it reads the value as it was typed. It runs before
   // joinFramed: the framed join masks a run up to the words it takes, and the

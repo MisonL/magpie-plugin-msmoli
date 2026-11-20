@@ -2192,7 +2192,64 @@ const maskCaps = (s, letters) => {
 // tab, a bar between the cells — are past the run walk's two-character gap,
 // and its own floor of 20 would otherwise be met by the first three cells and
 // mask only them)
-const maskAll = (s, letters) => maskKeys(maskSpaced(maskCut(maskSpaced(maskCells(maskCaps(maskWide(maskSep(s, letters), letters), letters), letters), letters), letters), letters), letters)
+// maskCellCut reads a key a display wrote as a grid of equal cells: three or
+// more cells of the same width, separated by whitespace, a bar or a middle
+// dot, whose joined text is a key by the same test every other reading uses.
+// The cell reading after this one asks each cell for a digit or for the case a
+// group of a key shows, and its run broke at the first cell with neither. An
+// all-capitals AWS id cut in four-character cells ("AKIA    IOSF    ODNN
+// 7EXA    MPLE"), an ms- body cut in lower-case groups, a key cut in
+// two-character cells behind a bar and an AWS secret cut by bullets all went
+// out whole on the card, in hostText and in the CLI. The grid's evidence is
+// the sameness of its cells: a sentence's words have no one width, so its
+// prose is not read (a trailing word that differs from the grid is left), and
+// the joined run still has to prove itself key material — two cells with a
+// digit, mixed case, hex or a vendor front on the first.
+const CELLRUN_CH = /[A-Za-z0-9+/=_.-]/
+const CELLRUN_GAPCH = /[ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027]/
+const maskCellCut = (s, letters = true) => {
+  if (typeof s !== "string" || s.length < 20) return s
+  const chars = [...s]
+  let out = ""
+  let at = 0
+  let k = 0
+  while (k < chars.length) {
+    if (!/[A-Za-z0-9]/.test(chars[k]) || (k > 0 && /[A-Za-z0-9]/.test(chars[k - 1]))) {
+      k += 1
+      continue
+    }
+    const cells = []
+    const ends = []
+    let p = k
+    for (;;) {
+      let q = p
+      while (q < chars.length && CELLRUN_CH.test(chars[q])) q += 1
+      const cell = chars.slice(p, q).join("")
+      if (cell.length < 2 || cell.length > 8 || !/[A-Za-z0-9]/.test(cell)) break
+      cells.push(cell)
+      ends.push(q)
+      let g = q
+      while (g < chars.length && CELLRUN_GAPCH.test(chars[g])) g += 1
+      if (g === q || g >= chars.length || !CELLRUN_CH.test(chars[g])) break
+      p = g
+    }
+    const stop = ends.length > 0 ? ends[ends.length - 1] : k
+    const width = cells.length > 1 ? cells[cells.length - 1].length : 0
+    const fronted = cells.length > 0 && (CELL_FRONT.test(cells[0]) || VENDOR.test(cells[0]))
+    const grid = cells.length > 0 && cells.every((c, i) => c.length === width || (i === 0 && fronted))
+    const flat = cells.join("")
+    const strong = cells.filter((c, i) => /\d/.test(c) || CELL_CASEY(c) || (i === 0 && (CELL_FRONT.test(c) || VENDOR.test(c)))).length
+    if (grid && cells.length >= 3 && cells.length <= 24 && strong >= 2 && flat.length >= 20 && flat.length <= 96 && isKeyWord(flat, letters)) {
+      out += s.slice(at, k) + maskToken(flat)
+      at = stop
+      k = stop
+      continue
+    }
+    k = Math.max(k + 1, stop)
+  }
+  return out + s.slice(at)
+}
+const maskAll = (s, letters) => maskKeys(maskSpaced(maskCut(maskSpaced(maskCells(maskCaps(maskWide(maskSep(maskCellCut(s, letters), letters), letters), letters), letters), letters), letters), letters), letters)
 
 // maskSep reads a key cut by punctuation: a comma, a bar, a full-width stop or
 // bar, an ideographic comma, a semicolon, a dash, or a joiner a copy left

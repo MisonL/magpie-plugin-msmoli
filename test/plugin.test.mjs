@@ -13675,3 +13675,32 @@ test("a key cut into four-character cells is masked whatever the cell's separato
   assert.ok(testables.cardText(`error: ${chunk(mix, 4).join("    ")} for provider`, "", 400).startsWith("error: "), "the frame went too")
   assert.ok(testables.cardText(`error: ${chunk(mix, 4).join("    ")} for provider`, "", 400).endsWith(" for provider"), "the tail went too")
 })
+
+test("a key written as a grid of equal cells is masked on every sink", () => {
+  // Measured on e103944 and still on 144cc09: the cell reading asked each cell
+  // for a digit or for the case a group of a key shows, and the run ended at
+  // the first cell with neither. An all-capitals AWS id in four-character
+  // cells, an ms- body in lower-case groups, a key in two-character cells
+  // behind a bar and an AWS secret cut by bullets all went out whole.
+  const cases = [
+    ["AKIAIOSFODNN7EXAMPLE", "AKIA    IOSF    ODNN    7EXA    MPLE"],
+    ["AKIAIOSFODNN7EXAMPLE", "AKIA | IOSF | ODNN | 7EXA | MPLE"],
+    ["ms-abcdefghijklmnopqrstuvwxyz0123456789", "ms-abcd efgh ijkl mnop qrst uvwx yz01 2345 6789"],
+    ["AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890", "Ab | Cd | 12 | 34 | Ef | Gh | 56 | 78 | Ij | Kl | 90 | 12 | Mn | Op | 34 | 56 | Qr | St | 78 | 90"],
+    ["wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".match(/.{1,4}/g).join("•")],
+  ]
+  for (const [key, v] of cases) {
+    for (const [tag, out] of [
+      ["card", testables.maskAll(v, true)],
+      ["host", testables.hostText(v)],
+      ["arg", arg(v)],
+      ["scrub", scrub(`child: ${v}`)],
+    ]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    }
+  }
+  // a sentence's words have no one width, and are not a grid
+  for (const v of ["the quick brown fox jumped over the lazy dog", "Qwen3-Max · Qwen3-Coder", "sk-preset-20261031 is a provider id"]) {
+    assert.equal(testables.maskAll(v, true), v, `ordinary text was masked: ${JSON.stringify(v)} -> ${JSON.stringify(testables.maskAll(v, true))}`)
+  }
+})
