@@ -7603,3 +7603,19 @@ test("a three-cell grid, a short last group and the cut before it are one mask",
     }
   }
 })
+
+test("a page of long grids is read in linear time", () => {
+  // Measured on b7bf097: a 512-cell grid is past the old flat bound, so every
+  // candidate failed at the gate and the walk re-read its whole tail from the
+  // next start — 320 KB in 19 s. The collection stops at the bound and a run
+  // past it moves the walk past what it read.
+  const big = Array.from({ length: 512 }, (_, i) => "Ab" + String(1000 + i)).join("    ")
+  const one = arg(big)
+  assert.equal(leakOfKey(one, big.replace(/[^A-Za-z0-9]/g, "")), "", `one long grid: ${JSON.stringify(one)}`)
+  const page = (big + "\n").repeat(160)
+  const started = process.cpuUsage()
+  arg(page)
+  const spent = process.cpuUsage(started)
+  const ms = (spent.user + spent.system) / 1000
+  assert.ok(ms < 5000, `${Math.round(page.length / 1024)} KB of long grids took ${Math.round(ms)} ms of CPU`)
+})

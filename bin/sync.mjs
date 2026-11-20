@@ -1829,6 +1829,10 @@ const cellGrid = (s, from = 0) => {
     const ends = []
     let p = k
     let bodyAt = k
+    // a run past the length bound is no key at any start inside it: the walk
+    // stops collecting at the bound and skips what it read (a 4 KB run of
+    // equal cells rescanned its own tail from every start: 20 s at 320 KB)
+    let flatLen = 0
     for (;;) {
       // as on the card, the scan stops one character past the longest cap
       let q = p
@@ -1848,13 +1852,18 @@ const cellGrid = (s, from = 0) => {
       if (body.length < 2 || body.length > cap || !/[A-Za-z0-9]/.test(body)) break
       cells.push(body)
       ends.push(q)
-      if (cells.length >= 512) break
+      flatLen += body.length
+      if (cells.length >= 512 || flatLen > 4096) break
       let g = q
       while (g < s.length && g - q <= 8 && CELL_GRIDGAP.test(s[g])) g += 1
       if (g === q || g >= s.length || !CELLCH.test(s[g])) break
       p = g
     }
     const readEnd = ends.length > 0 ? ends[ends.length - 1] : k
+    if (flatLen > 4096) {
+      k = Math.max(k + 1, readEnd)
+      continue
+    }
     while (cells.length > 1 && cellGridProse(cells[cells.length - 1])) {
       cells.pop()
       ends.pop()
@@ -1898,7 +1907,7 @@ const cellGrid = (s, from = 0) => {
     // front and msKey are the same judgement its own body reading makes. Only
     // the ms- front gets it: sk- is a flag's prefix too ("sk-preset linux
     // macos amd64" was masked as a key)
-    if (grid && cells.length >= 3 && cells.length <= 512 && strong >= 2 && flat.length >= 20 && flat.length <= 2048 && !cellGridWideBeside(s, k, -1) && !cellGridWideBeside(s, stop, 1) && (isKey(flat) || (/^ms-/i.test(flat) && msKey(flat)))) {
+    if (grid && cells.length >= 3 && cells.length <= 512 && strong >= 2 && flat.length >= 20 && flat.length <= 4096 && !cellGridWideBeside(s, k, -1) && !cellGridWideBeside(s, stop, 1) && (isKey(flat) || (/^ms-/i.test(flat) && msKey(flat)))) {
       // the gap before a closing bracket is the frame's, as in every other
       // reading: "(ghp_…7890)", not "(ghp_…7890 )"
       let end = stop

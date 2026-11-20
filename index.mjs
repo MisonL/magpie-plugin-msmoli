@@ -2273,6 +2273,10 @@ const maskCellCut = (s, letters = true) => {
     // a value behind its name ("x=AKIA    IOSF …") is cut there: the name is
     // kept as written and the cells are read from what follows the "="
     let bodyAt = k
+    // a run past the length bound is no key at any start inside it: the walk
+    // stops collecting at the bound and skips what it read (a 4 KB run of
+    // equal cells rescanned its own tail from every start: 20 s at 320 KB)
+    let flatLen = 0
     for (;;) {
       // the scan stops one character past the longest cell any cap allows: a
       // run of hyphens ("a-a-a-…") made each candidate read to the value's end
@@ -2295,13 +2299,18 @@ const maskCellCut = (s, letters = true) => {
       if (body.length < 2 || body.length > cap || !/[A-Za-z0-9]/.test(body)) break
       cells.push(body)
       ends.push(q)
-      if (cells.length >= 512) break
+      flatLen += body.length
+      if (cells.length >= 512 || flatLen > 4096) break
       let g = q
       while (g < s.length && g - q <= 8 && CELLRUN_GAPCH.test(s[g])) g += 1
       if (g === q || g >= s.length || !CELLRUN_CH.test(s[g])) break
       p = g
     }
     const readEnd = ends.length > 0 ? ends[ends.length - 1] : k
+    if (flatLen > 4096) {
+      k = Math.max(k + 1, readEnd)
+      continue
+    }
     // the prose behind a grid is not the grid's: a trailing word of plain
     // lower-case letters that is no hex and is of a width the grid's own
     // cells are not ("… yz01 invalid") is dropped back off. A word of the
@@ -2361,7 +2370,7 @@ const maskCellCut = (s, letters = true) => {
       continue
     }
     const strong = cells.filter((c, i) => /\d/.test(c) || CELL_CASEY(c) || (i === 0 && (CELL_FRONT.test(c) || VENDOR.test(c)))).length
-    if (grid && cells.length >= 3 && cells.length <= 512 && strong >= 2 && flat.length >= 20 && flat.length <= 2048 && !cellWideBeside(s, k, -1) && !cellWideBeside(s, stop, 1) && isKeyWord(flat, letters)) {
+    if (grid && cells.length >= 3 && cells.length <= 512 && strong >= 2 && flat.length >= 20 && flat.length <= 4096 && !cellWideBeside(s, k, -1) && !cellWideBeside(s, stop, 1) && isKeyWord(flat, letters)) {
       out += s.slice(at, bodyAt) + maskToken(flat)
       at = stop
       k = stop
