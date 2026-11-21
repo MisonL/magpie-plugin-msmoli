@@ -12850,10 +12850,35 @@ test("a refused token on a later ledger page is reported as expired", async () =
       for (const method of ["usage", "checkin"]) {
         const r = await p.auth[method](async () => ({ type: "api", key: token }))
         assert.equal(r.signIn, "expired", `${method} at ${status}: a refused token did not read as an expiry: ${JSON.stringify(r)}`)
+        if (method === "checkin") assert.match(r.message ?? "", /重新登录/, `${method} at ${status}: the host only keeps the message, and it said nothing about signing in again: ${JSON.stringify(r)}`)
       }
     } finally {
       globalThis.fetch = real
     }
+  }
+})
+
+test("a lone embedded 401 beside a dead link is not an expiry", async () => {
+  // Measured on a301de2: the CN site answered HTTP 200 with {"Code":401}
+  // while the INT site was unreachable, and usage said the token expired —
+  // though every token answers 401 on the site it does not belong to,
+  // and the walk never got an answer from the other one. Only refusals from
+  // every site are the sign-in's.
+  testables.sites.clear()
+  const token = "ms-inline401-down-0000-0000-0000"
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.origin === CN_ORIGIN) return reply({ body: { Success: false, Code: 401, Message: "Token expired" } })
+    throw new TypeError("fetch failed")
+  }
+  try {
+    const p = await MsmoliPlugin({ directory: "/nonexistent-review" })
+    const r = await p.auth.usage(async () => ({ type: "api", key: token }))
+    assert.notEqual(r.signIn, "expired", `a refusal beside a dead link read as an expiry: ${JSON.stringify(r)}`)
+    assert.doesNotMatch(r.error ?? "", /令牌失效|HTTP 401/, `the lone refusal's wording stood in for the dead link: ${JSON.stringify(r)}`)
+  } finally {
+    globalThis.fetch = real
   }
 })
 
@@ -14227,7 +14252,13 @@ test("a key cut into full-width cells is masked whole", () => {
   // the over-limit shape carries its own key too: its head is full-width and
   // the walk's first-cell cap used to give up before the over branch ran, so
   // the CLI masked only the ASCII tail from a later start
-  const caseKeys = { ...limitKeys, overwideContiguous: overKey, overwideSpaced: overKey }
+  const dottedKey = "AbCd12.34EfGh56.78IjKl"
+  const lateStrongCells = [...Array(511).fill("ABCD"), "A1b2", "C3d4"]
+  const ligatureKey = "AbCdff12EfGhfi34IjKlfl56"
+  const astralKey = "AbCd1234EfGh5678IjKl9012"
+  const astralChar = (c) => { const p = c.codePointAt(0); return p >=65 && p <=90 ? String.fromCodePoint(0x1d400 + p -65) : p >=97 && p <=122 ? String.fromCodePoint(0x1d41a + p -97) : p >=48 && p <=57 ? String.fromCodePoint(0x1d7ce + p -48) : c }
+  const lateStrongKey = lateStrongCells.join("")
+  const caseKeys = { ...limitKeys, overwideContiguous: overKey, overwideSpaced: overKey, overwideRun: overKey, dotCells: dottedKey, lateStrong: lateStrongKey, ligature: ligatureKey, astral: astralKey }
   for (const [tag, v] of [
     ["bar", cells.join(" | ")],
     ["space", cells.join(" ")],
@@ -14245,6 +14276,26 @@ test("a key cut into full-width cells is masked whole", () => {
   ["overwideSpaced", overWideHead + " | " + overCells.join(" | ")],
   // the same head followed by one unbroken ASCII run past the flat bound
   ["overwideRun", overWideHead + "AbCd1234".repeat(511)],
+  // NFKC dot and bar forms as the cut: each folds to punctuation the gap set
+  // did not hold, and the wide dot was read as a cell character
+  ["dotFF0E", [...body].join("\uff0e")],
+  ["dotFE52", [...body].join("\ufe52")],
+  ["dot2024", [...body].join("\u2024")],
+  ["vert2223", [...body].join("\u2223")],
+  ["vert00A6", [...body].join("\u00a6")],
+  ["vert2758", [...body].join("\u2758")],
+  // a dot kept inside the cells: the CLI cell set had no "." (the card did)
+  ["dotCells", [...dottedKey].join(" | ")],
+  // strength after the cell bound still says the run is a key
+  ["lateStrong", lateStrongCells.join(" | ")],
+  // a fold to several ASCII letters, and a non-BMP spelling of the same key
+  ["ligature", "Ab | Cd | \ufb00 |12 | Ef | Gh | \ufb01 |34 | Ij | Kl | \ufb02 |56"],
+  ["astral", [...astralKey].map(astralChar).join("").match(/.{1,4}/g).join(" | ")],
+  // a wide first cell and ASCII cells behind it, with the grid read before
+  // the punctuation pass (the sep pass first left the wide head in the clear)
+  ["wideFirstBar", "ＡｂＣｄ｜1234｜EfGh｜5678｜IjKl｜9012"],
+  // short and long cells beside each other in one cut
+  ["mixedWidth", "A | bCd1234E | f | Gh5678Ij | K | l9012MnO | p |3456QrSt |7 |890"],
   ]) {
     for (const [sink, out] of [
       ["card", testables.cardText(v, "",600)],

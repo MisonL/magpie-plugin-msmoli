@@ -277,6 +277,10 @@ async function siteRead(token, path, deadline = Infinity, { signal = null } = {}
   // parsed reply (or nothing), and the dead link is the last thing reported.
   let said
   let down
+  // refusals met so far: a401 or a200 whose envelope says401 is the
+  // sign-in refused only when every site said it (every token answers it
+  // on the site it does not belong to)
+  let refused = 0
   for (const profile of order) {
     // A cancelled poll's answer is thrown away, so neither site is worth
     // asking: the first read's own cancel is the answer, and probing the
@@ -323,6 +327,7 @@ async function siteRead(token, path, deadline = Infinity, { signal = null } = {}
       // for, and an expiry decision can land on a live sign-in. The site is
       // forgotten only while it is still the one in memory.
       if (profile === known && sites.get(token) === profile) sites.delete(token)
+      refused += 1
       continue
     }
     if (got.parsed && got.res.status === 200) {
@@ -330,7 +335,11 @@ async function siteRead(token, path, deadline = Infinity, { signal = null } = {}
         rememberSite(token, profile)
         return { profile, ...got }
       }
-      said ??= { answer: { profile, ...got } }
+      // a200 that says401 is the same refusal gate reads below, and it
+      // counts with the status ones: one site saying it is not the sign-in
+      const refusedBody = String(got.body?.Code ?? got.body?.code ?? "") === "401" && awaitsSignIn(got.body)
+      if (refusedBody) refused += 1
+      if (!said) said = { answer: { profile, ...got }, refused: refusedBody }
       continue
     }
     // A 4xx is the site answering — but a 404/405/451 from a middlebox, or a
@@ -351,6 +360,10 @@ async function siteRead(token, path, deadline = Infinity, { signal = null } = {}
     }
     said ??= { answer: { profile, ...got } }
   }
+  // a refusal beside a site that never answered is not proof: measured,
+  // CN embedded401 with INT unreachable was called an expiry, though the
+  // walk only got one refusal and the other site said nothing
+  if (said?.refused && refused < order.length) said = undefined
   if (riskAnswer) return riskAnswer
   if (answer) return answer
   if (said) return said.answer
@@ -2242,7 +2255,7 @@ const maskCaps = (s, letters) => {
 // the joined run still has to prove itself key material — two cells with a
 // digit, mixed case, hex or a vendor front on the first.
 const CELLRUN_CH = /[A-Za-z0-9+/=_.-]/
-const CELLRUN_GAPCH = /[ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027\u30fb\r\n]/
+const CELLRUN_GAPCH = /[ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027\u30fb\u2223\u00a6\u2758\r\n]/
 const CELL_MS = /^ms-/i
 // a value a person wrote behind its name ("x=…", "MS_TOKEN=…") keeps the name:
 // a run of letters, digits and underscores with a lower-case letter or an
@@ -2263,17 +2276,23 @@ const cellProse = (w) => /^[a-z]+$/.test(w) && /[aeiouy]/.test(w) && !/^[0-9a-f]
 const cellWide = (c) => c !== undefined && c.charCodeAt(0) > 0x7f
 // a full-width character that is key material folded ("ｍｓ－ＬｍＮｏ"): the
 // span foldedSpans reads, which a grid on its ASCII pieces would split
-const cellWideKey = (c) => cellWide(c) && /[A-Za-z0-9+/=_.-]/.test(c.normalize("NFKC"))
+const cellWideKey = (c) => { if (!cellWide(c)) return false; const n = c.normalize("NFKC"); return n !== "." && /[A-Za-z0-9+/=_.-]/.test(n) }
 // a wide key character near the candidate, across the cells and gaps before
 // and after it ("… ＬｍＮｏ 2468 LmNo 2468 …" is one folded span)
 // a cell character, wide or not: a value whose first cell is folded
 // ("ms-Ａ１ｂ２") is one grid with the ASCII cells after it
 const cellCh = (c) => c !== undefined && (CELLRUN_CH.test(c) || cellWideKey(c))
+// the character at i as one code point: a non-BMP letter is two UTF-16
+// units, and reading half of one said the cell was not key material
+const cellAt = (s, i) => { const cp = s.codePointAt(i); return cp >0xffff ? String.fromCodePoint(cp) : s[i] }
 // a cell body as the key test reads it: full-width characters fold to the
 // ASCII key characters they stand for, and cells' gaps are dropped. Asking
 // the raw text called a folded cut "not a key" (measured on cb26bb1: a key
 // written entirely in full-width characters printed on all six outputs).
-const cellFold = (s) => /[^\x00-\x7f]/.test(s) ? Array.from(s, (c) => { const n = c.normalize("NFKC"); return n.length === 1 && /[A-Za-z0-9+/=_.-]/.test(n) ? n : "" }).join("") : s.replace(/[^A-Za-z0-9+/=_.-]/g, "")
+// a compatibility character that folds to several key characters ("ﬀ" is
+// "ff") is the key's spelling too: dropping it left a cell of one unit
+// beside cells of two, and the key was not a grid at all
+const cellFold = (s) => /[^\x00-\x7f]/.test(s) ? Array.from(s, (c) => { const n = c.normalize("NFKC"); return /^[A-Za-z0-9+/=_.-]+$/.test(n) ? n : "" }).join("") : s.replace(/[^A-Za-z0-9+/=_.-]/g, "")
 // whether a single character is key material once folded ("Ａ" is "A"): the
 // walk's own start gate runs on every character of a page, so the ASCII case
 // is decided without normalizing (measured: normalizing per character put a
@@ -2286,13 +2305,19 @@ const cellAlnum = (c) => {
 }
 // a gap in either spelling: a full-width bar or dot is the cut's separator
 // too (measured: "Ａｂ｜Ｃｄ｜…" and "Ａ｜ｂ｜Ｃ｜ｄ｜…" printed whole)
-const cellGap = (c) => c !== undefined && (CELLRUN_GAPCH.test(c) || (c.charCodeAt(0) > 0x7f && CELLRUN_GAPCH.test(c.normalize("NFKC"))))
+const cellGap = (c) => {
+  if (c === undefined) return false
+  if (CELLRUN_GAPCH.test(c)) return true
+  if (c.charCodeAt(0) <= 0x7f) return false
+  const n = c.normalize("NFKC")
+  return n === "." || CELLRUN_GAPCH.test(n)
+}
 // and whether a body holds any key material once folded: the ASCII answer
 // decides without building the folded string
 const cellHasAlnum = (s) => /[A-Za-z0-9]/.test(s) || /[^\x00-\x7f]/.test(s) && /[A-Za-z0-9]/.test(cellFold(s))
 const cellWideBeside = (s, from, dir) => {
   for (let n = 0, i = from + dir; n < 64 && i >= 0 && i < s.length; n += 1) {
-    const c = s[i]
+    const c = cellAt(s, i)
     if (cellGap(c) || CELLRUN_CH.test(c)) { i += dir; continue }
     return cellWideKey(c)
   }
@@ -2312,7 +2337,7 @@ const maskCellCut = (s, letters = true) => {
   let at = 0
   let k = 0
   while (k < s.length) {
-    if (!cellAlnum(s[k]) || (k > 0 && cellAlnum(s[k - 1]))) {
+    if (!cellAlnum(cellAt(s, k)) || (k > 0 && cellAlnum(cellAt(s, k - 1)))) {
       k += 1
       continue
     }
@@ -2331,13 +2356,17 @@ const maskCellCut = (s, letters = true) => {
     // cells of another width: the two spellings of one key do not share a
     // cell width ("ＡｂＣｄ1234EfGh…" printed its first eight characters)
     let wide0 = false
+    // strength counted as the run is read: past the cell bound the cells
+    // are no longer kept, and a key whose only digits or mixed case sit
+    // there was dropped whole (measured:511 plain cells, then two strong)
+    let strongRun = 0
     let runEnd = k
     for (;;) {
       // the scan stops one character past the longest cell any cap allows: a
       // run of hyphens ("a-a-a-…") made each candidate read to the value's end
       // at every start, 16 KB in 27 s (measured)
       let q = p
-      while (q < s.length && q - p <= 25 && cellCh(s[q])) q += 1
+      while (q < s.length && q - p <= 25 && cellCh(cellAt(s, q))) q += cellAt(s, q).length
       let body = s.slice(p, q)
       if (cells.length === 0 && q - p <= 26) {
         const named = cellNamed(body)
@@ -2360,10 +2389,12 @@ const maskCellCut = (s, letters = true) => {
         let e = q
         while (e < s.length && e - q <= 8 && cellGap(s[e])) e += 1
         let e2 = e
-        while (e2 < s.length && e2 - e <= 25 && cellCh(s[e2])) e2 += 1
+        while (e2 < s.length && e2 - e <= 25 && cellCh(cellAt(s, e2))) e2 += cellAt(s, e2).length
         bridged = cellHasAlnum(s.slice(e, e2))
       }
       if (body.length < 1 || body.length > cap || (!cellHasAlnum(body) && !bridged)) break
+      const foldedCell = cellFold(body)
+      if (/\d/.test(foldedCell) || CELL_CASEY(foldedCell) || (cells.length === 0 && (CELL_FRONT.test(foldedCell) || VENDOR.test(foldedCell)))) strongRun += 1
       if (!over) {
         cells.push(body)
         ends.push(q)
@@ -2373,11 +2404,11 @@ const maskCellCut = (s, letters = true) => {
       if (!over && (cells.length >= 512 || flatLen > 4096)) over = true
       let g = q
       while (g < s.length && g - q <= 8 && cellGap(s[g])) g += 1
-      if (g === q || g >= s.length || !cellCh(s[g])) {
+      if (g === q || g >= s.length || !cellCh(cellAt(s, g))) {
         // a run that goes on without a gap is one cut, not a grid's next cell:
         // a wide-headed key's run is masked whole, so the walk keeps reading it
         // to its end: a stop at the flat bound left the tail in the clear
-        if (!wide0 || g !== q || g >= s.length || !cellCh(s[g])) break
+        if (!wide0 || g !== q || g >= s.length || !cellCh(cellAt(s, g))) break
       }
       p = g
     }
@@ -2387,8 +2418,7 @@ const maskCellCut = (s, letters = true) => {
     // direction) and skipped in one step when it is not ("word word …")
     if (over) {
       const flat = cellFold(s.slice(bodyAt, runEnd))
-      const strong = cells.filter((c, i) => { const n = cellFold(c); return /\d/.test(n) || CELL_CASEY(n) || (i === 0 && (CELL_FRONT.test(n) || VENDOR.test(n))) }).length
-      if (strong >= 2 && isKeyWord(flat, letters)) {
+      if (strongRun >= 2 && isKeyWord(flat, letters)) {
         out += s.slice(at, bodyAt) + maskToken(flat)
         at = runEnd
         k = runEnd
@@ -2416,7 +2446,7 @@ const maskCellCut = (s, letters = true) => {
     let cont = stop
     while (cont < s.length && cont - stop <= 8 && cellGap(s[cont])) cont += 1
     let contEnd = cont
-    while (contEnd < s.length && contEnd - cont <= 24 && cellCh(s[contEnd])) contEnd += 1
+    while (contEnd < s.length && contEnd - cont <= 24 && cellCh(cellAt(s, contEnd))) contEnd += cellAt(s, contEnd).length
     const contCell = s.slice(cont, contEnd)
     // the cells before the candidate are the same question asked backwards:
     // a key cut into groups whose first group is too long to be a cell of its
@@ -2429,7 +2459,7 @@ const maskCellCut = (s, letters = true) => {
     for (let n = 0; n < 8 && before >= 0 && cellGap(s[before]); n += 1) before -= 1
     const beforeGap = s.slice(before + 1, k)
     let beforeAt = before
-    while (beforeAt >= 0 && before - beforeAt < 32 && cellCh(s[beforeAt])) beforeAt -= 1
+    while (beforeAt >= 0 && before - beforeAt < 32 && cellCh(cellAt(s, beforeAt))) beforeAt -= 1
     const beforeCell = before >= 0 ? s.slice(beforeAt + 1, before + 1) : ""
     const precedes = beforeGap.length > 0 && !/\s/.test(beforeGap) && beforeCell.length >= 4 && cellHasAlnum(beforeCell) && !cellProse(beforeCell)
     // a candidate that hit the cell limit has not seen the cut's end: the
@@ -2445,8 +2475,14 @@ const maskCellCut = (s, letters = true) => {
     // the grid's width is its cells' (the second one: the first may be a
     // front-led one of another width), and a key's last group may be short
     // ("… MnOp3456 | QrSt")
-    const width = cells.length > 1 ? cells[1].length : 0
-    const grid = cells.length > 0 && cells.every((c, i) => c.length === width || (i === 0 && fronted) || (i === cells.length - 1 && c.length < width))
+    const width = cells.length > 1 ? cellFold(cells[1]).length : 0
+    const grid = cells.length > 0 && cells.every((c, i) => cellFold(c).length === width || (i === 0 && fronted) || (i === cells.length - 1 && cellFold(c).length < width))
+    // a key cut unevenly ("A | bCd1234E | f | …") has no one width: short
+    // and long cells beside each other are still the cut when enough of them
+    // are short groups and one long piece, and the joined body still reads
+    // as a key (measured: the mask stopped at the first long cell, leaving
+    // "MnOp3456" and the rest of the key behind it)
+    const uneven = !grid && cells.filter((c) => c.length <= 2).length >= 2 && cells.some((c) => c.length >= 6) && cells.every((c) => c.length <= 8)
     const flat = cells.join("")
     // the same body as the key test reads it: a cut written in full-width
     // characters is the key it folds to, and the fold does not change a
@@ -2459,9 +2495,8 @@ const maskCellCut = (s, letters = true) => {
       k = Math.max(k + 1, readEnd)
       continue
     }
-    const strong = cells.filter((c, i) => { const n = cellFold(c); return /\d/.test(n) || CELL_CASEY(n) || (i === 0 && (CELL_FRONT.test(n) || VENDOR.test(n))) }).length
-    if (((grid && cells.length >= 3) || (wide0 && cells.length >= 2)) && cells.length <= 512 && strong >= 2 && flat.length >= 20 && flat.length <= 4096 && !cellWideBeside(s, k, -1) && !cellWideBeside(s, stop, 1) && isKeyWord(flatN, letters)) {
-      out += s.slice(at, bodyAt) + maskToken(wide0 ? flatN : flat)
+    if (((grid && cells.length >= 3) || (wide0 && cells.length >= 2) || uneven) && cells.length <= 512 && strongRun >= 2 && flat.length >= 20 && flat.length <= 4096 && !cellWideBeside(s, k, -1) && !cellWideBeside(s, stop, 1) && isKeyWord(flatN, letters)) {
+      out += s.slice(at, bodyAt) + maskToken(flatN)
       at = stop
       k = stop
       continue
@@ -2470,7 +2505,7 @@ const maskCellCut = (s, letters = true) => {
     // the first cell otherwise: the tail was re-read at every word when the
     // trimmed end was the resume point, and resuming past a long candidate
     // stepped over a grid that began inside it
-    k = Math.max(k + 1, strong === 0 && !fronted ? readEnd : ends.length > 0 ? ends[0] : k)
+    k = Math.max(k + 1, strongRun === 0 && !fronted ? readEnd : ends.length > 0 ? ends[0] : k)
   }
   return out + s.slice(at)
 }
@@ -3212,7 +3247,7 @@ const cardText = (value, token, max = 200) => {
   // first whole cell of a grid and writes a mask over it, and a mask is opaque
   // to the cell reading — "x=ms-aaaa1111bbbb    qrst …" left 24 characters of
   // the key beside its mask on the card
-  s = maskCellCut(maskSep(maskEchoes(s, token), true), true).replace(tokenShaped, maskShaped)
+  s = maskSep(maskCellCut(maskEchoes(s, token), true), true).replace(tokenShaped, maskShaped)
   return text(maskAll(s, true), max)
 }
 // The account's own name is text the user picked, not a server's message: a
@@ -3227,7 +3262,7 @@ const nameText = (value, token, max = 200) => {
   // so the case-mix arm has to stay on. The punctuation-cut reading runs
   // before the shape pass for the reason cardText's does: a mask the shape
   // pass writes first is opaque to the readings that follow it.
-  return text(maskAll(maskCellCut(maskSep(maskEchoes(s, token), !token), !token).replace(tokenShaped, maskShaped), !token), max)
+  return text(maskAll(maskSep(maskCellCut(maskEchoes(s, token), !token), !token).replace(tokenShaped, maskShaped), !token), max)
 }
 
 // hostText is cardText for the two exits where there is no token to split on:
@@ -4913,6 +4948,13 @@ export async function MsmoliPlugin(input) {
         try {
           await rememberAccountFields(client, token, { name, profile: probe, probeDone: !!probe }, auth, configDir, deadline, getAuth)
         } catch {}
+        // checkinOf keeps only outcome/credit/streak/message/until: signIn is
+        // dropped, so an expired answer whose message does not say so leaves the
+        // host showing a retry for a dead token. Say it here, once, for every
+        // exit that marks the account expired.
+        if (answer?.signIn === "expired" && !/重新登录/.test(answer.message ?? "")) {
+          return { ...answer, message: `${answer.message ?? ""}；登录已失效（HTTP401），请重新登录 msmoli`.replace(/^；/, "") }
+        }
         return answer
       },
 

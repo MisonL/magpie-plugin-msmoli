@@ -1787,7 +1787,7 @@ function chunked(text) {
   return pieces
 }
 
-const CELL_GRIDGAP = /[ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027\u30fb\r\n]/
+const CELL_GRIDGAP = /[ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027\u30fb\u2223\u00a6\u2758\r\n]/
 // cellGrid is maskCellCut's walk on the CLI side: a grid of three or more
 // equal cells of key characters, joined by whitespace, a bar or a middle dot,
 // whose joined body reads as a key. The first cell may be a front-led one of
@@ -1802,12 +1802,16 @@ const cellGridNamed = (cell) => {
 }
 const cellGridProse = (w) => /^[a-z]+$/.test(w) && /[aeiouy]/.test(w) && !/^[0-9a-f]+$/i.test(w)
 const cellGridWide = (c) => c !== undefined && c.charCodeAt(0) > 0x7f
-const cellGridWideKey = (c) => cellGridWide(c) && /[A-Za-z0-9+/=_.-]/.test(c.normalize("NFKC"))
+const cellGridWideKey = (c) => { if (!cellGridWide(c)) return false; const n = c.normalize("NFKC"); return n !== "." && /[A-Za-z0-9+/=_.-]/.test(n) }
 const cellGridCh = (c) => c !== undefined && (CELLCH.test(c) || cellGridWideKey(c))
+// the character at i as one code point (the card's cellAt)
+const cellGridAt = (s, i) => { const cp = s.codePointAt(i); return cp >0xffff ? String.fromCodePoint(cp) : s[i] }
 // a cell body as the key test reads it: full-width characters fold to the
 // ASCII key characters they stand for, and cells' gaps are dropped (the
 // cards cellFold, kept in step with it)
-const cellGridFold = (s) => /[^\x00-\x7f]/.test(s) ? Array.from(s, (c) => { const n = c.normalize("NFKC"); return n.length === 1 && /[A-Za-z0-9+/=_.-]/.test(n) ? n : "" }).join("") : s.replace(/[^A-Za-z0-9+/=_.-]/g, "")
+// a fold to several key characters ("ﬀ" is "ff") is key material too (the
+// card's cellFold)
+const cellGridFold = (s) => /[^\x00-\x7f]/.test(s) ? Array.from(s, (c) => { const n = c.normalize("NFKC"); return /^[A-Za-z0-9+/=_.-]+$/.test(n) ? n : "" }).join("") : s.replace(/[^A-Za-z0-9+/=_.-]/g, "")
 // the walk's start gate, folded: ASCII is decided without normalizing, the
 // same cost reason as the card's cellAlnum
 const cellGridAlnum = (c) => {
@@ -1818,12 +1822,18 @@ const cellGridAlnum = (c) => {
 }
 // a gap in either spelling: a full-width bar or dot is the cut's separator
 // too (measured: "Ａ｜Ｋ｜Ｉ｜…" printed whole)
-const cellGridGap = (c) => c !== undefined && (CELL_GRIDGAP.test(c) || (c.charCodeAt(0) > 0x7f && CELL_GRIDGAP.test(c.normalize("NFKC"))))
+const cellGridGap = (c) => {
+  if (c === undefined) return false
+  if (CELL_GRIDGAP.test(c)) return true
+  if (c.charCodeAt(0) <= 0x7f) return false
+  const n = c.normalize("NFKC")
+  return n === "." || CELL_GRIDGAP.test(n)
+}
 // and whether a body holds key material once folded (the card's cellHasAlnum)
 const cellGridHasAlnum = (s) => /[A-Za-z0-9]/.test(s) || /[^\x00-\x7f]/.test(s) && /[A-Za-z0-9]/.test(cellGridFold(s))
 const cellGridWideBeside = (s, from, dir) => {
   for (let n = 0, i = from + dir; n < 64 && i >= 0 && i < s.length; n += 1) {
-    const c = s[i]
+    const c = cellGridAt(s, i)
     if (cellGridGap(c) || CELLCH.test(c)) { i += dir; continue }
     return cellGridWideKey(c)
   }
@@ -1839,7 +1849,7 @@ const cellGrid = (s, from = 0) => {
   if (s.length < 20) return null
   let k = Math.max(0, from)
   while (k < s.length) {
-    if (!cellGridAlnum(s[k]) || (k > 0 && cellGridAlnum(s[k - 1]))) {
+    if (!cellGridAlnum(cellGridAt(s, k)) || (k > 0 && cellGridAlnum(cellGridAt(s, k - 1)))) {
       k += 1
       continue
     }
@@ -1855,11 +1865,13 @@ const cellGrid = (s, from = 0) => {
     // a head written entirely in full-width characters may be followed by
     // cells of another width (the card's wide0, kept in step with it)
     let wide0 = false
+    // strength counted as the run is read (the card's strongRun)
+    let strongRun = 0
     let runEnd = k
     for (;;) {
       // as on the card, the scan stops one character past the longest cap
       let q = p
-      while (q < s.length && q - p <= 25 && cellGridCh(s[q])) q += 1
+      while (q < s.length && q - p <= 25 && cellGridCh(cellGridAt(s, q))) q += cellGridAt(s, q).length
       let body = s.slice(p, q)
       if (cells.length === 0 && q - p <= 26) {
         const named = cellGridNamed(body)
@@ -1880,10 +1892,12 @@ const cellGrid = (s, from = 0) => {
         let e = q
         while (e < s.length && e - q <= 8 && cellGridGap(s[e])) e += 1
         let e2 = e
-        while (e2 < s.length && e2 - e <= 25 && cellGridCh(s[e2])) e2 += 1
+        while (e2 < s.length && e2 - e <= 25 && cellGridCh(cellGridAt(s, e2))) e2 += cellGridAt(s, e2).length
         bridged = cellGridHasAlnum(s.slice(e, e2))
       }
       if (body.length < 1 || body.length > cap || (!cellGridHasAlnum(body) && !bridged)) break
+      const foldedCell = cellGridFold(body)
+      if (/\d/.test(foldedCell) || CELL_CASEY(foldedCell) || (cells.length === 0 && CELL_FRONT.test(foldedCell))) strongRun += 1
       if (!over) {
         cells.push(body)
         ends.push(q)
@@ -1892,19 +1906,21 @@ const cellGrid = (s, from = 0) => {
       runEnd = q
       if (!over && (cells.length >= 512 || flatLen > 4096)) over = true
       let g = q
-      while (g < s.length && g - q <= 8 && cellGridGap(s[g])) g += 1
-      if (g === q || g >= s.length || !cellGridCh(s[g])) {
+      // a full stop standing in a cell of its own ("A | . | b") is the text's
+      // punctuation, not material: the card's body holds it and the bridge
+      // carries it; here it is stepped over when a non-cell follows
+      while (g < s.length && g - q <= 8 && (cellGridGap(s[g]) || (s[g] === "." && (g + 1 >= s.length || !cellGridCh(s[g + 1]))))) g += 1
+      if (g === q || g >= s.length || !cellGridCh(cellGridAt(s, g))) {
         // a run that goes on without a gap is one cut, not a grid's next cell
         // (the card's reading, kept in step with it, and read to the run's end)
-        if (!wide0 || g !== q || g >= s.length || !cellGridCh(s[g])) break
+        if (!wide0 || g !== q || g >= s.length || !cellGridCh(cellGridAt(s, g))) break
       }
       p = g
     }
     const readEnd = ends.length > 0 ? ends[ends.length - 1] : k
     if (over) {
       const flat = cellGridFold(s.slice(bodyAt, runEnd))
-      const strong = cells.filter((c, i) => { const n = cellGridFold(c); return /\d/.test(n) || CELL_CASEY(n) || (i === 0 && CELL_FRONT.test(n)) }).length
-      if (strong >= 2 && (isKey(flat) || (/^ms-/i.test(flat) && msKey(flat)))) {
+      if (strongRun >= 2 && (isKey(flat) || (/^ms-/i.test(flat) && msKey(flat)))) {
         return { preEnd: k, bodyAt, body: flat, bodyEnd: runEnd }
       }
       k = Math.max(k + 1, runEnd)
@@ -1920,13 +1936,13 @@ const cellGrid = (s, from = 0) => {
     let cont = stop
     while (cont < s.length && cont - stop <= 8 && cellGridGap(s[cont])) cont += 1
     let contEnd = cont
-    while (contEnd < s.length && contEnd - cont <= 24 && cellGridCh(s[contEnd])) contEnd += 1
+    while (contEnd < s.length && contEnd - cont <= 24 && cellGridCh(cellGridAt(s, contEnd))) contEnd += cellGridAt(s, contEnd).length
     const contCell = s.slice(cont, contEnd)
     let before = k - 1
     for (let n = 0; n < 8 && before >= 0 && cellGridGap(s[before]); n += 1) before -= 1
     const beforeGap = s.slice(before + 1, k)
     let beforeAt = before
-    while (beforeAt >= 0 && before - beforeAt < 32 && cellGridCh(s[beforeAt])) beforeAt -= 1
+    while (beforeAt >= 0 && before - beforeAt < 32 && cellGridCh(cellGridAt(s, beforeAt))) beforeAt -= beforeAt > 0 ? cellGridAt(s, beforeAt - 1).length : 1
     const beforeCell = before >= 0 ? s.slice(beforeAt + 1, before + 1) : ""
     const precedes = beforeGap.length > 0 && !/\s/.test(beforeGap) && beforeCell.length >= 4 && cellGridHasAlnum(beforeCell) && !cellGridProse(beforeCell)
     const continues = cells.length < 512 && contCell.length >= 2 && cellGridHasAlnum(contCell) && !cellGridProse(contCell) && !contCell.includes("=")
@@ -1937,10 +1953,13 @@ const cellGrid = (s, from = 0) => {
     // the grid's width is its cells' (the second one: the first may be a
     // front-led one of another width), and a key's last group may be short
     // ("… MnOp3456 | QrSt")
-    const width = cells.length > 1 ? cells[1].length : 0
+    const width = cells.length > 1 ? cellGridFold(cells[1]).length : 0
     const fr0 = cells.length > 0 ? cellGridFront(cells[0]) : null
     const fronted = fr0 !== null
-    const grid = cells.length > 0 && cells.every((c, i) => c.length === width || (i === 0 && fronted) || (i === cells.length - 1 && c.length < width))
+    const grid = cells.length > 0 && cells.every((c, i) => cellGridFold(c).length === width || (i === 0 && fronted) || (i === cells.length - 1 && cellGridFold(c).length < width))
+    // an uneven cut (the card's uneven): short and long cells beside each other
+    // are still one cut when short groups and a long piece are both there
+    const uneven = !grid && cells.filter((c) => c.length <= 2).length >= 2 && cells.some((c) => c.length >= 6) && cells.every((c) => c.length <= 8)
     const flat = cells.join("")
     // the same body as the key test reads it (cellGridFold, as the card folds)
     const flatN = cellGridFold(flat)
@@ -1949,22 +1968,21 @@ const cellGrid = (s, from = 0) => {
       k = Math.max(k + 1, readEnd)
       continue
     }
-    const strong = cells.filter((c, i) => { const n = cellGridFold(c); return /\d/.test(n) || CELL_CASEY(n) || (i === 0 && CELL_FRONT.test(n)) }).length
     // a front-led body is the shape spacedKey masks, and a lower-case one cut
     // in cells carries no case or digit for isKey ("ms-abcd efgh … yz01"): the
     // front and msKey are the same judgement its own body reading makes. Only
     // the ms- front gets it: sk- is a flag's prefix too ("sk-preset linux
     // macos amd64" was masked as a key)
-    if (((grid && cells.length >= 3) || (wide0 && cells.length >= 2)) && cells.length <= 512 && strong >= 2 && flat.length >= 20 && flat.length <= 4096 && !cellGridWideBeside(s, k, -1) && !cellGridWideBeside(s, stop, 1) && (isKey(flatN) || (/^ms-/i.test(flatN) && msKey(flatN)))) {
+    if (((grid && cells.length >= 3) || (wide0 && cells.length >= 2) || uneven) && cells.length <= 512 && strongRun >= 2 && flat.length >= 20 && flat.length <= 4096 && !cellGridWideBeside(s, k, -1) && !cellGridWideBeside(s, stop, 1) && (isKey(flatN) || (/^ms-/i.test(flatN) && msKey(flatN)))) {
       // the gap before a closing bracket is the frame's, as in every other
       // reading: "(ghp_…7890)", not "(ghp_…7890 )"
       let end = stop
       let t = end
       while (t < s.length && /[ \t\u00a0\u3000]/.test(s[t])) t += 1
       if (t > end && /[)\]}"'`>]/.test(s[t] ?? "")) end = t
-      return { preEnd: k, bodyAt, body: wide0 ? flatN : flat, bodyEnd: end }
+      return { preEnd: k, bodyAt, body: flatN, bodyEnd: end }
     }
-    k = Math.max(k + 1, strong === 0 && !fronted ? readEnd : ends.length > 0 ? ends[0] : k)
+    k = Math.max(k + 1, strongRun === 0 && !fronted ? readEnd : ends.length > 0 ? ends[0] : k)
   }
   return null
 }
