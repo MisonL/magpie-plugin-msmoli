@@ -663,17 +663,19 @@ The terms and risks are in
   retries in half an hour, and the retry reads the ledger first, so nothing is
   lost.
 - **What a 401 or a 403 says.** A 401 marks the sign-in expired only when it
-  reads as the site refusing the token — "unauthorized", an invalid or expired
-  token, a refusal in Chinese ("请先登录", "登录状态已失效"), an empty JSON
-  object, or a code of 401 — and never when it names the path instead ("proxy
-  authentication required", a gateway's page, a bodyless 401). The mark is
-  carried on a usage read (`signIn`), which magpie keeps; a check-in's answer
-  cannot carry it, because the host reads only its outcome, credit, streak,
-  message and time — so when the refusal arrives there, the message says it
-  ("但登录已失效（HTTP 401），请重新登录"). A 403 is reported as ModelScope's
-  risk control only when it carries ModelScope's shape; a proxy's 403 page is
-  reported as an ordinary refusal. A sign-in that was refused after the day's
-  credits landed reports the expiry but keeps the day's answer.
+  reads as the site refusing the token — an HTTP 401 in the site's own words
+  ("unauthorized", an invalid or expired token, a refusal in Chinese
+  ("请先登录", "登录状态已失效"), an empty JSON object), or a 200 envelope
+  whose `Code`/`code` is 401 — and never when it names the path instead
+  ("proxy authentication required", a gateway's page, a bodyless 401). The
+  mark is carried on a usage read (`signIn`), which magpie keeps; a
+  check-in's answer cannot carry it, because the host reads only its outcome,
+  credit, streak, message and time — so when the refusal arrives there, the
+  message says it ("但登录已失效（HTTP 401），请重新登录"). A 403 is reported
+  as ModelScope's risk control only when it carries ModelScope's shape; a
+  proxy's 403 page is reported as an ordinary refusal. A sign-in that was
+  refused after the day's credits landed reports the expiry but keeps the
+  day's answer.
 - **A body it doesn't understand is not read as zero.** A missing `data`, a
   list where an object belongs, a missing or non-numeric `available_balance`:
   a balance like that is a failure with its reason, because "0 魔粒可用"

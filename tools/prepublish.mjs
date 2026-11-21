@@ -19,7 +19,7 @@
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 
-// Today's suite is 793 tests (the plain run); the floor leaves room for a
+// Today's suite is 825 tests (the plain run); the floor leaves room for a
 // legitimate consolidation while still catching a whole file that vanished.
 // (Keep this number current: a stale one reads as a suite that shrank. It sat
 // at 600 while the comment said 726, so about 160 tests could have gone
@@ -39,7 +39,7 @@ const FILES = ["test/plugin.test.mjs", "test/sync.test.mjs", "test/style.test.mj
 // mode passed" at 762 — the line-ending, trailing-whitespace and indentation
 // checks had silently gone, and the publish went out on a suite missing a
 // file's worth of guards. So each file is also run on its own and held to a
-// floor of its own. The numbers are today's counts (472 / 314 / 7) less room
+// floor of its own. The numbers are today's counts (492 / 326 / 7) less room
 // for a legitimate consolidation; keep them current the way MIN_TESTS is.
 const PER_FILE = [
   { file: "test/plugin.test.mjs", min: 430 },
@@ -107,11 +107,21 @@ const passedOf = (out) => lastSummary(out, SUMMARY_PASS)
 // that names a failure is the gate's own evidence either way. Bun writes
 // " 1 fail", Node writes "ℹ fail 1" and the TAP form "# fail 1"
 const failedOf = (out) => lastSummary(out, SUMMARY_FAIL) || 0
-// the probe's own name has to be reported as a test, not merely printed: a
-// decoy's log line carrying the name stood in for the probe itself
+// the probe's own name has to be reported as a test result, not merely
+// printed: a decoy's log line carrying the name stood in for the probe itself.
+// A result row has a shape — the spec reporter writes "✔ name (0.3ms)", the
+// TAP reporter "ok 1 - name" — and a log line has neither the timing nor the
+// dash (measured: a test printing "ok 1 the ticking clock shim is in effect
+// for test files" matched a gate that only asked for ok/✔ somewhere before
+// the name). What output cannot prove is the probe's own body: a probe test
+// edited down to no assertions still prints a passing row, and only the count
+// delta beside this check stands against that — a gate that reads output
+// cannot read the test it is reading the output of.
 const probeRan = (out, name) => {
   const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  return new RegExp(`(?:^|\\s)(?:[✔✖✓✗]|ok \\d+|not ok \\d+)[^\\n]*${esc}`, "m").test(out)
+  const spec = new RegExp(`^\\s*[✔✖✓✗] ${esc} \\(\\d+(?:\\.\\d+)?\\s?ms\\)$`, "m")
+  const tap = new RegExp(`^(?:not )?ok \\d+ - ${esc}$`, "m")
+  return spec.test(out) || tap.test(out)
 }
 
 let failed = false

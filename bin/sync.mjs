@@ -1038,7 +1038,7 @@ const isKey = (word, runs = true) => {
   // component that is only piecewise key-like cannot be told from a folder
   // without taking the folder away. Two segments of 12+ characters mixing
   // cases is the whole of this arm, and it is what keeps
-  // /Users/mison/Documents/SomeLongDirectoryName a path
+  // /Users/someone/Documents/SomeLongDirectoryName a path
   const pieces = word.split(/[\\/]/)
   const segs = pieces.filter((seg) => seg.length >= 12 && /[a-z]/.test(seg) && /[A-Z]/.test(seg))
   if (!PATHY.test(word) && segs.length >= 2) return true
