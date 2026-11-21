@@ -2497,7 +2497,7 @@ const maskCellCut = (s, letters = true) => {
     // are short groups and one long piece, and the joined body still reads
     // as a key (measured: the mask stopped at the first long cell, leaving
     // "MnOp3456" and the rest of the key behind it)
-    const uneven = !grid && cells.filter((c) => c.length === 1).length >= 2 && cells.some((c) => c.length >= 6) && cells.every((c) => c.length <= 8) && cells.filter((c) => c.length >= 4 && /\d/.test(cellFold(c))).length >= 2
+    const uneven = !grid && cells.filter((c) => c.length <= 2).length >= 2 && cells.some((c) => c.length >= 6) && cells.every((c) => c.length <= 8) && cells.filter(cellProse).length < 2 && cells.filter((c) => c.length >= 4 && /\d/.test(cellFold(c))).length >= 2
     const flat = cells.join("")
     // the same body as the key test reads it: a cut written in full-width
     // characters is the key it folds to, and the fold does not change a

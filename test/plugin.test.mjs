@@ -14390,6 +14390,7 @@ test("a key cut into full-width cells is masked whole", () => {
   ["wideFirstBar", "ＡｂＣｄ｜1234｜EfGh｜5678｜IjKl｜9012"],
   // short and long cells beside each other in one cut
   ["mixedWidth", "A | bCd1234E | f | Gh5678Ij | K | l9012MnO | p |3456QrSt |7 |890"],
+  ["mixedWidth2", "AbCd | 12 | 34EfGh | 5678IjKl | 901 | 2MnOp | 3456 | Qr | St7890"],
   ]) {
     for (const [sink, out] of [
       ["card", testables.cardText(v, "",600)],
