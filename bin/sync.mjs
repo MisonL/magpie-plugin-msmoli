@@ -1802,7 +1802,12 @@ const cellGridNamed = (cell) => {
 }
 const cellGridProse = (w) => /^[a-z]+$/.test(w) && /[aeiouy]/.test(w) && !/^[0-9a-f]+$/i.test(w)
 const cellGridWide = (c) => c !== undefined && c.charCodeAt(0) > 0x7f
-const cellGridWideKey = (c) => { if (!cellGridWide(c)) return false; const n = c.normalize("NFKC"); return n !== "." && /[A-Za-z0-9+/=_.-]/.test(n) }
+const cellGridWideKey = (c) => {
+  if (!cellGridWide(c)) return false
+  const n = c.normalize("NFKC")
+  // a punctuation-only fold is a break (the card's cellWideKey)
+  return n !== "." && (n.length === 1 ? /[A-Za-z0-9+/=_.-]/.test(n) : /[A-Za-z0-9]/.test(n) && /^[A-Za-z0-9+/=_.-]+$/.test(n))
+}
 const cellGridCh = (c) => c !== undefined && (CELLCH.test(c) || cellGridWideKey(c))
 // the character at i as one code point (the card's cellAt)
 const cellGridAt = (s, i) => { const cp = s.codePointAt(i); return cp >0xffff ? String.fromCodePoint(cp) : s[i] }
@@ -1824,10 +1829,13 @@ const cellGridAlnum = (c) => {
 // too (measured: "Ａ｜Ｋ｜Ｉ｜…" printed whole)
 const cellGridGap = (c) => {
   if (c === undefined) return false
+  // the mask watermark is a break, not a separator: read as a gap it made a
+  // page of already-masked values one grid and masked the page whole
+  if (c === "…") return false
   if (CELL_GRIDGAP.test(c)) return true
   if (c.charCodeAt(0) <= 0x7f) return false
   const n = c.normalize("NFKC")
-  return n === "." || CELL_GRIDGAP.test(n)
+  return /^\.+$/.test(n) || CELL_GRIDGAP.test(n)
 }
 // and whether a body holds key material once folded (the card's cellHasAlnum)
 const cellGridHasAlnum = (s) => /[A-Za-z0-9]/.test(s) || /[^\x00-\x7f]/.test(s) && /[A-Za-z0-9]/.test(cellGridFold(s))
@@ -1959,7 +1967,7 @@ const cellGrid = (s, from = 0) => {
     const grid = cells.length > 0 && cells.every((c, i) => cellGridFold(c).length === width || (i === 0 && fronted) || (i === cells.length - 1 && cellGridFold(c).length < width))
     // an uneven cut (the card's uneven): short and long cells beside each other
     // are still one cut when short groups and a long piece are both there
-    const uneven = !grid && cells.filter((c) => c.length <= 2).length >= 2 && cells.some((c) => c.length >= 6) && cells.every((c) => c.length <= 8)
+    const uneven = !grid && cells.filter((c) => c.length <= 2).length >= 2 && cells.some((c) => c.length >= 6) && cells.every((c) => c.length <= 8) && cells.filter((c) => c.length >= 4 && /\d/.test(cellGridFold(c))).length >= 2
     const flat = cells.join("")
     // the same body as the key test reads it (cellGridFold, as the card folds)
     const flatN = cellGridFold(flat)

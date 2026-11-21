@@ -2282,7 +2282,13 @@ const cellProse = (w) => /^[a-z]+$/.test(w) && /[aeiouy]/.test(w) && !/^[0-9a-f]
 const cellWide = (c) => c !== undefined && c.charCodeAt(0) > 0x7f
 // a full-width character that is key material folded ("ｍｓ－ＬｍＮｏ"): the
 // span foldedSpans reads, which a grid on its ASCII pieces would split
-const cellWideKey = (c) => { if (!cellWide(c)) return false; const n = c.normalize("NFKC"); return n !== "." && /[A-Za-z0-9+/=_.-]/.test(n) }
+const cellWideKey = (c) => {
+  if (!cellWide(c)) return false
+  const n = c.normalize("NFKC")
+  // a fold that is punctuation alone ("‥" is "..") is a break in the cut,
+  // not material: kept, it swallowed the separators and no grid formed
+  return n !== "." && (n.length === 1 ? /[A-Za-z0-9+/=_.-]/.test(n) : /[A-Za-z0-9]/.test(n) && /^[A-Za-z0-9+/=_.-]+$/.test(n))
+}
 // a wide key character near the candidate, across the cells and gaps before
 // and after it ("… ＬｍＮｏ 2468 LmNo 2468 …" is one folded span)
 // a cell character, wide or not: a value whose first cell is folded
@@ -2313,10 +2319,13 @@ const cellAlnum = (c) => {
 // too (measured: "Ａｂ｜Ｃｄ｜…" and "Ａ｜ｂ｜Ｃ｜ｄ｜…" printed whole)
 const cellGap = (c) => {
   if (c === undefined) return false
+  // the mask watermark is a break, not a separator: read as a gap it made a
+  // page of already-masked values one grid and masked the page whole
+  if (c === "…") return false
   if (CELLRUN_GAPCH.test(c)) return true
   if (c.charCodeAt(0) <= 0x7f) return false
   const n = c.normalize("NFKC")
-  return n === "." || CELLRUN_GAPCH.test(n)
+  return /^\.+$/.test(n) || CELLRUN_GAPCH.test(n)
 }
 // and whether a body holds any key material once folded: the ASCII answer
 // decides without building the folded string
@@ -2488,7 +2497,7 @@ const maskCellCut = (s, letters = true) => {
     // are short groups and one long piece, and the joined body still reads
     // as a key (measured: the mask stopped at the first long cell, leaving
     // "MnOp3456" and the rest of the key behind it)
-    const uneven = !grid && cells.filter((c) => c.length <= 2).length >= 2 && cells.some((c) => c.length >= 6) && cells.every((c) => c.length <= 8)
+    const uneven = !grid && cells.filter((c) => c.length <= 2).length >= 2 && cells.some((c) => c.length >= 6) && cells.every((c) => c.length <= 8) && cells.filter((c) => c.length >= 4 && /\d/.test(cellFold(c))).length >= 2
     const flat = cells.join("")
     // the same body as the key test reads it: a cut written in full-width
     // characters is the key it folds to, and the fold does not change a
@@ -3810,7 +3819,7 @@ async function todayEarn(token, deadline, opts = {}) {
   gate(profile, res, body, parsed, token, "账单查询失败")
   const day = todayCN()
   const first = recordsOf(body)
-  const { all, pages, complete, scanComplete, last, seenPages, seenRows, total, refused } = await dayRows(profile, token, day, first, deadline, body, opts)
+  const { all, pages, complete, scanComplete, last, seenPages, seenRows, total, refused, reason } = await dayRows(profile, token, day, first, deadline, body, opts)
   return {
     profile,
     day,
@@ -3819,6 +3828,7 @@ async function todayEarn(token, deadline, opts = {}) {
     complete,
     scanComplete,
     refused,
+    reason,
     last,
     seenPages,
     seenRows,
@@ -3958,6 +3968,10 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
   // the token was refused on a courtesy page: the numbers stand, and the
   // account is expired (the caller reports it)
   let refused = false
+  // why a later page failed, when it failed: the caller keeps its numbers
+  // and their floor, and the reason is what tells a dead link, risk control
+  // and a service fault apart. Empty when the walk proved its end.
+  let reason = ""
   // the walk ended on a page that reached back past the day: the only ending
   // where another page can still hold a running grant
   let endedByOlder = false
@@ -4045,6 +4059,7 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
       // partial-walk path, the card would say the ledger was cut short for
       // its own reasons. It is the cancel, and it is said.
       if (e?.cancelled === true) throw e
+      reason = whyOf(e) || "请求失败"
       if (dayDone) complete = true
       break
     }
@@ -4082,6 +4097,10 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
       break
     }
     if (!got.parsed || res.status !== 200 || !okOf(got.body)) {
+      // the page's own words are kept for the floor: a later page that met a
+      // dead link, risk control or a service fault used to leave the same
+      // "ledger not read to its end" and nothing else
+      reason = res.status === 403 && riskShaped(got.body) ? RISK : saidOf(got.body, token) || `HTTP ${res.status}`
       if (dayDone) complete = true
       break
     }
@@ -4100,6 +4119,7 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
       // and cannot end the walk on that number.
       pageTotal = totalOf(got.body, raw)
     } catch {
+      reason = "账单格式不认识"
       if (dayDone) complete = true
       break
     }
@@ -4211,6 +4231,7 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
     // a walk that was not asked to scan at all never started one
     scanComplete: !expiry || scanDone,
     refused,
+    reason,
     total,
     last: complete || !rows.length ? null : rows,
     seenPages,
@@ -4599,7 +4620,7 @@ export async function MsmoliPlugin(input) {
           // grant absent: the row may sit on the page that failed, and the
           // touch-then-diff would report a row nobody read as this run's gain.
           // `failed` is the one outcome the host retries.
-          if (!before.complete && !claimed) return { outcome: "failed", message: "账单读取不完整，稍后自动重试", ...(marks.expired ? { signIn: "expired" } : {}) }
+          if (!before.complete && !claimed) return { outcome: "failed", message: "账单读取不完整，稍后自动重试" + (before.reason ? `（${before.reason}）` : ""), ...(marks.expired ? { signIn: "expired" } : {}) }
           // What this run granted is the ledger's growth, not a new key: the
           // rows are aggregated per (day, type, rule_key, model_tier), so a
           // second grant of a rule already in today's page grows that row's
@@ -4777,12 +4798,12 @@ export async function MsmoliPlugin(input) {
               return withStreak({
                 outcome: "claimed",
                 credit: bornToday.credit,
-                message: `领取 ${bornToday.credit} 魔粒：${bornToday.which}` + (before.complete ? "" : "；账单未读完，数字偏低"),
+                message: `领取 ${bornToday.credit} 魔粒：${bornToday.which}` + (before.complete ? "" : "；账单未读完，数字偏低" + (before.reason ? `（${before.reason}）` : "")),
                 ...(marks.expired ? { signIn: "expired" } : {}),
               }, await streakOf(before.all, before.day, before.total, ledgerReader(profile, token, deadline, before.pages, before.last, before.seenPages, before.seenRows, marks), deadline), marks)
             }
             if (!before.complete) {
-              return { outcome: "failed", message: "账单读取不完整，稍后自动重试", ...(marks.expired ? { signIn: "expired" } : {}) }
+              return { outcome: "failed", message: "账单读取不完整，稍后自动重试" + (before.reason ? `（${before.reason}）` : ""), ...(marks.expired ? { signIn: "expired" } : {}) }
             }
             continue
           }
@@ -4800,7 +4821,7 @@ export async function MsmoliPlugin(input) {
             return withStreak({
               outcome: "claimed",
               credit: gain.credit,
-              message: `领取 ${gain.credit} 魔粒：${gain.which}` + (page.complete ? "" : "；账单未读完，数字偏低"),
+              message: `领取 ${gain.credit} 魔粒：${gain.which}` + (page.complete ? "" : "；账单未读完，数字偏低" + (page.reason ? `（${page.reason}）` : "")),
               ...(marks.expired ? { signIn: "expired" } : {}),
             }, streak, marks)
           }
@@ -4877,7 +4898,7 @@ export async function MsmoliPlugin(input) {
                 (shown === null ? "今日已领取" : `今日已领取 ${shown} 魔粒`) +
                 (which ? `（${which}）` : "") +
                 (shown === null ? "；到账金额读不出来，数字略过" : "") +
-                (before.complete ? "" : "；账单未读完，数字偏低"),
+                (before.complete ? "" : "；账单未读完，数字偏低" + (before.reason ? `（${before.reason}）` : "")),
               ...(marks.expired ? { signIn: "expired" } : {}),
             }, await streakOf(before.all, before.day, before.total, ledgerReader(profile, token, deadline, before.pages, before.last, before.seenPages, before.seenRows, marks), deadline), marks)
           }
@@ -4909,7 +4930,7 @@ export async function MsmoliPlugin(input) {
           // `failed` — the one outcome the host retries, which reads the
           // ledger again half an hour later.
           if (!again.complete) {
-            return { outcome: "failed", message: "账单读取不完整，稍后自动重试", ...(marks.expired ? { signIn: "expired" } : {}) }
+            return { outcome: "failed", message: "账单读取不完整，稍后自动重试" + (again.reason ? `（${again.reason}）` : ""), ...(marks.expired ? { signIn: "expired" } : {}) }
           }
           const hourCN = Math.floor(minuteCN() / 60)
           // Before noon the host re-asks a provisional answer every half hour,
@@ -5158,7 +5179,7 @@ export async function MsmoliPlugin(input) {
             // whole (the page cap, the budget): then the earliest expiry seen is
             // a floor, not the answer, and the card says so rather than naming a
             // later time as if it were settled
-            const part = (walked.complete ? "" : " · 账单未读完，数字偏低") + (walked.scanComplete || !earliest ? "" : " · 到期时间可能更早")
+            const part = (walked.complete ? "" : " · 账单未读完，数字偏低" + (walked.reason ? `（${walked.reason}）` : "")) + (walked.scanComplete || !earliest ? "" : " · 到期时间可能更早")
 
             // last, and awaited: the card must not be answered ahead of the
             // write (a poll answered before it would race the very retry this

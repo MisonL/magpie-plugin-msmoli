@@ -12905,6 +12905,56 @@ test("a lone embedded 401 beside a dead link is not an expiry", async () => {
   }
 })
 
+test("ordinary sentences with numbers are not a grid", () => {
+  // uneven accepted any sentence with two short words, a long word and two
+  // strong cells: "Please retry in 30 seconds after build42" became
+  // "Plea…ld42" on all six outputs.
+  const v = "Please retry in 30 seconds after build42"
+  for (const [tag, out] of [
+    ["maskAll", testables.maskAll(v, true)],
+    ["card", testables.cardText(v, "", 600)],
+    ["name", testables.nameText(v, "", 600)],
+    ["host", testables.hostText(v)],
+    ["arg", arg(v)],
+    ["scrub", scrub(`child: ${v}`)],
+  ]) {
+    const want = tag === "scrub" ? `child: ${v}` : v
+    assert.equal(String(out), want, `${tag} masked a plain sentence: ${JSON.stringify(out)}`)
+  }
+})
+
+test("a later page that fails says why, not just that it failed", async () => {
+  // dayRows dropped the page's own failure on every non-cancel break: the
+  // card and the check-in both said only "ledger not read to its end", so a
+  // dead link, risk control and a service fault read as the same sentence
+  const records = Array.from({ length: 50 }, (_, i) => ({ id: i + 1, gmt_created: today, type: "SPEND_CONFIRM", total_amount: 1 }))
+  const cases = [
+    ["network", () => { throw new TypeError("fetch failed") }, /网络不通/],
+    ["risk", () => reply({ status: 403, body: { Success: false, Code: 403, Message: "RiskControl" } }), /风控/],
+    ["busy", () => reply({ status: 500, body: { success: false, message: "system busy" } }), /system busy|HTTP 500/],
+  ]
+  for (const [tag, page2, want] of cases) {
+    testables.sites.clear()
+    const real = globalThis.fetch
+    globalThis.fetch = async (url) => {
+      const u = new URL(url)
+      if (u.pathname.endsWith("/login/info")) return reply({ body: { success: true, data: { Name: "" } } })
+      if (u.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 100 } } })
+      if (u.searchParams.get("page") === "1") return reply({ body: { success: true, data: { total: 51, records } } })
+      return page2()
+    }
+    try {
+      const p = await MsmoliPlugin({ directory: "/nonexistent-review" })
+      const u = await p.auth.usage(async () => ({ type: "api", key: `ms-pagecause-${tag}-0000` }))
+      assert.match(JSON.stringify(u), want, `${tag}: usage lost the page's words: ${JSON.stringify(u)}`)
+      const c = await p.auth.checkin(async () => ({ type: "api", key: `ms-pagecause-${tag}-1111` }))
+      assert.match(String(c.message ?? ""), want, `${tag}: check-in lost the page's words: ${JSON.stringify(c)}`)
+    } finally {
+      globalThis.fetch = real
+    }
+  }
+})
+
 test("a ledger whose total grows is walked to its new end, not the old one", async () => {
   // streakOf stopped when the rows it held reached the `total` of the FIRST
   // page. A ledger whose second page says it holds one row more (a grant
@@ -14304,6 +14354,7 @@ test("a key cut into full-width cells is masked whole", () => {
   ["dotFF0E", [...body].join("\uff0e")],
   ["dotFE52", [...body].join("\ufe52")],
   ["dot2024", [...body].join("\u2024")],
+  ["dot2025", [...body].join("\u2025")],
   ["vert2223", [...body].join("\u2223")],
   ["vert00A6", [...body].join("\u00a6")],
   ["vert2758", [...body].join("\u2758")],
@@ -14344,6 +14395,17 @@ test("a sentence's dashes and marks are not a cut", () => {
     assert.equal(testables.maskAll(v, true), v, `the card masked a sentence's marks: ${JSON.stringify(v)} -> ${JSON.stringify(testables.maskAll(v, true))}`)
     assert.equal(arg(v), v, `the CLI masked a sentence's marks: ${JSON.stringify(v)} -> ${JSON.stringify(arg(v))}`)
   }
+})
+
+test("a page of masks is not read as one cut", () => {
+  // The ellipsis is a mask's spelling, not a cut's separator: read as a gap
+  // it made a page of already-masked values one grid, and the whole page
+  // came back as a single mask (maskAll turned it into a few characters).
+  const s = ("ms-a…bcd1 ".repeat(3999)) + "ms-a…bcd1"
+  assert.equal(testables.maskAll(s, true), s)
+  assert.equal(testables.cardText(s, "", 200000), s)
+  assert.equal(testables.nameText(s, "", 200000), s)
+  assert.equal(testables.hostText(s), s.slice(0,200))
 })
 
 test("a cut one character a time behind a bar is masked on every sink", () => {

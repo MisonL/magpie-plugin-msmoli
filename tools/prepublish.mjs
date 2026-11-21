@@ -19,7 +19,7 @@
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 
-// Today's suite is 831 tests (the plain run); the floor leaves room for a
+// Today's suite is 834 tests (the plain run); the floor leaves room for a
 // legitimate consolidation while still catching a whole file that vanished.
 // (Keep this number current: a stale one reads as a suite that shrank. It sat
 // at 600 while the comment said 726, so about 160 tests could have gone
@@ -39,7 +39,7 @@ const FILES = ["test/plugin.test.mjs", "test/sync.test.mjs", "test/style.test.mj
 // mode passed" at 762 — the line-ending, trailing-whitespace and indentation
 // checks had silently gone, and the publish went out on a suite missing a
 // file's worth of guards. So each file is also run on its own and held to a
-// floor of its own. The numbers are today's counts (498 / 326 / 7) less room
+// floor of its own. The numbers are today's counts (501 / 326 / 7) less room
 // for a legitimate consolidation; keep them current the way MIN_TESTS is.
 const PER_FILE = [
   { file: "test/plugin.test.mjs", min: 430 },
