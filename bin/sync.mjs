@@ -1787,7 +1787,7 @@ function chunked(text) {
   return pieces
 }
 
-const CELL_GRIDGAP = /[ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027\r\n]/
+const CELL_GRIDGAP = /[ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027\u30fb\r\n]/
 // cellGrid is maskCellCut's walk on the CLI side: a grid of three or more
 // equal cells of key characters, joined by whitespace, a bar or a middle dot,
 // whose joined body reads as a key. The first cell may be a front-led one of
@@ -1852,6 +1852,9 @@ const cellGrid = (s, from = 0) => {
     // equal cells rescanned its own tail from every start: 20 s at 320 KB)
     let flatLen = 0
     let over = false
+    // a head written entirely in full-width characters may be followed by
+    // cells of another width (the card's wide0, kept in step with it)
+    let wide0 = false
     let runEnd = k
     for (;;) {
       // as on the card, the scan stops one character past the longest cap
@@ -1868,7 +1871,8 @@ const cellGrid = (s, from = 0) => {
       }
       // as on the card, the first cell may carry the front plus one cell
       const fr = cells.length === 0 ? cellGridFront(body) : null
-      const cap = fr ? 24 : 8
+      if (cells.length === 0) wide0 = [...body].length > 0 && [...body].every((c) => cellGridWideKey(c))
+      const cap = fr ? 24 : wide0 ? 26 : 8
       // a cut one character at a time is cells of one, and a lone mark of the
       // cut is a cell when an alnum cell follows it (the card's reading)
       let bridged = false
@@ -1889,7 +1893,11 @@ const cellGrid = (s, from = 0) => {
       if (!over && (cells.length >= 512 || flatLen > 4096)) over = true
       let g = q
       while (g < s.length && g - q <= 8 && cellGridGap(s[g])) g += 1
-      if (g === q || g >= s.length || !cellGridCh(s[g])) break
+      if (g === q || g >= s.length || !cellGridCh(s[g])) {
+        // a run that goes on without a gap is one cut, not a grid's next cell
+        // (the card's reading, kept in step with it)
+        if (!wide0 || g !== q || g >= s.length || !cellGridCh(s[g]) || flatLen >= 4096) break
+      }
       p = g
     }
     const readEnd = ends.length > 0 ? ends[ends.length - 1] : k
@@ -1947,14 +1955,14 @@ const cellGrid = (s, from = 0) => {
     // front and msKey are the same judgement its own body reading makes. Only
     // the ms- front gets it: sk- is a flag's prefix too ("sk-preset linux
     // macos amd64" was masked as a key)
-    if (grid && cells.length >= 3 && cells.length <= 512 && strong >= 2 && flat.length >= 20 && flat.length <= 4096 && !cellGridWideBeside(s, k, -1) && !cellGridWideBeside(s, stop, 1) && (isKey(flatN) || (/^ms-/i.test(flatN) && msKey(flatN)))) {
+    if (((grid && cells.length >= 3) || (wide0 && cells.length >= 2)) && cells.length <= 512 && strong >= 2 && flat.length >= 20 && flat.length <= 4096 && !cellGridWideBeside(s, k, -1) && !cellGridWideBeside(s, stop, 1) && (isKey(flatN) || (/^ms-/i.test(flatN) && msKey(flatN)))) {
       // the gap before a closing bracket is the frame's, as in every other
       // reading: "(ghp_…7890)", not "(ghp_…7890 )"
       let end = stop
       let t = end
       while (t < s.length && /[ \t\u00a0\u3000]/.test(s[t])) t += 1
       if (t > end && /[)\]}"'`>]/.test(s[t] ?? "")) end = t
-      return { preEnd: k, bodyAt, body: flat, bodyEnd: end }
+      return { preEnd: k, bodyAt, body: wide0 ? flatN : flat, bodyEnd: end }
     }
     k = Math.max(k + 1, strong === 0 && !fronted ? readEnd : ends.length > 0 ? ends[0] : k)
   }

@@ -2242,7 +2242,7 @@ const maskCaps = (s, letters) => {
 // the joined run still has to prove itself key material — two cells with a
 // digit, mixed case, hex or a vendor front on the first.
 const CELLRUN_CH = /[A-Za-z0-9+/=_.-]/
-const CELLRUN_GAPCH = /[ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027\r\n]/
+const CELLRUN_GAPCH = /[ \t\u00a0\u3000|\u00b7\u2022\u2219\u2027\u30fb\r\n]/
 const CELL_MS = /^ms-/i
 // a value a person wrote behind its name ("x=…", "MS_TOKEN=…") keeps the name:
 // a run of letters, digits and underscores with a lower-case letter or an

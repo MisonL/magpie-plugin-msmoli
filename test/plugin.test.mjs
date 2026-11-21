@@ -14220,6 +14220,14 @@ test("a key cut into full-width cells is masked whole", () => {
   // no ASCII case, so the over branch counted no strength and printed the raw
   // text while the mixed body's oracle compared against another shape
   const limitKeys = { limit511: "AbCd".repeat(511), limit: "AbCd".repeat(513) }
+  const overHead = "AbCdEfGhIjKlMnOpQrStWxYz012345"
+  const overKey = overHead + "AbCd1234".repeat(511)
+  const overWideHead = [...overHead].map((c) => String.fromCharCode(c.charCodeAt(0) +0xfee0)).join("")
+  const overCells = overKey.slice(overHead.length).match(/.{1,8}/g)
+  // the over-limit shape carries its own key too: its head is full-width and
+  // the walk's first-cell cap used to give up before the over branch ran, so
+  // the CLI masked only the ASCII tail from a later start
+  const caseKeys = { ...limitKeys, overwideContiguous: overKey, overwideSpaced: overKey }
   for (const [tag, v] of [
     ["bar", cells.join(" | ")],
     ["space", cells.join(" ")],
@@ -14231,6 +14239,10 @@ test("a key cut into full-width cells is masked whole", () => {
     // separators written full-width are the cut's too
     ["widegap", cells.join("\uff5c")],
     ["widechars", [...wide].join(" \uff5c ")],
+  ["dotFF65", [...wide].join("\uff65")],
+  ["dot30FB", [...wide].join("\u30fb")],
+  ["overwideContiguous", overWideHead + overCells.join(" | ")],
+  ["overwideSpaced", overWideHead + " | " + overCells.join(" | ")],
   ]) {
     for (const [sink, out] of [
       ["card", testables.cardText(v, "",600)],
@@ -14238,7 +14250,7 @@ test("a key cut into full-width cells is masked whole", () => {
       ["arg", arg(v)],
       ["scrub", scrub(`child: ${v}`)],
     ]) {
-      assert.equal(leakOfKey(out, limitKeys[tag] ?? body), "", `${sink} left key material (${tag}): ${JSON.stringify(out)}`)
+      assert.equal(leakOfKey(out, caseKeys[tag] ?? body), "", `${sink} left key material (${tag}): ${JSON.stringify(out)}`)
   assert.match(out, /\u2026/, `${sink} masked nothing (${tag}): ${JSON.stringify(out)}`)
     }
   }
