@@ -250,6 +250,11 @@ const awaitsSignIn = (body) => {
   if (String(code ?? "") === "401") return true
   return said !== "" && signInWords.test(said)
 }
+// A cancel is marked so a layer above can tell it from a failure that merely
+// happened while the signal was already aborted: relabelling a real error as
+// "cancelled" hides what the site or the read actually said, and letting a
+// cancel fall into a failure path hides that the poll was cancelled at all.
+const cancelError = () => Object.assign(new Error("用量查询已取消"), { cancelled: true })
 async function siteRead(token, path, deadline = Infinity, { signal = null } = {}) {
   const known = sites.get(token)
   const order = known ? [known, ...SITES.filter((p) => p !== known)] : SITES
@@ -276,11 +281,16 @@ async function siteRead(token, path, deadline = Infinity, { signal = null } = {}
     // A cancelled poll's answer is thrown away, so neither site is worth
     // asking: the first read's own cancel is the answer, and probing the
     // other site after it would send a request for nothing.
-    if (signal?.aborted) throw new Error("用量查询已取消")
+    if (signal?.aborted) throw cancelError()
     let got
     try {
       got = await json(profile.site, token, path, deadline, { signal })
     } catch (e) {
+      // a cancel this hook's own signal took is the caller's answer, not a
+      // reason to move on: kept as `down`, it was overruled by an earlier
+      // site's failure at the end of the walk, and a cancelled poll answered
+      // with that failure instead of saying it was cancelled
+      if (e?.cancelled === true) throw e
       // A timeout is the link, not the site, and the remembered site may be
       // the stale half of a re-keyed sign-in — the same state the 401 branch
       // exists for. The second read is bounded by the hook's own deadline, so
@@ -349,7 +359,7 @@ async function siteRead(token, path, deadline = Infinity, { signal = null } = {}
 }
 
 async function json(site, token, path, deadline = Infinity, { signal = null } = {}) {
-  if (signal?.aborted) throw new Error("用量查询已取消")
+  if (signal?.aborted) throw cancelError()
   const left = deadline - Date.now()
   if (left <= 0) throw new Error("预算已用完，本次请求未发出")
   const budget = Math.min(TIMEOUT_MS, left)
@@ -360,7 +370,7 @@ async function json(site, token, path, deadline = Infinity, { signal = null } = 
   // the socket still open. The host's signal aborts this request instead, and
   // the abort reason is not "timeout" — a cancel reported as a timeout would
   // send siteRead on to the other site for a second wasted request.
-  const onCancel = () => ctl.abort(new Error("用量查询已取消"))
+  const onCancel = () => ctl.abort(cancelError())
   signal?.addEventListener?.("abort", onCancel, { once: true })
   // The cap holds even for a fetch that does not listen to its signal: magpie
   // puts its own fetch in when a proxy is set, and its CONNECT dial runs on a
@@ -420,7 +430,7 @@ async function json(site, token, path, deadline = Infinity, { signal = null } = 
         ctl.abort(new Error("read abandoned"))
       } catch {}
     }
-    throw signal?.aborted ? new Error("用量查询已取消") : saidFailure(e, ctl, budget)
+    throw e?.cancelled === true ? e : saidFailure(e, ctl, budget)
   } finally {
     // the answer is here: the timer has nothing left to guard, and one left
     // pending would hold the host's event loop open after the work is done
@@ -3531,6 +3541,9 @@ async function rememberAccountFields(client, token, learned, auth, dir, budgetEn
   // when the panel closes. A poll whose answer was thrown away has no reason
   // to take that lock a third time, so the write checks again after its last
   // read. (The cooldown below counts only a write that actually happens.)
+  // A write already handed to client.auth.set is the host's to finish:
+  // that API takes no cancel, and this is the last point the plugin can
+  // stop at.
   if (cancelled?.()) return
   if (wantName) {
     named.delete(token)
@@ -3947,7 +3960,7 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
     // before the next request: the page count is the walk's cost, and the
     // answer it feeds is already discarded by the host. Thrown out of here,
     // it reaches the caller's catch and the card says the read was cancelled.
-    if (signal?.aborted) throw new Error("用量查询已取消")
+    if (signal?.aborted) throw cancelError()
     let got
     try {
       got = await json(profile.site, token, `${TXNS}?page=${pages + 1}&page_size=${PAGE_SIZE}`, deadline, { signal })
@@ -3955,7 +3968,7 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
       // a page the cancel took is not a page that failed: swallowed into the
       // partial-walk path, the card would say the ledger was cut short for
       // its own reasons. It is the cancel, and it is said.
-      if (signal?.aborted) throw new Error("用量查询已取消")
+      if (e?.cancelled === true) throw e
       if (dayDone) complete = true
       break
     }

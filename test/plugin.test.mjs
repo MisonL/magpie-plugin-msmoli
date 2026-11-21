@@ -13469,6 +13469,79 @@ test("a usage read cancelled while a later page is in flight aborts that page", 
   }
 })
 
+test("a cancel during the other site's probe is said, not the first site's failure", async () => {
+  // siteRead remembers the first site's failure as `said` and moves on; a
+  // cancel that takes the other site's request then fell into the same catch,
+  // was kept as `down`, and the loop's end returned the first site's answer —
+  // the card read "余额查询失败：合成故障" for a poll the host had already
+  // cancelled, and the cancel was never said. A cancel belongs to the caller,
+  // whatever an earlier site answered.
+  const ac = new AbortController()
+  const calls = []
+  const real = globalThis.fetch
+  globalThis.fetch = (url, init) => {
+    const u = new URL(url)
+    calls.push(u.origin)
+    if (u.origin === CN_ORIGIN) return Promise.resolve(reply({ status:503, body: { success: false, message: "合成故障" } }))
+    return new Promise((resolve, reject) => {
+      const onAbort = () => reject(init?.signal?.reason ?? new Error("aborted"))
+      if (init?.signal?.aborted) onAbort()
+      else init?.signal?.addEventListener("abort", onAbort, { once: true })
+      queueMicrotask(() => ac.abort(new Error("panel closed")))
+      setTimeout(() => resolve(reply({ body: { success: true, data: { available_balance:5 } } })),25)
+    })
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-cancelprobe-0000-0007" }), { id: "msmoli" }, { signal: ac.signal })
+    assert.deepEqual(calls.slice().sort(), [CN_ORIGIN, INTL_ORIGIN].sort(), JSON.stringify(calls))
+    assert.match(u.error ?? "", /取消/, `the cancel was swallowed by the first site's failure: ${JSON.stringify(u)}`)
+    assert.doesNotMatch(u.error ?? "", /合成故障/, `the first site's failure stood in for the cancel: ${JSON.stringify(u)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("only a cancel this request itself took is marked as one", async () => {
+  // json's catch used to ask whether the signal was aborted by the time it
+  // ran, so a body that failed a tick before the panel closed was reported as
+  // "用量查询已取消", hiding what the read had said. The mark says which error
+  // is this hook's own cancel; any other failure keeps its message and stays
+  // unmarked for the layer above to report as itself.
+  const ac = new AbortController()
+  const reader = {
+    getReader() {
+      return {
+        read() {
+          return Promise.reject(new Error("body reset"))
+        },
+        cancel() {},
+        releaseLock() {},
+      }
+    },
+  }
+  const real = globalThis.fetch
+  globalThis.fetch = (url, init) => {
+    if (String(url).includes("/broken")) return Promise.resolve({ status:200, headers: { get: () => null }, body: reader, text: async () => "" })
+    // a request still running when the panel closes: this one the hook aborts
+    return new Promise((resolve, reject) => {
+      const onAbort = () => reject(init?.signal?.reason ?? new Error("aborted"))
+      if (init?.signal?.aborted) onAbort()
+      else init?.signal?.addEventListener("abort", onAbort, { once: true })
+      setTimeout(() => ac.abort(new Error("panel closed")))
+    })
+  }
+  try {
+    const broken = await testables.json("https://modelscope.cn", "ms-mark-0000-0009", "/broken", Date.now() +5000).then(() => null, (e) => e)
+    assert.equal(broken?.message, "body reset", `a read error must keep its own words: ${broken?.message}`)
+    assert.equal(broken?.cancelled, undefined, "a read error is not a cancel")
+    const stopped = await testables.json("https://modelscope.cn", "ms-mark-0000-0010", "/stopping", Date.now() +5000, { signal: ac.signal }).then(() => null, (e) => e)
+    assert.equal(stopped?.cancelled, true, `the hook's own cancel must be marked: ${stopped?.message}`)
+    assert.match(stopped?.message ?? "", /取消/)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("a usage read cancelled while the account write re-reads the sign-in writes nothing", async () => {
   // The guard before rememberAccountFields cannot cover a cancel that lands
   // inside it: the write re-reads the sign-in through getAuth twice before
