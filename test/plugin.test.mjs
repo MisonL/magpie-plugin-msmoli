@@ -12923,6 +12923,26 @@ test("ordinary sentences with numbers are not a grid", () => {
   }
 })
 
+test("ordinary tables are not a cut", () => {
+  // uneven read a table of ordinary fields as one mixed-width cut: the
+  // markdown row behind "latency_ms" came out as
+  // "| model | latency_msst…4456 | ok |" on all six outputs.
+  const cases = [
+    "CPU | 1 | Memory | 2048 | Disk | 2 | Status | OK",
+    "| model | latency_ms | status |\n| Qwen3 | 123 | ok |\n| GLM-4 | 456 | ok |",
+    "ID | Name | Version | Status\n1 | Alice | v1.2.3 | OK",
+  ]
+  for (const v of cases) {
+    assert.equal(testables.maskAll(v, true), v, `the card masked a table: ${JSON.stringify(v)}`)
+    for (const [tag, out] of [
+      ["card", testables.cardText(v, "", 1000)],
+      ["name", testables.nameText(v, "", 1000)],
+      ["host", testables.hostText(v)],
+      ["arg", arg(v)],
+      ["scrub", scrub(v)],
+    ]) assert.ok(!String(out).includes("…"), `${tag} masked a table: ${JSON.stringify(out)}`)
+  }
+})
 test("a later page that fails says why, not just that it failed", async () => {
   // dayRows dropped the page's own failure on every non-cancel break: the
   // card and the check-in both said only "ledger not read to its end", so a

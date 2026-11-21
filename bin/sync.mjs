@@ -1967,7 +1967,7 @@ const cellGrid = (s, from = 0) => {
     const grid = cells.length > 0 && cells.every((c, i) => cellGridFold(c).length === width || (i === 0 && fronted) || (i === cells.length - 1 && cellGridFold(c).length < width))
     // an uneven cut (the card's uneven): short and long cells beside each other
     // are still one cut when short groups and a long piece are both there
-    const uneven = !grid && cells.filter((c) => c.length <= 2).length >= 2 && cells.some((c) => c.length >= 6) && cells.every((c) => c.length <= 8) && cells.filter((c) => c.length >= 4 && /\d/.test(cellGridFold(c))).length >= 2
+    const uneven = !grid && cells.filter((c) => c.length === 1).length >= 2 && cells.some((c) => c.length >= 6) && cells.every((c) => c.length <= 8) && cells.filter((c) => c.length >= 4 && /\d/.test(cellGridFold(c))).length >= 2
     const flat = cells.join("")
     // the same body as the key test reads it (cellGridFold, as the card folds)
     const flatN = cellGridFold(flat)
