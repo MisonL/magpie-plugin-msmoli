@@ -13944,3 +13944,47 @@ test("a grid past the card's bounds is masked whole", () => {
     }
   }
 })
+
+test("a key cut one character at a time is masked on the card", () => {
+  // Measured on ba36a4d: a lone mark of the cut ("m s - f o r e i g n - 0 1 …")
+  // ended the cell walk, and the second half of the key printed beside a mask
+  // on the card and in the host text while the CLI masked it whole. A mark
+  // bridges the cells only when an alnum cell follows it.
+  const key = "ms-foreign-0123456789abcdef0123456789abcdef"
+  const body = key.slice(3).replace(/[^A-Za-z0-9]/g, "")
+  for (const w of [1, 2, 3, 4]) {
+    const v = key.match(new RegExp(`.{1,${w}}`, "g")).join(" ")
+    for (const [tag, out] of [
+      ["card", testables.cardText(v, "", 600)],
+      ["host", testables.hostText(v)],
+      ["arg", arg(v)],
+      ["scrub", scrub(`child: ${v}`)],
+    ]) {
+      assert.equal(leakOfKey(out, body), "", `${tag} left key material at width ${w}: ${JSON.stringify(out)}`)
+    }
+  }
+  // and a single-character cut of a body with no word in it
+  const one = "VERSION2 m s - " + [..."AbCd1234EfGh5678IjKl9012MnOp3456QrSt"].join(" ")
+  for (const [tag, out] of [
+    ["card", testables.cardText(one, "", 600)],
+    ["host", testables.hostText(one)],
+    ["arg", arg(one)],
+    ["scrub", scrub(`child: ${one}`)],
+  ]) {
+    assert.equal(leakOfKey(out, "AbCd1234EfGh5678IjKl9012MnOp3456QrSt"), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+})
+
+test("a sentence's dashes and marks are not a cut", () => {
+  // the bridge is only a cell of a cut when an alnum cell follows it
+  for (const v of [
+    "one - two - three - four",
+    "2026 - 11 - 21",
+    "test - pass - fail - retry",
+    "- item - item - item - item - item - item - item",
+    "a - b - c - d - e - f - g - h - i - j - k - l",
+  ]) {
+    assert.equal(testables.maskAll(v, true), v, `the card masked a sentence's marks: ${JSON.stringify(v)} -> ${JSON.stringify(testables.maskAll(v, true))}`)
+    assert.equal(arg(v), v, `the CLI masked a sentence's marks: ${JSON.stringify(v)} -> ${JSON.stringify(arg(v))}`)
+  }
+})

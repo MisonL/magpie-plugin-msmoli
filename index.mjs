@@ -2298,7 +2298,18 @@ const maskCellCut = (s, letters = true) => {
       // ("x=AKIA" + eight characters); eight is every other cell's limit
       const fr = cells.length === 0 ? cellFront(body) : null
       const cap = fr ? 24 : 8
-      if (body.length < 2 || body.length > cap || !/[A-Za-z0-9]/.test(body)) break
+      // a cut one character at a time is cells of one, and a lone mark of the
+      // cut ("m s - f o r e i g n - 0 1 …") bridges only when an alnum cell
+      // follows it
+      let bridged = false
+      if (!/[A-Za-z0-9]/.test(body) && cells.length > 0 && body.length <= 2) {
+        let e = q
+        while (e < s.length && e - q <= 8 && CELLRUN_GAPCH.test(s[e])) e += 1
+        let e2 = e
+        while (e2 < s.length && e2 - e <= 25 && CELLRUN_CH.test(s[e2])) e2 += 1
+        bridged = /[A-Za-z0-9]/.test(s.slice(e, e2))
+      }
+      if (body.length < 1 || body.length > cap || (!/[A-Za-z0-9]/.test(body) && !bridged)) break
       if (!over) {
         cells.push(body)
         ends.push(q)
