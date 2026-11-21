@@ -4887,6 +4887,10 @@ export async function MsmoliPlugin(input) {
             // named — the user can see which ones — but the amount stops at
             // zero, the way the usage card's limit already does.
             const shown = credit === null ? null : Math.max(0, credit)
+            // the touch re-read failed after the claim was proven: the claim
+            // is still the answer, but the failure has its own words
+            // (after.reason), and they belong on the card beside it
+            const afterWhy = after?.reason ? `；补读账单未读完（${after.reason}）` : ""
             // The streak is read from the page **before** the touch here too:
             // the touch grants nothing new for an account already claimed, so
             // the two readings answer the same thing, and this one is the page
@@ -4898,7 +4902,7 @@ export async function MsmoliPlugin(input) {
                 (shown === null ? "今日已领取" : `今日已领取 ${shown} 魔粒`) +
                 (which ? `（${which}）` : "") +
                 (shown === null ? "；到账金额读不出来，数字略过" : "") +
-                (before.complete ? "" : "；账单未读完，数字偏低" + (before.reason ? `（${before.reason}）` : "")),
+                (before.complete ? "" : "；账单未读完，数字偏低" + (before.reason ? `（${before.reason}）` : "")) + afterWhy,
               ...(marks.expired ? { signIn: "expired" } : {}),
             }, await streakOf(before.all, before.day, before.total, ledgerReader(profile, token, deadline, before.pages, before.last, before.seenPages, before.seenRows, marks), deadline), marks)
           }

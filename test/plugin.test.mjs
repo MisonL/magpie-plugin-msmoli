@@ -12975,6 +12975,41 @@ test("a later page that fails says why, not just that it failed", async () => {
   }
 })
 
+test("a failed touch re-read says why on a day already claimed", async () => {
+  // The touch's re-read is what says a grant landed; when its second page
+  // fails the day is still done (the claim is the fact), but the cause used
+  // to be dropped: every failure read as a plain "今日已领取".
+  const first = [day({ total_amount: 200 }), ...Array.from({ length: 49 }, (_, i) => spend(1, i + 1))]
+  const cases = [
+    ["network", () => { throw new TypeError("fetch failed") }, /网络不通/],
+    ["risk", () => reply({ status: 403, body: { Success: false, Code: 403, Message: "RiskControl" } }), /风控/],
+    ["busy", () => reply({ status: 500, body: { success: false, message: "system busy" } }), /system busy|HTTP 500/],
+  ]
+  for (const [tag, page2, want] of cases) {
+    testables.sites.clear()
+    const real = globalThis.fetch
+    let page1 =0
+    let sawPage2 = false
+    globalThis.fetch = async (url) => {
+      const u = new URL(url)
+      if (!u.pathname.endsWith("/transactions")) return reply({ body: { Code: 200, Success: true, Data: { NickName: "alice" } } })
+      if (u.searchParams.get("page") === "2") { sawPage2 = true; return page2() }
+      page1 +=1
+      return reply({ body: { success: true, data: { page: 1, page_size: 50, total: page1 === 1 ? 50 : 51, records: first } } })
+    }
+    try {
+      const p = await MsmoliPlugin({ directory: "/nonexistent-review" })
+      const r = await p.auth.checkin(async () => ({ type: "api", key: `ms-touchcause-${tag}-2222` }))
+      assert.equal(r.outcome, "done", `${tag}: the claim stands: ${JSON.stringify(r)}`)
+      assert.equal(r.credit,200, `${tag}: the claim amount stands: ${JSON.stringify(r)}`)
+      assert.match(String(r.message ?? ""), want, `${tag}: the touch re-read lost its cause: ${JSON.stringify(r)}`)
+      assert.equal(sawPage2, true, `${tag}: page2 was read`)
+    } finally {
+      globalThis.fetch = real
+    }
+  }
+})
+
 test("a ledger whose total grows is walked to its new end, not the old one", async () => {
   // streakOf stopped when the rows it held reached the `total` of the FIRST
   // page. A ledger whose second page says it holds one row more (a grant
