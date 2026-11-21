@@ -13223,23 +13223,36 @@ test("a usage read the host cancelled before it started sends nothing", async ()
   }
 })
 
-test("a usage read cancelled after the balance stops before the ledger", async () => {
-  // The ledger walk is the expensive half (a page, then the pages after it).
-  // A cancel that lands between the two reads stops the walk; the balance
-  // already read still answers, and says why the day's numbers are missing.
+test("a usage read cancelled during the ledger still answers the balance it read", async () => {
+  // The cancel lands after the balance answered: that number is on the card
+  // with the cancel said in place of the day's, and no page after the first
+  // is read. The ledger request itself is taken by the cancel now — the abort
+  // reaches it instead of leaving it to run out its own deadline.
   const ac = new AbortController()
   const calls = []
+  let ledgerAborted = false
   const real = globalThis.fetch
-  globalThis.fetch = async (url) => {
-    const path = new URL(url).pathname
-    calls.push(path)
-    if (path.endsWith("/balance")) ac.abort(new Error("panel closed"))
-    return reply({ body: { success: true, data: { available_balance: 5, records: [] } } })
+  globalThis.fetch = (url, init) => {
+    const p = new URL(url)
+    calls.push(p.pathname + p.search)
+    if (p.pathname.endsWith("/balance")) return Promise.resolve(reply({ body: { success: true, data: { available_balance: 5, records: [] } } }))
+    // the ledger is asked for; the panel closes while it is in flight
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        ledgerAborted = true
+        reject(init?.signal?.reason ?? new Error("aborted"))
+      }
+      if (init?.signal?.aborted) onAbort()
+      else init?.signal?.addEventListener("abort", onAbort, { once: true })
+      queueMicrotask(() => ac.abort(new Error("panel closed")))
+      setTimeout(() => resolve(reply({ body: { success: true, data: { records: [], total: 0 } } })), 25)
+    })
   }
   try {
     const u = await auth.usage(async () => ({ type: "api", key: "ms-cancelledusage-0000-0000-2" }), { id: "msmoli" }, { signal: ac.signal })
     assert.deepEqual(calls.filter((p) => p.endsWith("/balance")).length, 1, JSON.stringify(calls))
-    assert.equal(calls.filter((p) => p.endsWith("/transactions")).length, 0, `the ledger was read after the cancel: ${JSON.stringify(calls)}`)
+    assert.equal(calls.filter((p) => p.includes("page=2")).length, 0, `a page was read after the cancel: ${JSON.stringify(calls)}`)
+    assert.ok(ledgerAborted, `the ledger request was not aborted: ${JSON.stringify(calls)}`)
     assert.match(u.windows[0].display, /取消/, JSON.stringify(u.windows[0]))
     assert.match(u.balance, /5/, "the balance that was already read must still answer")
   } finally {
@@ -13325,20 +13338,30 @@ test("a refusal on the claimed branch's second read still reaches the card", asy
   }
 })
 
-test("a usage read cancelled mid-walk stops reading pages", async () => {
+test("a usage read cancelled mid-walk stops reading pages and writes nothing back", async () => {
   // The cancel was only checked at the entry and after the balance, so a
   // panel closed while the ledger walk was running still read every page the
   // cap allowed — measured: page 2 requested after the signal fired, three
   // requests in all, and a card the host throws away. The walk is where the
-  // cost is; it takes the signal too.
+  // cost is; it takes the signal too. The write-back is skipped with it: the
+  // answer is already discarded, and the store lock a write takes is the one
+  // thing a cancel exists to avoid.
+  const dir = tmpDir("msmoli-cancelwalk-")
+  const writes = []
+  const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
   const ac = new AbortController()
   const calls = []
   const row = (i) => ({ id: `f-${i}`, gmt_created: today, type: "EARN", rule_key: "daily_active", title: "注册并登录", total_amount: 1, count: 1 })
   const page1 = Array.from({ length: 50 }, (_, i) => row(i))
   const real = globalThis.fetch
   globalThis.fetch = async (url) => {
+    const u = new URL(url)
     const p = new URL(url)
     calls.push(p.pathname + p.search)
+    // the domestic site refuses the token, so the account sits on the
+    // international one — the profile a write-back would keep, which makes
+    // "nothing was written" an assertion with something to bite
+    if (u.origin === CN_ORIGIN) return reply({ status: 401, body: { Code: 401, Success: false, Message: "unauthorized" } })
     if (p.pathname.endsWith("/balance")) return reply({ body: { success: true, data: { available_balance: 5 } } })
     if (p.searchParams.get("page") === "1") {
       // the walk runs after this answer; the cancel fires before page 2
@@ -13348,10 +13371,99 @@ test("a usage read cancelled mid-walk stops reading pages", async () => {
     return reply({ body: { success: true, data: { records: [row(99)], total: 120 } } })
   }
   try {
-    const u = await auth.usage(async () => ({ type: "api", key: "ms-cancelwalk-0000-0004" }), { id: "msmoli" }, { signal: ac.signal })
+    const u = await p.auth.usage(async () => ({ type: "api", key: "ms-cancelwalk-0000-0004" }), { id: "msmoli" }, { signal: ac.signal })
     const pages = calls.filter((c) => c.includes("page=2"))
     assert.equal(pages.length, 0, `a page was read after the cancel: ${JSON.stringify(calls)}`)
+    assert.equal(writes.length, 0, `the account fields were written back after the cancel: ${JSON.stringify(writes)}`)
     assert.match(u.windows[0].display, /取消/, JSON.stringify(u.windows[0]))
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a usage read cancelled while the balance is in flight aborts the request", async () => {
+  // The host signal was checked before the first read and after it, never
+  // during it: a panel closed while the balance fetch was still in flight
+  // left that request running to the read's own deadline, and the hook went
+  // on reading the ledger and writing the account fields back for an answer
+  // the host had already thrown away. The signal has to reach the request
+  // itself, and a cancelled read answers with the cancel.
+  const dir = tmpDir("msmoli-cancelbal-")
+  const writes = []
+  const p = await MsmoliPlugin({ directory: dir, client: { auth: { set: async (o) => writes.push(o) } } })
+  const ac = new AbortController()
+  const calls = []
+  let aborted = 0
+  const real = globalThis.fetch
+  globalThis.fetch = (url, init) => {
+    const u = new URL(url)
+    calls.push(u.origin + u.pathname)
+    // the panel closes just after this request goes out
+    queueMicrotask(() => ac.abort(new Error("panel closed")))
+    // the domestic site refuses the token, which is how the account is found
+    // on the international one — and that is the profile whose site a
+    // write-back would keep, so an unfixed run has one to write
+    if (u.origin === CN_ORIGIN) {
+      init?.signal?.addEventListener("abort", () => { aborted += 1 }, { once: true })
+      return Promise.resolve(reply({ status: 401, body: { Code: 401, Success: false, Message: "unauthorized" } }))
+    }
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        aborted += 1
+        reject(init?.signal?.reason ?? new Error("aborted"))
+      }
+      if (init?.signal?.aborted) onAbort()
+      else init?.signal?.addEventListener("abort", onAbort, { once: true })
+      // this answer lands only if the request was not aborted — and then the
+      // normal card and the write-back follow, which is what the assertions
+      // below are checking never happens
+      setTimeout(() => resolve(reply({ body: { success: true, data: { available_balance: 5, records: [] } } })), 25)
+    })
+  }
+  try {
+    const u = await p.auth.usage(async () => ({ type: "api", key: "ms-cancelbal-0000-0005" }), { id: "msmoli" }, { signal: ac.signal })
+    assert.equal(calls.length, 1, `a request went out after the cancel: ${JSON.stringify(calls)}`)
+    assert.equal(aborted, 1, `the request itself was not aborted: ${aborted} abort(s), ${JSON.stringify(calls)}`)
+    assert.equal(writes.length, 0, `the account fields were written back after the cancel: ${JSON.stringify(writes)}`)
+    assert.match(u.error ?? "", /取消/, `the card should say the read was cancelled: ${JSON.stringify(u)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("a usage read cancelled while a later page is in flight aborts that page", async () => {
+  // The walk's pre-page check covers a cancel that landed between pages; one
+  // that lands during a page's own request left that request running to its
+  // deadline, and the failure it produced was swallowed as "the walk stopped
+  // early" — a card that blamed the ledger for a read the host had cancelled.
+  const ac = new AbortController()
+  const calls = []
+  let page2Aborted = false
+  const row = (i) => ({ id: `g-${i}`, gmt_created: today, type: "EARN", rule_key: "daily_active", title: "注册并登录", total_amount: 1, count: 1 })
+  const page1 = Array.from({ length: 50 }, (_, i) => row(i))
+  const real = globalThis.fetch
+  globalThis.fetch = (url, init) => {
+    const p = new URL(url)
+    calls.push(p.pathname + p.search)
+    if (p.pathname.endsWith("/balance")) return Promise.resolve(reply({ body: { success: true, data: { available_balance: 5 } } }))
+    if (p.searchParams.get("page") === "1") return Promise.resolve(reply({ body: { success: true, data: { records: page1, total: 120 } } }))
+    // page 2 is in flight when the panel closes
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        page2Aborted = true
+        reject(init?.signal?.reason ?? new Error("aborted"))
+      }
+      if (init?.signal?.aborted) onAbort()
+      else init?.signal?.addEventListener("abort", onAbort, { once: true })
+      queueMicrotask(() => ac.abort(new Error("panel closed")))
+      setTimeout(() => resolve(reply({ body: { success: true, data: { records: [row(99)], total: 120 } } })), 25)
+    })
+  }
+  try {
+    const u = await auth.usage(async () => ({ type: "api", key: "ms-cancelpage-0000-0006" }), { id: "msmoli" }, { signal: ac.signal })
+    assert.ok(page2Aborted, `the page request was not aborted: ${JSON.stringify(calls)}`)
+    assert.equal(calls.filter((c) => c.includes("page=3")).length, 0, `a page was read after the cancel: ${JSON.stringify(calls)}`)
+    assert.match(u.windows[0].display, /取消/, `the card should say the read was cancelled: ${JSON.stringify(u.windows[0])}`)
   } finally {
     globalThis.fetch = real
   }

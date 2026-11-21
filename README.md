@@ -662,15 +662,18 @@ The terms and risks are in
   under one two-minute budget. A hook cut short answers `failed`, the host
   retries in half an hour, and the retry reads the ledger first, so nothing is
   lost.
-- **What a 401 or a 403 says.** A 401 signs the account out only when it
+- **What a 401 or a 403 says.** A 401 marks the sign-in expired only when it
   reads as the site refusing the token — "unauthorized", an invalid or expired
   token, a refusal in Chinese ("请先登录", "登录状态已失效"), an empty JSON
   object, or a code of 401 — and never when it names the path instead ("proxy
-  authentication required", a gateway's page, a bodyless 401). A 403 is
-  reported as ModelScope's risk control only when it carries ModelScope's
-  shape; a proxy's 403 page is reported as an ordinary refusal. A sign-in
-  that was refused after the day's credits landed reports the expiry but
-  keeps the day's answer.
+  authentication required", a gateway's page, a bodyless 401). The mark is
+  carried on a usage read (`signIn`), which magpie keeps; a check-in's answer
+  cannot carry it, because the host reads only its outcome, credit, streak,
+  message and time — so when the refusal arrives there, the message says it
+  ("但登录已失效（HTTP 401），请重新登录"). A 403 is reported as ModelScope's
+  risk control only when it carries ModelScope's shape; a proxy's 403 page is
+  reported as an ordinary refusal. A sign-in that was refused after the day's
+  credits landed reports the expiry but keeps the day's answer.
 - **A body it doesn't understand is not read as zero.** A missing `data`, a
   list where an object belongs, a missing or non-numeric `available_balance`:
   a balance like that is a failure with its reason, because "0 魔粒可用"
@@ -694,7 +697,7 @@ The terms and risks are in
 |---|---|
 | `没有登录信息，请先登录` | `printf 'ms-token\n' \| magpie plugin login msmoli` |
 | No credit window on the card, or no check-in | Restart magpie; the plugin host caches. |
-| `failed` with HTTP 401 | The token was revoked, or belongs to the other site; `modelscope.cn` and `modelscope.ai` don't share tokens. When both sites refused the token in ModelScope's own words, the message names them (任一站点) and magpie signs the account out; when only a proxy or gateway answered 401, the message says 响应不是魔搭的 instead and the sign-in is left alone. When the key is spelled like a URL or a path, the message says so first — check the field, not the sign-in. Make a new token there and sign in again. |
+| `failed` with HTTP 401 | The token was revoked, or belongs to the other site; `modelscope.cn` and `modelscope.ai` don't share tokens. When both sites refused the token in ModelScope's own words, the message names them (任一站点), and the next usage read marks the sign-in expired — magpie then shows the account as needing a new sign-in. The check-in's own answer cannot do that: magpie reads only its outcome, credit, streak, message and time, so the card there carries the same words in the message. When only a proxy or gateway answered 401, the message says 响应不是魔搭的 instead and the sign-in is left alone. When the key is spelled like a URL or a path, the message says so first — check the field, not the sign-in. Make a new token there and sign in again. |
 | `failed` with HTTP 403, message says 被魔搭风控拒绝 | ModelScope's risk control refused the request; the token is fine. A check-in is asked again in 30 minutes; a usage read shows the 403 on the card until the next poll. |
 | `failed` with HTTP 403, message says 响应不是魔搭的 | The 403 is not ModelScope's — a proxy, a gateway or a captive portal answered in its own words. The token is not the problem: check the proxy/VPN the request goes through. |
 | Before the window: failed, with `09:56 后自动领取（北京时间，magpie 每半小时问一次，无需操作）` | Expected. See [When it claims](#when-it-claims-the-check-in-window). |

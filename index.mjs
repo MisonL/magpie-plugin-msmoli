@@ -250,7 +250,7 @@ const awaitsSignIn = (body) => {
   if (String(code ?? "") === "401") return true
   return said !== "" && signInWords.test(said)
 }
-async function siteRead(token, path, deadline = Infinity) {
+async function siteRead(token, path, deadline = Infinity, { signal = null } = {}) {
   const known = sites.get(token)
   const order = known ? [known, ...SITES.filter((p) => p !== known)] : SITES
   // A parsed 4xx/429/5xx that is not an answer is still the site *saying
@@ -273,9 +273,13 @@ async function siteRead(token, path, deadline = Infinity) {
   let said
   let down
   for (const profile of order) {
+    // A cancelled poll's answer is thrown away, so neither site is worth
+    // asking: the first read's own cancel is the answer, and probing the
+    // other site after it would send a request for nothing.
+    if (signal?.aborted) throw new Error("用量查询已取消")
     let got
     try {
-      got = await json(profile.site, token, path, deadline)
+      got = await json(profile.site, token, path, deadline, { signal })
     } catch (e) {
       // A timeout is the link, not the site, and the remembered site may be
       // the stale half of a re-keyed sign-in — the same state the 401 branch
@@ -344,12 +348,20 @@ async function siteRead(token, path, deadline = Infinity) {
   throw deadToken("任一站点", token)
 }
 
-async function json(site, token, path, deadline = Infinity) {
+async function json(site, token, path, deadline = Infinity, { signal = null } = {}) {
+  if (signal?.aborted) throw new Error("用量查询已取消")
   const left = deadline - Date.now()
   if (left <= 0) throw new Error("预算已用完，本次请求未发出")
   const budget = Math.min(TIMEOUT_MS, left)
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(new Error("timeout")), budget)
+  // A cancelled poll takes the request with it: the wait is for an answer
+  // nobody will read, and left alone it runs to the read's own deadline with
+  // the socket still open. The host's signal aborts this request instead, and
+  // the abort reason is not "timeout" — a cancel reported as a timeout would
+  // send siteRead on to the other site for a second wasted request.
+  const onCancel = () => ctl.abort(new Error("用量查询已取消"))
+  signal?.addEventListener?.("abort", onCancel, { once: true })
   // The cap holds even for a fetch that does not listen to its signal: magpie
   // puts its own fetch in when a proxy is set, and its CONNECT dial runs on a
   // timer of its own (host.js's proxyRefuses). Raced against the abort, the
@@ -408,11 +420,14 @@ async function json(site, token, path, deadline = Infinity) {
         ctl.abort(new Error("read abandoned"))
       } catch {}
     }
-    throw saidFailure(e, ctl, budget)
+    throw signal?.aborted ? new Error("用量查询已取消") : saidFailure(e, ctl, budget)
   } finally {
     // the answer is here: the timer has nothing left to guard, and one left
     // pending would hold the host's event loop open after the work is done
     clearTimeout(timer)
+    // the host's signal outlives this read; a listener kept on it would fire
+    // into every later request the hook makes
+    signal?.removeEventListener?.("abort", onCancel)
   }
 }
 
@@ -3929,8 +3944,12 @@ async function dayRows(profile, token, day, first, deadline, body, { expiry = tr
     if (signal?.aborted) throw new Error("用量查询已取消")
     let got
     try {
-      got = await json(profile.site, token, `${TXNS}?page=${pages + 1}&page_size=${PAGE_SIZE}`, deadline)
-    } catch {
+      got = await json(profile.site, token, `${TXNS}?page=${pages + 1}&page_size=${PAGE_SIZE}`, deadline, { signal })
+    } catch (e) {
+      // a page the cancel took is not a page that failed: swallowed into the
+      // partial-walk path, the card would say the ledger was cut short for
+      // its own reasons. It is the cancel, and it is said.
+      if (signal?.aborted) throw new Error("用量查询已取消")
       if (dayDone) complete = true
       break
     }
@@ -4883,7 +4902,7 @@ export async function MsmoliPlugin(input) {
         // the try, so the hook still promises an {error} and never a
         // rejection, whatever that write or the reads do.
         try {
-          const bal = await siteRead(token, BALANCE, deadline)
+          const bal = await siteRead(token, BALANCE, deadline, { signal: opts?.signal })
           const profile = bal.profile
           gate(profile, bal.res, bal.body, bal.parsed, token, "余额查询失败")
           // A missing data read as 0 would turn "did not understand" into a
@@ -4926,7 +4945,7 @@ export async function MsmoliPlugin(input) {
             // Thrown into the catch below, the balance that was read still
             // answers, with the cancel said in place of the day's numbers.
             if (cancelled()) throw stop()
-            const tx = await json(profile.site, token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline)
+            const tx = await json(profile.site, token, `${TXNS}?page=1&page_size=${PAGE_SIZE}`, deadline, { signal: opts?.signal })
             gate(profile, tx.res, tx.body, tx.parsed, token, "账单查询失败")
 
             const day = todayCN()
@@ -5042,8 +5061,10 @@ export async function MsmoliPlugin(input) {
             // last, and awaited: the card must not be answered ahead of the
             // write (a poll answered before it would race the very retry this
             // exists for), while the reads above have already had the budget to
-            // themselves.
-            await rememberAccountFields(client, token, { name: names.get(token) ?? "", profile, probeDone: true }, auth, configDir, deadline, getAuth)
+            // themselves. A cancel that landed after the walk has no reader for
+            // the answer it would be written for, and the store lock the write
+            // waits on is the one thing a cancel exists to avoid.
+            if (!cancelled()) await rememberAccountFields(client, token, { name: names.get(token) ?? "", profile, probeDone: true }, auth, configDir, deadline, getAuth)
 
             return {
               plan: profile.plan,
@@ -5073,7 +5094,10 @@ export async function MsmoliPlugin(input) {
             // keeps going to the outer catch.
             if (signedOut(e)) throw e
             const why = cardText(whyOf(e), token) || "账单查询失败"
-            await rememberAccountFields(client, token, { name: names.get(token) ?? "", profile, probeDone: true }, auth, configDir, deadline, getAuth)
+            // a cancelled poll still answers the balance it read, but writes
+            // nothing back: the answer is already discarded, and the write's
+            // store lock is the cost a cancel is meant to spare
+            if (!cancelled()) await rememberAccountFields(client, token, { name: names.get(token) ?? "", profile, probeDone: true }, auth, configDir, deadline, getAuth)
             return {
               plan: profile.plan,
               user: nameText(names.get(token) ?? "", token),
