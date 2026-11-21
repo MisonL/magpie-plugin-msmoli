@@ -13469,6 +13469,51 @@ test("a usage read cancelled while a later page is in flight aborts that page", 
   }
 })
 
+test("a usage read cancelled while the account write re-reads the sign-in writes nothing", async () => {
+  // The guard before rememberAccountFields cannot cover a cancel that lands
+  // inside it: the write re-reads the sign-in through getAuth twice before
+  // calling auth.set (both store round-trips can block on the host's lock),
+  // and an answer already thrown away has no reason to take that lock. The
+  // write has to check the signal after its last read, just before the set.
+  const dir = tmpDir("msmoli-cancelwrite-")
+  const writes = []
+  const token = "ms-cancelwrite-00000-0000-0000-00001"
+  const signin = { type: "api", key: token, site: "" }
+  const ac = new AbortController()
+  let reads = 0
+  const p = await MsmoliPlugin({
+    directory: dir,
+    client: { auth: { set: async (o) => writes.push(o) } },
+  })
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    const path = u.pathname
+    // the domestic site refuses the token, so the account is found on the
+    // international one — the profile whose site the write-back keeps (a
+    // domestic profile writes nothing, and the test would prove nothing)
+    if (u.origin === CN_ORIGIN) return Promise.resolve(reply({ status: 401, body: { Code: 401, Success: false, Message: "unauthorized" } }))
+    if (path.endsWith("/balance")) return Promise.resolve(reply({ body: { success: true, data: { available_balance: 5 } } }))
+    return Promise.resolve(reply({ body: { success: true, data: { records: [], total: 0 } } }))
+  }
+  // getAuth is also the hook's first read; every call after it belongs to
+  // the write-back. Cancel on the first of those — the guard at the call
+  // site has already passed by then.
+  const getAuth = async () => {
+    reads += 1
+    if (reads >= 2) ac.abort(new Error("panel closed"))
+    return { ...signin }
+  }
+  try {
+    const u = await p.auth.usage(getAuth, { id: "msmoli" }, { signal: ac.signal })
+    assert.equal(reads >= 2, true, `the write did not re-read the sign-in: ${reads} read(s)`)
+    assert.equal(writes.length, 0, `the account fields were written back after the cancel: ${JSON.stringify(writes)}`)
+    assert.ok(u.balance || u.error, `the hook must still answer: ${JSON.stringify(u)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 // ── The last review's live probes (2026-11-19) ────────────────────────────
 // Each shape below was measured on e103944 leaking eight or more characters
 // of the key's own body: on the card, in a log line, or on the terminal.

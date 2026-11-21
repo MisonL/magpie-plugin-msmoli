@@ -3431,7 +3431,7 @@ const waitFor = (p, ms) => {
 // copy of the token — with those fields beside it; what is already there is
 // left alone. Everything goes in one write: auth.set takes plugin-auth.json's
 // lock, and two writes would take it twice.
-async function rememberAccountFields(client, token, learned, auth, dir, budgetEnd = Infinity, getAuth) {
+async function rememberAccountFields(client, token, learned, auth, dir, budgetEnd = Infinity, getAuth, cancelled = null) {
   // "can write" is a function, not a truthy value: `{ auth: { set: 1 } }` is a
   // client that cannot write, and `!client?.auth?.set` let it through to call
   // a number — the TypeError is caught below, but it logs "account facts not
@@ -3526,6 +3526,12 @@ async function rememberAccountFields(client, token, learned, auth, dir, budgetEn
     if (wantName) {
       wantName = !!name && base?.accountId !== name && !cooling && aliasOf(ID, dir, labelOf(base, token)) === ""
     }  }
+  // The caller cannot see a cancel that lands inside this function: both
+  // reads above take the host's store lock, and one can be waiting on it
+  // when the panel closes. A poll whose answer was thrown away has no reason
+  // to take that lock a third time, so the write checks again after its last
+  // read. (The cooldown below counts only a write that actually happens.)
+  if (cancelled?.()) return
   if (wantName) {
     named.delete(token)
     named.set(token, Date.now())
@@ -5064,7 +5070,7 @@ export async function MsmoliPlugin(input) {
             // themselves. A cancel that landed after the walk has no reader for
             // the answer it would be written for, and the store lock the write
             // waits on is the one thing a cancel exists to avoid.
-            if (!cancelled()) await rememberAccountFields(client, token, { name: names.get(token) ?? "", profile, probeDone: true }, auth, configDir, deadline, getAuth)
+            if (!cancelled()) await rememberAccountFields(client, token, { name: names.get(token) ?? "", profile, probeDone: true }, auth, configDir, deadline, getAuth, cancelled)
 
             return {
               plan: profile.plan,
@@ -5097,7 +5103,7 @@ export async function MsmoliPlugin(input) {
             // a cancelled poll still answers the balance it read, but writes
             // nothing back: the answer is already discarded, and the write's
             // store lock is the cost a cancel is meant to spare
-            if (!cancelled()) await rememberAccountFields(client, token, { name: names.get(token) ?? "", profile, probeDone: true }, auth, configDir, deadline, getAuth)
+            if (!cancelled()) await rememberAccountFields(client, token, { name: names.get(token) ?? "", profile, probeDone: true }, auth, configDir, deadline, getAuth, cancelled)
             return {
               plan: profile.plan,
               user: nameText(names.get(token) ?? "", token),
