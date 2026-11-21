@@ -14243,6 +14243,8 @@ test("a key cut into full-width cells is masked whole", () => {
   ["dot30FB", [...wide].join("\u30fb")],
   ["overwideContiguous", overWideHead + overCells.join(" | ")],
   ["overwideSpaced", overWideHead + " | " + overCells.join(" | ")],
+  // the same head followed by one unbroken ASCII run past the flat bound
+  ["overwideRun", overWideHead + "AbCd1234".repeat(511)],
   ]) {
     for (const [sink, out] of [
       ["card", testables.cardText(v, "",600)],

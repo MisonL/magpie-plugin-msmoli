@@ -2376,7 +2376,8 @@ const maskCellCut = (s, letters = true) => {
       if (g === q || g >= s.length || !cellCh(s[g])) {
         // a run that goes on without a gap is one cut, not a grid's next cell:
         // a wide-headed key's run is masked whole, so the walk keeps reading it
-        if (!wide0 || g !== q || g >= s.length || !cellCh(s[g]) || flatLen >= 4096) break
+        // to its end: a stop at the flat bound left the tail in the clear
+        if (!wide0 || g !== q || g >= s.length || !cellCh(s[g])) break
       }
       p = g
     }

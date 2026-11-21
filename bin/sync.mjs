@@ -1895,8 +1895,8 @@ const cellGrid = (s, from = 0) => {
       while (g < s.length && g - q <= 8 && cellGridGap(s[g])) g += 1
       if (g === q || g >= s.length || !cellGridCh(s[g])) {
         // a run that goes on without a gap is one cut, not a grid's next cell
-        // (the card's reading, kept in step with it)
-        if (!wide0 || g !== q || g >= s.length || !cellGridCh(s[g]) || flatLen >= 4096) break
+        // (the card's reading, kept in step with it, and read to the run's end)
+        if (!wide0 || g !== q || g >= s.length || !cellGridCh(s[g])) break
       }
       p = g
     }
