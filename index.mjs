@@ -2386,7 +2386,7 @@ const maskCellCut = (s, letters = true) => {
     // direction) and skipped in one step when it is not ("word word …")
     if (over) {
       const flat = cellFold(s.slice(bodyAt, runEnd))
-      const strong = cells.filter((c, i) => /\d/.test(c.normalize("NFKC")) || CELL_CASEY(c) || (i === 0 && (CELL_FRONT.test(c.normalize("NFKC")) || VENDOR.test(c.normalize("NFKC"))))).length
+      const strong = cells.filter((c, i) => { const n = cellFold(c); return /\d/.test(n) || CELL_CASEY(n) || (i === 0 && (CELL_FRONT.test(n) || VENDOR.test(n))) }).length
       if (strong >= 2 && isKeyWord(flat, letters)) {
         out += s.slice(at, bodyAt) + maskToken(flat)
         at = runEnd

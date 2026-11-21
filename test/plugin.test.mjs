@@ -10920,7 +10920,7 @@ test("a key broken into eight-character pieces and joined by a letter is masked"
     for (const piece of body.match(/.{1,8}/g)) {
       assert.ok(!out.includes(piece), `${where}: the piece ${piece} survived: ${out}`)
     }
-    assert.match(out, /ms-e…abcd/, `${where}: it is masked as the key: ${out}`)
+      assert.match(out, /ms-e…abcd/, `${where}: it is masked as the key: ${out}`)
   }
 })
 
@@ -14214,11 +14214,18 @@ test("a key cut into full-width cells is masked whole", () => {
   const body = "AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890"
   const wide = [...body].map((c) => String.fromCharCode(c.charCodeAt(0) +0xfee0)).join("")
   const cells = wide.match(/.{1,4}/g)
+  const wideCell = wide.slice(0,4)
+  const limitWide = (n) => Array.from({ length: n }, () => wideCell).join(" | ")
+  // the limit cases carry their own key: the repeated cell has no digit and
+  // no ASCII case, so the over branch counted no strength and printed the raw
+  // text while the mixed body's oracle compared against another shape
+  const limitKeys = { limit511: "AbCd".repeat(511), limit: "AbCd".repeat(513) }
   for (const [tag, v] of [
     ["bar", cells.join(" | ")],
     ["space", cells.join(" ")],
     ["mixed", wide.slice(0,4) + " | " + body.slice(4).match(/.{1,4}/g).join(" | ")],
-    ["limit", Array.from({ length:513 }, () => wide.slice(0,4)).join(" | ")],
+    ["limit511", limitWide(511)],
+    ["limit", limitWide(513)],
     // the head alone full-width, the run behind it continuous
     ["head", wide.slice(0,4) + " " + body.slice(4)],
     // separators written full-width are the cut's too
@@ -14231,7 +14238,8 @@ test("a key cut into full-width cells is masked whole", () => {
       ["arg", arg(v)],
       ["scrub", scrub(`child: ${v}`)],
     ]) {
-      assert.equal(leakOfKey(out, body), "", `${sink} left key material (${tag}): ${JSON.stringify(out)}`)
+      assert.equal(leakOfKey(out, limitKeys[tag] ?? body), "", `${sink} left key material (${tag}): ${JSON.stringify(out)}`)
+  assert.match(out, /\u2026/, `${sink} masked nothing (${tag}): ${JSON.stringify(out)}`)
     }
   }
 })
