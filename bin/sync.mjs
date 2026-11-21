@@ -1803,6 +1803,7 @@ const cellGridNamed = (cell) => {
 const cellGridProse = (w) => /^[a-z]+$/.test(w) && /[aeiouy]/.test(w) && !/^[0-9a-f]+$/i.test(w)
 const cellGridWide = (c) => c !== undefined && c.charCodeAt(0) > 0x7f
 const cellGridWideKey = (c) => cellGridWide(c) && /[A-Za-z0-9+/=_.-]/.test(c.normalize("NFKC"))
+const cellGridCh = (c) => c !== undefined && (CELLCH.test(c) || cellGridWideKey(c))
 const cellGridWideBeside = (s, from, dir) => {
   for (let n = 0, i = from + dir; n < 64 && i >= 0 && i < s.length; n += 1) {
     const c = s[i]
@@ -1838,7 +1839,7 @@ const cellGrid = (s, from = 0) => {
     for (;;) {
       // as on the card, the scan stops one character past the longest cap
       let q = p
-      while (q < s.length && q - p <= 25 && CELLCH.test(s[q])) q += 1
+      while (q < s.length && q - p <= 25 && cellGridCh(s[q])) q += 1
       let body = s.slice(p, q)
       if (cells.length === 0 && q - p <= 26) {
         const named = cellGridNamed(body)
@@ -1851,7 +1852,17 @@ const cellGrid = (s, from = 0) => {
       // as on the card, the first cell may carry the front plus one cell
       const fr = cells.length === 0 ? cellGridFront(body) : null
       const cap = fr ? 24 : 8
-      if (body.length < 2 || body.length > cap || !/[A-Za-z0-9]/.test(body)) break
+      // a cut one character at a time is cells of one, and a lone mark of the
+      // cut is a cell when an alnum cell follows it (the card's reading)
+      let bridged = false
+      if (!/[A-Za-z0-9]/.test(body) && cells.length > 0 && body.length <= 2) {
+        let e = q
+        while (e < s.length && e - q <= 8 && CELL_GRIDGAP.test(s[e])) e += 1
+        let e2 = e
+        while (e2 < s.length && e2 - e <= 25 && CELLCH.test(s[e2])) e2 += 1
+        bridged = /[A-Za-z0-9]/.test(s.slice(e, e2))
+      }
+      if (body.length < 1 || body.length > cap || (!/[A-Za-z0-9]/.test(body) && !bridged)) break
       if (!over) {
         cells.push(body)
         ends.push(q)
@@ -1861,14 +1872,14 @@ const cellGrid = (s, from = 0) => {
       if (!over && (cells.length >= 512 || flatLen > 4096)) over = true
       let g = q
       while (g < s.length && g - q <= 8 && CELL_GRIDGAP.test(s[g])) g += 1
-      if (g === q || g >= s.length || !CELLCH.test(s[g])) break
+      if (g === q || g >= s.length || !cellGridCh(s[g])) break
       p = g
     }
     const readEnd = ends.length > 0 ? ends[ends.length - 1] : k
     if (over) {
       const flat = s.slice(bodyAt, runEnd).replace(/[^A-Za-z0-9+/=_.-]/g, "")
-      const strong = cells.filter((c, i) => /\d/.test(c) || CELL_CASEY(c) || (i === 0 && CELL_FRONT.test(c))).length
-      if (strong >= 2 && (isKey(flat) || (/^ms-/i.test(flat) && msKey(flat)))) {
+      const strong = cells.filter((c, i) => /\d/.test(c.normalize("NFKC")) || CELL_CASEY(c) || (i === 0 && CELL_FRONT.test(c.normalize("NFKC")))).length
+      if (strong >= 2 && (isKey(flat.normalize("NFKC")) || (/^ms-/i.test(flat.normalize("NFKC")) && msKey(flat.normalize("NFKC"))))) {
         return { preEnd: k, bodyAt, body: flat, bodyEnd: runEnd }
       }
       k = Math.max(k + 1, runEnd)
@@ -1884,13 +1895,13 @@ const cellGrid = (s, from = 0) => {
     let cont = stop
     while (cont < s.length && cont - stop <= 8 && CELL_GRIDGAP.test(s[cont])) cont += 1
     let contEnd = cont
-    while (contEnd < s.length && contEnd - cont <= 24 && CELLCH.test(s[contEnd])) contEnd += 1
+    while (contEnd < s.length && contEnd - cont <= 24 && cellGridCh(s[contEnd])) contEnd += 1
     const contCell = s.slice(cont, contEnd)
     let before = k - 1
     for (let n = 0; n < 8 && before >= 0 && CELL_GRIDGAP.test(s[before]); n += 1) before -= 1
     const beforeGap = s.slice(before + 1, k)
     let beforeAt = before
-    while (beforeAt >= 0 && before - beforeAt < 32 && CELLCH.test(s[beforeAt])) beforeAt -= 1
+    while (beforeAt >= 0 && before - beforeAt < 32 && cellGridCh(s[beforeAt])) beforeAt -= 1
     const beforeCell = before >= 0 ? s.slice(beforeAt + 1, before + 1) : ""
     const precedes = beforeGap.length > 0 && !/\s/.test(beforeGap) && beforeCell.length >= 4 && /[A-Za-z0-9]/.test(beforeCell) && !cellGridProse(beforeCell)
     const continues = cells.length < 512 && contCell.length >= 2 && /[A-Za-z0-9]/.test(contCell) && !cellGridProse(contCell) && !contCell.includes("=")

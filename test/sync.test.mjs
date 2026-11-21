@@ -7643,3 +7643,15 @@ test("a grid past the bounds is masked whole, a page of words is not", () => {
   page = page.slice(0, 16 * 1024)
   assert.equal(arg(page), page, "a page of numerals was masked")
 })
+
+test("a single-character cut behind a bar and a folded first cell are masked", () => {
+  const body = "AbCd1234EfGh5678IjKl9012MnOp3456"
+  for (const [v, key] of [
+    [[...body].join(" | "), body],
+    ["ms-Ａ１ｂ２ | C3d4 | E5f6 | G7h8 | I9j0", "ms-A1b2C3d4E5f6G7h8I9j0"],
+  ]) {
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    }
+  }
+})

@@ -2241,6 +2241,9 @@ const cellWide = (c) => c !== undefined && c.charCodeAt(0) > 0x7f
 const cellWideKey = (c) => cellWide(c) && /[A-Za-z0-9+/=_.-]/.test(c.normalize("NFKC"))
 // a wide key character near the candidate, across the cells and gaps before
 // and after it ("… ＬｍＮｏ 2468 LmNo 2468 …" is one folded span)
+// a cell character, wide or not: a value whose first cell is folded
+// ("ms-Ａ１ｂ２") is one grid with the ASCII cells after it
+const cellCh = (c) => c !== undefined && (CELLRUN_CH.test(c) || cellWideKey(c))
 const cellWideBeside = (s, from, dir) => {
   for (let n = 0, i = from + dir; n < 64 && i >= 0 && i < s.length; n += 1) {
     const c = s[i]
@@ -2284,7 +2287,7 @@ const maskCellCut = (s, letters = true) => {
       // run of hyphens ("a-a-a-…") made each candidate read to the value's end
       // at every start, 16 KB in 27 s (measured)
       let q = p
-      while (q < s.length && q - p <= 25 && CELLRUN_CH.test(s[q])) q += 1
+      while (q < s.length && q - p <= 25 && cellCh(s[q])) q += 1
       let body = s.slice(p, q)
       if (cells.length === 0 && q - p <= 26) {
         const named = cellNamed(body)
@@ -2319,7 +2322,7 @@ const maskCellCut = (s, letters = true) => {
       if (!over && (cells.length >= 512 || flatLen > 4096)) over = true
       let g = q
       while (g < s.length && g - q <= 8 && CELLRUN_GAPCH.test(s[g])) g += 1
-      if (g === q || g >= s.length || !CELLRUN_CH.test(s[g])) break
+      if (g === q || g >= s.length || !cellCh(s[g])) break
       p = g
     }
     const readEnd = ends.length > 0 ? ends[ends.length - 1] : k
@@ -2328,8 +2331,8 @@ const maskCellCut = (s, letters = true) => {
     // direction) and skipped in one step when it is not ("word word …")
     if (over) {
       const flat = s.slice(bodyAt, runEnd).replace(/[^A-Za-z0-9+/=_.-]/g, "")
-      const strong = cells.filter((c, i) => /\d/.test(c) || CELL_CASEY(c) || (i === 0 && (CELL_FRONT.test(c) || VENDOR.test(c)))).length
-      if (strong >= 2 && isKeyWord(flat, letters)) {
+      const strong = cells.filter((c, i) => /\d/.test(c.normalize("NFKC")) || CELL_CASEY(c) || (i === 0 && (CELL_FRONT.test(c.normalize("NFKC")) || VENDOR.test(c.normalize("NFKC"))))).length
+      if (strong >= 2 && isKeyWord(flat.normalize("NFKC"), letters)) {
         out += s.slice(at, bodyAt) + maskToken(flat)
         at = runEnd
         k = runEnd
@@ -2357,7 +2360,7 @@ const maskCellCut = (s, letters = true) => {
     let cont = stop
     while (cont < s.length && cont - stop <= 8 && CELLRUN_GAPCH.test(s[cont])) cont += 1
     let contEnd = cont
-    while (contEnd < s.length && contEnd - cont <= 24 && CELLRUN_CH.test(s[contEnd])) contEnd += 1
+    while (contEnd < s.length && contEnd - cont <= 24 && cellCh(s[contEnd])) contEnd += 1
     const contCell = s.slice(cont, contEnd)
     // the cells before the candidate are the same question asked backwards:
     // a key cut into groups whose first group is too long to be a cell of its
@@ -2370,7 +2373,7 @@ const maskCellCut = (s, letters = true) => {
     for (let n = 0; n < 8 && before >= 0 && CELLRUN_GAPCH.test(s[before]); n += 1) before -= 1
     const beforeGap = s.slice(before + 1, k)
     let beforeAt = before
-    while (beforeAt >= 0 && before - beforeAt < 32 && CELLRUN_CH.test(s[beforeAt])) beforeAt -= 1
+    while (beforeAt >= 0 && before - beforeAt < 32 && cellCh(s[beforeAt])) beforeAt -= 1
     const beforeCell = before >= 0 ? s.slice(beforeAt + 1, before + 1) : ""
     const precedes = beforeGap.length > 0 && !/\s/.test(beforeGap) && beforeCell.length >= 4 && /[A-Za-z0-9]/.test(beforeCell) && !cellProse(beforeCell)
     // a candidate that hit the cell limit has not seen the cut's end: the

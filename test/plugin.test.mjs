@@ -13988,3 +13988,35 @@ test("a sentence's dashes and marks are not a cut", () => {
     assert.equal(arg(v), v, `the CLI masked a sentence's marks: ${JSON.stringify(v)} -> ${JSON.stringify(arg(v))}`)
   }
 })
+
+test("a cut one character a time behind a bar is masked on every sink", () => {
+  // Measured on 8031251: the card bridged single-character cells and the CLI's
+  // grid reading did not ("A | b | C | d | …" printed whole in arg and scrub).
+  const body = "AbCd1234EfGh5678IjKl9012MnOp3456"
+  const v = [...body].join(" | ")
+  for (const [tag, out] of [
+    ["card", testables.cardText(v, "", 600)],
+    ["host", testables.hostText(v)],
+    ["arg", arg(v)],
+    ["scrub", scrub(`child: ${v}`)],
+  ]) {
+    assert.equal(leakOfKey(out, body), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+})
+
+test("a grid whose first cell is folded is masked whole", () => {
+  // Measured on 8031251: "ms-Ａ１ｂ２ | C3d4 | …" printed whole on all six
+  // outputs — the cell walk stopped at the full-width characters and the fold
+  // reading did not take the ASCII cells after them. A wide key character is
+  // a cell character, and the joined body is judged folded.
+  const v = "ms-Ａ１ｂ２ | C3d4 | E5f6 | G7h8 | I9j0"
+  const key = "ms-A1b2C3d4E5f6G7h8I9j0"
+  for (const [tag, out] of [
+    ["card", testables.cardText(v, "", 600)],
+    ["host", testables.hostText(v)],
+    ["arg", arg(v)],
+    ["scrub", scrub(`child: ${v}`)],
+  ]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+  }
+})
