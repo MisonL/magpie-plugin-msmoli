@@ -281,6 +281,10 @@ async function siteRead(token, path, deadline = Infinity, { signal = null } = {}
   // sign-in refused only when every site said it (every token answers it
   // on the site it does not belong to)
   let refused = 0
+  // the first non-refusal word the walk heard: kept apart so a lone refusal
+  // beside it cannot be upgraded to an expiry (the card still has something
+  // honest to say: the other site's service error or link failure)
+  let other
   for (const profile of order) {
     // A cancelled poll's answer is thrown away, so neither site is worth
     // asking: the first read's own cancel is the answer, and probing the
@@ -340,6 +344,7 @@ async function siteRead(token, path, deadline = Infinity, { signal = null } = {}
       const refusedBody = String(got.body?.Code ?? got.body?.code ?? "") === "401" && awaitsSignIn(got.body)
       if (refusedBody) refused += 1
       if (!said) said = { answer: { profile, ...got }, refused: refusedBody }
+      if (!refusedBody) other ??= { answer: { profile, ...got } }
       continue
     }
     // A 4xx is the site answering — but a 404/405/451 from a middlebox, or a
@@ -359,11 +364,12 @@ async function siteRead(token, path, deadline = Infinity, { signal = null } = {}
       continue
     }
     said ??= { answer: { profile, ...got } }
+    other ??= { answer: { profile, ...got } }
   }
   // a refusal beside a site that never answered is not proof: measured,
   // CN embedded401 with INT unreachable was called an expiry, though the
   // walk only got one refusal and the other site said nothing
-  if (said?.refused && refused < order.length) said = undefined
+  if (said?.refused && refused < order.length) said = other
   if (riskAnswer) return riskAnswer
   if (answer) return answer
   if (said) return said.answer

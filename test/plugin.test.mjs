@@ -12858,6 +12858,29 @@ test("a refused token on a later ledger page is reported as expired", async () =
   }
 })
 
+test("a lone embedded 401 beside a service error is not an expiry", async () => {
+  // The dead-link case is not the only one: a lone refusal beside a site
+  // that answered 503 fell past the kept failure and ended on "any site"
+  // expired. The refusal is not the sign-in's unless every site refused;
+  // the other site's words are what the card can honestly say.
+  testables.sites.clear()
+  const token = "ms-inline401-503-0000-0000-000"
+  const real = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = new URL(url)
+    if (u.origin === CN_ORIGIN) return reply({ body: { Success: false, Code: 401, Message: "Token expired" } })
+    return reply({ status: 503, body: { Success: false, Code:503, Message: "system busy" } })
+  }
+  try {
+    const p = await MsmoliPlugin({ directory: "/nonexistent-review" })
+    const r = await p.auth.usage(async () => ({ type: "api", key: token }))
+    assert.notEqual(r.signIn, "expired", `a refusal beside a service error read as an expiry: ${JSON.stringify(r)}`)
+    assert.doesNotMatch(r.error ?? "", /令牌失效/, `the lone refusal's wording stood in for the service error: ${JSON.stringify(r)}`)
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
 test("a lone embedded 401 beside a dead link is not an expiry", async () => {
   // Measured on a301de2: the CN site answered HTTP 200 with {"Code":401}
   // while the INT site was unreachable, and usage said the token expired —
