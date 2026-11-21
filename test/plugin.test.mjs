@@ -14205,6 +14205,37 @@ test("a key cut one character at a time is masked on the card", () => {
   }
 })
 
+test("a key cut into full-width cells is masked whole", () => {
+  // Measured on cb26bb1: a key whose every character was written full-width
+  // and cut every four characters printed on all six outputs — the grid walk
+  // reads wide cells, but its letter gate and key test looked at ASCII only,
+  // so the folded body was "not a key" and nothing was masked. The mixed
+  // shape (a wide first cell, ASCII after it) printed the same way.
+  const body = "AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890"
+  const wide = [...body].map((c) => String.fromCharCode(c.charCodeAt(0) +0xfee0)).join("")
+  const cells = wide.match(/.{1,4}/g)
+  for (const [tag, v] of [
+    ["bar", cells.join(" | ")],
+    ["space", cells.join(" ")],
+    ["mixed", wide.slice(0,4) + " | " + body.slice(4).match(/.{1,4}/g).join(" | ")],
+    ["limit", Array.from({ length:513 }, () => wide.slice(0,4)).join(" | ")],
+    // the head alone full-width, the run behind it continuous
+    ["head", wide.slice(0,4) + " " + body.slice(4)],
+    // separators written full-width are the cut's too
+    ["widegap", cells.join("\uff5c")],
+    ["widechars", [...wide].join(" \uff5c ")],
+  ]) {
+    for (const [sink, out] of [
+      ["card", testables.cardText(v, "",600)],
+      ["host", testables.hostText(v)],
+      ["arg", arg(v)],
+      ["scrub", scrub(`child: ${v}`)],
+    ]) {
+      assert.equal(leakOfKey(out, body), "", `${sink} left key material (${tag}): ${JSON.stringify(out)}`)
+    }
+  }
+})
+
 test("a sentence's dashes and marks are not a cut", () => {
   // the bridge is only a cell of a cut when an alnum cell follows it
   for (const v of [

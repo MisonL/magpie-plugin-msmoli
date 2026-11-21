@@ -2269,10 +2269,31 @@ const cellWideKey = (c) => cellWide(c) && /[A-Za-z0-9+/=_.-]/.test(c.normalize("
 // a cell character, wide or not: a value whose first cell is folded
 // ("ms-Ａ１ｂ２") is one grid with the ASCII cells after it
 const cellCh = (c) => c !== undefined && (CELLRUN_CH.test(c) || cellWideKey(c))
+// a cell body as the key test reads it: full-width characters fold to the
+// ASCII key characters they stand for, and cells' gaps are dropped. Asking
+// the raw text called a folded cut "not a key" (measured on cb26bb1: a key
+// written entirely in full-width characters printed on all six outputs).
+const cellFold = (s) => /[^\x00-\x7f]/.test(s) ? Array.from(s, (c) => { const n = c.normalize("NFKC"); return n.length === 1 && /[A-Za-z0-9+/=_.-]/.test(n) ? n : "" }).join("") : s.replace(/[^A-Za-z0-9+/=_.-]/g, "")
+// whether a single character is key material once folded ("Ａ" is "A"): the
+// walk's own start gate runs on every character of a page, so the ASCII case
+// is decided without normalizing (measured: normalizing per character put a
+// 32 KB punctuation page at 1.5 s)
+const cellAlnum = (c) => {
+  if (c === undefined) return false
+  if (c.charCodeAt(0) < 0x80) return /[A-Za-z0-9]/.test(c)
+  const n = c.normalize("NFKC")
+  return n.length === 1 && /[A-Za-z0-9]/.test(n)
+}
+// a gap in either spelling: a full-width bar or dot is the cut's separator
+// too (measured: "Ａｂ｜Ｃｄ｜…" and "Ａ｜ｂ｜Ｃ｜ｄ｜…" printed whole)
+const cellGap = (c) => c !== undefined && (CELLRUN_GAPCH.test(c) || (c.charCodeAt(0) > 0x7f && CELLRUN_GAPCH.test(c.normalize("NFKC"))))
+// and whether a body holds any key material once folded: the ASCII answer
+// decides without building the folded string
+const cellHasAlnum = (s) => /[A-Za-z0-9]/.test(s) || /[^\x00-\x7f]/.test(s) && /[A-Za-z0-9]/.test(cellFold(s))
 const cellWideBeside = (s, from, dir) => {
   for (let n = 0, i = from + dir; n < 64 && i >= 0 && i < s.length; n += 1) {
     const c = s[i]
-    if (CELLRUN_GAPCH.test(c) || CELLRUN_CH.test(c)) { i += dir; continue }
+    if (cellGap(c) || CELLRUN_CH.test(c)) { i += dir; continue }
     return cellWideKey(c)
   }
   return false
@@ -2291,7 +2312,7 @@ const maskCellCut = (s, letters = true) => {
   let at = 0
   let k = 0
   while (k < s.length) {
-    if (!/[A-Za-z0-9]/.test(s[k]) || (k > 0 && /[A-Za-z0-9]/.test(s[k - 1]))) {
+    if (!cellAlnum(s[k]) || (k > 0 && cellAlnum(s[k - 1]))) {
       k += 1
       continue
     }
@@ -2306,6 +2327,10 @@ const maskCellCut = (s, letters = true) => {
     // equal cells rescanned its own tail from every start: 20 s at 320 KB)
     let flatLen = 0
     let over = false
+    // a head written entirely in full-width characters may be followed by
+    // cells of another width: the two spellings of one key do not share a
+    // cell width ("ＡｂＣｄ1234EfGh…" printed its first eight characters)
+    let wide0 = false
     let runEnd = k
     for (;;) {
       // the scan stops one character past the longest cell any cap allows: a
@@ -2325,19 +2350,20 @@ const maskCellCut = (s, letters = true) => {
       // the first cell may carry the front plus one cell of the grid
       // ("x=AKIA" + eight characters); eight is every other cell's limit
       const fr = cells.length === 0 ? cellFront(body) : null
-      const cap = fr ? 24 : 8
+      if (cells.length === 0) wide0 = [...body].length > 0 && [...body].every((c) => cellWideKey(c))
+      const cap = fr ? 24 : wide0 ? 26 : 8
       // a cut one character at a time is cells of one, and a lone mark of the
       // cut ("m s - f o r e i g n - 0 1 …") bridges only when an alnum cell
       // follows it
       let bridged = false
-      if (!/[A-Za-z0-9]/.test(body) && cells.length > 0 && body.length <= 2) {
+      if (!cellHasAlnum(body) && cells.length > 0 && body.length <= 2) {
         let e = q
-        while (e < s.length && e - q <= 8 && CELLRUN_GAPCH.test(s[e])) e += 1
+        while (e < s.length && e - q <= 8 && cellGap(s[e])) e += 1
         let e2 = e
-        while (e2 < s.length && e2 - e <= 25 && CELLRUN_CH.test(s[e2])) e2 += 1
-        bridged = /[A-Za-z0-9]/.test(s.slice(e, e2))
+        while (e2 < s.length && e2 - e <= 25 && cellCh(s[e2])) e2 += 1
+        bridged = cellHasAlnum(s.slice(e, e2))
       }
-      if (body.length < 1 || body.length > cap || (!/[A-Za-z0-9]/.test(body) && !bridged)) break
+      if (body.length < 1 || body.length > cap || (!cellHasAlnum(body) && !bridged)) break
       if (!over) {
         cells.push(body)
         ends.push(q)
@@ -2346,8 +2372,12 @@ const maskCellCut = (s, letters = true) => {
       runEnd = q
       if (!over && (cells.length >= 512 || flatLen > 4096)) over = true
       let g = q
-      while (g < s.length && g - q <= 8 && CELLRUN_GAPCH.test(s[g])) g += 1
-      if (g === q || g >= s.length || !cellCh(s[g])) break
+      while (g < s.length && g - q <= 8 && cellGap(s[g])) g += 1
+      if (g === q || g >= s.length || !cellCh(s[g])) {
+        // a run that goes on without a gap is one cut, not a grid's next cell:
+        // a wide-headed key's run is masked whole, so the walk keeps reading it
+        if (!wide0 || g !== q || g >= s.length || !cellCh(s[g]) || flatLen >= 4096) break
+      }
       p = g
     }
     const readEnd = ends.length > 0 ? ends[ends.length - 1] : k
@@ -2355,9 +2385,9 @@ const maskCellCut = (s, letters = true) => {
     // not longer than this; a table row that is one is masked, the safe
     // direction) and skipped in one step when it is not ("word word …")
     if (over) {
-      const flat = s.slice(bodyAt, runEnd).replace(/[^A-Za-z0-9+/=_.-]/g, "")
+      const flat = cellFold(s.slice(bodyAt, runEnd))
       const strong = cells.filter((c, i) => /\d/.test(c.normalize("NFKC")) || CELL_CASEY(c) || (i === 0 && (CELL_FRONT.test(c.normalize("NFKC")) || VENDOR.test(c.normalize("NFKC"))))).length
-      if (strong >= 2 && isKeyWord(flat.normalize("NFKC"), letters)) {
+      if (strong >= 2 && isKeyWord(flat, letters)) {
         out += s.slice(at, bodyAt) + maskToken(flat)
         at = runEnd
         k = runEnd
@@ -2383,7 +2413,7 @@ const maskCellCut = (s, letters = true) => {
     // between them. Only key material continues a cut: a mark (" --"), a word
     // and another value behind its own name ("y=…") are text around the grid
     let cont = stop
-    while (cont < s.length && cont - stop <= 8 && CELLRUN_GAPCH.test(s[cont])) cont += 1
+    while (cont < s.length && cont - stop <= 8 && cellGap(s[cont])) cont += 1
     let contEnd = cont
     while (contEnd < s.length && contEnd - cont <= 24 && cellCh(s[contEnd])) contEnd += 1
     const contCell = s.slice(cont, contEnd)
@@ -2395,16 +2425,16 @@ const maskCellCut = (s, letters = true) => {
     // only a mark joins the two runs into one cut: a space is the text's own
     // separator ("VERSION2 AKIA …" is a word and a grid, not one cut)
     let before = k - 1
-    for (let n = 0; n < 8 && before >= 0 && CELLRUN_GAPCH.test(s[before]); n += 1) before -= 1
+    for (let n = 0; n < 8 && before >= 0 && cellGap(s[before]); n += 1) before -= 1
     const beforeGap = s.slice(before + 1, k)
     let beforeAt = before
     while (beforeAt >= 0 && before - beforeAt < 32 && cellCh(s[beforeAt])) beforeAt -= 1
     const beforeCell = before >= 0 ? s.slice(beforeAt + 1, before + 1) : ""
-    const precedes = beforeGap.length > 0 && !/\s/.test(beforeGap) && beforeCell.length >= 4 && /[A-Za-z0-9]/.test(beforeCell) && !cellProse(beforeCell)
+    const precedes = beforeGap.length > 0 && !/\s/.test(beforeGap) && beforeCell.length >= 4 && cellHasAlnum(beforeCell) && !cellProse(beforeCell)
     // a candidate that hit the cell limit has not seen the cut's end: the
     // text behind it is a cell of the same grid ("AKIAREPORT " + a long grid),
     // not a longer cut the readings after this one own
-    const continues = cells.length < 512 && contCell.length >= 2 && /[A-Za-z0-9]/.test(contCell) && !cellProse(contCell) && !contCell.includes("=")
+    const continues = cells.length < 512 && contCell.length >= 2 && cellHasAlnum(contCell) && !cellProse(contCell) && !contCell.includes("=")
     if (continues || precedes) {
       k = Math.max(k + 1, readEnd)
       continue
@@ -2417,16 +2447,20 @@ const maskCellCut = (s, letters = true) => {
     const width = cells.length > 1 ? cells[1].length : 0
     const grid = cells.length > 0 && cells.every((c, i) => c.length === width || (i === 0 && fronted) || (i === cells.length - 1 && c.length < width))
     const flat = cells.join("")
+    // the same body as the key test reads it: a cut written in full-width
+    // characters is the key it folds to, and the fold does not change a
+    // cell width
+    const flatN = cellFold(flat)
     // every arm of the key test needs a letter: a page of numerals is no key,
     // and walking it cell by cell spent the hook's budget (32 KB of "12 34 "
     // in the card's own reading)
-    if (!/[A-Za-z]/.test(flat)) {
+    if (!/[A-Za-z]/.test(flatN)) {
       k = Math.max(k + 1, readEnd)
       continue
     }
-    const strong = cells.filter((c, i) => /\d/.test(c) || CELL_CASEY(c) || (i === 0 && (CELL_FRONT.test(c) || VENDOR.test(c)))).length
-    if (grid && cells.length >= 3 && cells.length <= 512 && strong >= 2 && flat.length >= 20 && flat.length <= 4096 && !cellWideBeside(s, k, -1) && !cellWideBeside(s, stop, 1) && isKeyWord(flat, letters)) {
-      out += s.slice(at, bodyAt) + maskToken(flat)
+    const strong = cells.filter((c, i) => { const n = cellFold(c); return /\d/.test(n) || CELL_CASEY(n) || (i === 0 && (CELL_FRONT.test(n) || VENDOR.test(n))) }).length
+    if (((grid && cells.length >= 3) || (wide0 && cells.length >= 2)) && cells.length <= 512 && strong >= 2 && flat.length >= 20 && flat.length <= 4096 && !cellWideBeside(s, k, -1) && !cellWideBeside(s, stop, 1) && isKeyWord(flatN, letters)) {
+      out += s.slice(at, bodyAt) + maskToken(wide0 ? flatN : flat)
       at = stop
       k = stop
       continue
