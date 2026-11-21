@@ -6,10 +6,11 @@
 # none of them is a credential.
 #
 # The fixtures that carry key shapes live in the tests; the README and the
-# source comments quote shapes as well (ghp_, sk-ant-, AKIA, ms-, xox-), and
-# none of those is a credential either — a comment's example is an invented
-# run, or a masked one. The test folder is what this config sets aside;
-# everything else in the repository, comments included, is scanned as usual.
+# source comments quote shapes as well (ghp_, sk-ant-, AKIA, ms-, and Slack's
+# xoxb- variants), and none of those is a credential either — a comment's
+# example is an invented run, or a masked one. The test folder is what this
+# config sets aside; everything else in the repository, comments included, is
+# scanned as usual.
 #
 # This file is read by ggshield and the pre-commit hook, not by GitGuardian's
 # GitHub App: an App scan of a push ignores it, and its filepath exclusions

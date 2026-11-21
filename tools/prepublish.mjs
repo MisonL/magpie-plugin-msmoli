@@ -27,7 +27,7 @@ import { existsSync } from "node:fs"
 const MIN_TESTS = 700
 
 // The count floor alone does not catch one file going missing: sync.test.mjs is
-// ~314 tests and style.test.mjs is 7, so dropping either still clears 700, and
+// 326 tests and style.test.mjs is 7, so dropping either still clears 700, and
 // the runner reports a green mode for what is left. (Measured: with
 // test/style.test.mjs deleted the gate printed "every mode passed".) The three
 // files are named here so a publish cannot go out with one of them gone.
@@ -114,9 +114,12 @@ const failedOf = (out) => lastSummary(out, SUMMARY_FAIL) || 0
 // dash (measured: a test printing "ok 1 the ticking clock shim is in effect
 // for test files" matched a gate that only asked for ok/✔ somewhere before
 // the name). What output cannot prove is the probe's own body: a probe test
-// edited down to no assertions still prints a passing row, and only the count
-// delta beside this check stands against that — a gate that reads output
-// cannot read the test it is reading the output of.
+// edited down to no assertions — or a shim quietly replaced — still prints a
+// passing row, and the count delta beside this check only shows an extra test
+// is registered, not that its assertions or the clock mode are real (measured:
+// a no-op ticking shim with assertion-free probes still printed 825/826/826).
+// A gate that reads output cannot read the test it is reading the output of;
+// a fully forged "✔ name (0.3ms)" line matches too.
 const probeRan = (out, name) => {
   const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
   const spec = new RegExp(`^\\s*[✔✖✓✗] ${esc} \\(\\d+(?:\\.\\d+)?\\s?ms\\)$`, "m")
