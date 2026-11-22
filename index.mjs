@@ -3512,10 +3512,16 @@ const bounded = (p, ms) => {
 
 // waitFor resolves when `p` settles or after `ms`, whichever comes first; the
 // loser is left running. The timer is unref'd so it never holds a process open.
-const waitFor = (p, ms) => {
+// TIMEUP is what waitFor answers when the timer wins. The default stays
+// undefined: a read that ran out of time answers nothing, and the caller's
+// "undefined means do not write" is the contract there. A write needs the
+// other answer — it has a retry to schedule when the wait ends without a
+// result, and a resolve could not be told from the host accepting the write.
+const TIMEUP = Symbol("timeup")
+const waitFor = (p, ms, timeout = undefined) => {
   let timer
   const alarm = new Promise((resolve) => {
-    timer = setTimeout(resolve, ms)
+    timer = setTimeout(() => resolve(timeout), ms)
     if (timer && typeof timer.unref === "function") timer.unref()
   })
   return Promise.race([p, alarm]).finally(() => clearTimeout(timer))
@@ -3676,7 +3682,10 @@ async function rememberAccountFields(client, token, learned, auth, dir, budgetEn
     const cap = Math.max(0, Math.min(WRITE_WAIT_MS, budgetEnd - Date.now()))
     writing.catch(failed)
     try {
-      await waitFor(writing, cap)
+      // the cap ending the wait is a failed write as much as a rejection is:
+      // nothing was proven, and keeping the cooldown would leave the name
+      // un-saved for an hour with nothing said (see the comment above)
+      if (await waitFor(writing, cap, TIMEUP) === TIMEUP) failed(new Error("写入未在时限内完成"))
     } catch (e) {
       failed(e)
     }

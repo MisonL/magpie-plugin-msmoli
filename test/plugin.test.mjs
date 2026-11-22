@@ -882,6 +882,27 @@ test("a deferred day is bounded like the remembered sites", async () => {
   testables.deferred.clear()
 })
 
+test("a day written with a tail the contract does not name still reads as that day", () => {
+  // onDay compares the date PART of the stamp, and that looseness is the
+  // point: ModelScope writes Beijing local time with no zone ("2026-11-07"
+  // or "2026-11-07 09:13:40"). If the column ever grew a zone or a tail we
+  // do not name, the row still stands for the day it says. The other
+  // reading — "a shape I do not parse is not today" — empties the ledger,
+  // the check-in answers inactive, and inactive SETTLES the day: the
+  // comment at onDay says exactly this, and a row silently dropped is worse
+  // for the user than a day off by the shift. Pinned so a future tightening
+  // has to be a decision, not a refactor.
+  const { onDay } = testables
+  assert.equal(onDay("2026-11-07T16:00:00Z", "2026-11-07"), true, "a zone marker is read by its day part, not refused")
+  assert.equal(onDay("2026-11-07T23:59:59+08:00", "2026-11-07"), true, "an offset likewise")
+  assert.equal(onDay("2026-11-07 09:13:40.123", "2026-11-07"), true, "so is a fraction of seconds")
+  // what IS refused is a stamp that does not START with the day, or whose
+  // ten characters are not a date, or that runs straight on into a digit:
+  // those are the shapes where the day part is a lie
+  assert.equal(onDay("2026-11-0709:13:40", "2026-11-07"), false, "the day running into a digit is not a stamp")
+  assert.equal(onDay("更新于 2026-11-07", "2026-11-07"), false, "a mention is not a stamp")
+  assert.equal(onDay("2026-13-07", "2026-13-07"), true, "onDay does not calendar-check the month")
+})
 test("a malformed stamp is not read as today", () => {
   // The comparison is the date's first ten characters, so a stamp that runs
   // straight on into a digit ("2026-10-2609:13:40") has the same prefix as a
@@ -6947,6 +6968,46 @@ test("the nickname is written back before the hook answers", async () => {
         const u = await p2.auth.usage(async () => ({ type: "api", key: "ms-await-0000-0000-000000000002" }))
         assert.equal(u.error, undefined, `usage should read: ${u.error}`)
         assert.equal(writes.length, before + 1, "the retried write must have landed by the time usage answers")
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.MAGPIE_MSMOLI_CONFIG
+    else process.env.MAGPIE_MSMOLI_CONFIG = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a write-back that never settles does not cool the retry for an hour", { timeout: 20000 }, async () => {
+  // The host's auth.set can hang on its store lock. The hook caps that wait,
+  // and the cap's own comment says a locked store must not cost an hour of
+  // the nickname's cooldown. It did: the capped wait ended as a RESOLVE, so
+  // the failure path never ran, the cooldown stayed set, and the next ask in
+  // the same process skipped the write it had promised to retry.
+  const dir = tmpDir("msmoli-pendwrite-")
+  writeFileSync(join(dir, "msmoli.json"), JSON.stringify({ checkinWindow: false }))
+  const saved = process.env.MAGPIE_MSMOLI_CONFIG
+  process.env.MAGPIE_MSMOLI_CONFIG = join(dir, "msmoli.json")
+  const token = "ms-pendwrite-0000-0000-0000-000000000101"
+  let calls = 0
+  const client = {
+    auth: { get: () => Promise.resolve({ type: "api", key: token }), set: () => { calls += 1; return new Promise(() => {}) } },
+    app: { log: () => {} },
+  }
+  try {
+    const p = await MsmoliPlugin({ directory: dir, client })
+    await withFetch(
+      {
+        "/openapi/v1/magicubes/transactions?page=1&page_size=50": { body: { success: true, data: { records: [day()] } } },
+        "/openapi/v1/magicubes/balance": { body: { success: true, data: { available_balance: 300 } } },
+        "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "小明" } } },
+      },
+      async () => {
+        const c1 = await p.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(c1.outcome, "done", c1.message)
+        assert.equal(calls, 1, "the first ask handed the name write to the host")
+        const c2 = await p.auth.checkin(async () => ({ type: "api", key: token }))
+        assert.equal(c2.outcome, "done", c2.message)
+        assert.equal(calls, 2, `a hung write proved nothing and must be tried again: ${calls} set() call(s)`)
       },
     )
   } finally {
