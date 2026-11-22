@@ -1092,7 +1092,7 @@ const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g
 const GLUE = new RegExp(String.raw`(?<=[A-Za-z0-9+\/=_.-])${INV}+(?=[A-Za-z0-9+\/=_.-])`, "gu")
 // VENDOR and MASKED are index.mjs's, to the letter: a key's front that is no
 // key on its own, and the ellipsis a mask carries.
-const VENDOR = /^(?:sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|akia|asia|aida|aliyun|ssh-rsa|-----begin)/i
+const VENDOR = /^(?:sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|akia|asia|aida|aliyun|ssh-rsa|-----begin|sg\.|xapp-)/i
 // the same fronts, unanchored, with the key characters that follow: the span
 // of a vendor key inside a larger word (a URL, a path, a header)
 // the body may carry a character the ASCII pass cannot read — a Cyrillic
@@ -1100,8 +1100,46 @@ const VENDOR = /^(?:sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|akia|asia|aida
 // written. The span runs over letters, numbers and marks of any script; what
 // it stops at is whitespace, a quote and the ASCII punctuation that frames a
 // value.
-const VENDOR_SPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida|ms-|aiza)[\p{L}\p{N}\p{M}_+\/=.-]*/giu
+const VENDOR_SPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida|ms-|aiza|sg\.|xapp-)[\p{L}\p{N}\p{M}_+\/=.-]*/giu
 const MASKED = "…"
+
+// A key the terminal coloured, a private key block, a JWT: each is one value
+// whose parts are cut by characters the word readings stop at (an escape
+// sequence, a line break, a dot). Asked piece by piece, the seam keeps eight
+// contiguous body characters, so these shapes are read whole before any
+// per-word pass writes a partial mask that hides them.
+const ANSI_ESCAPE = String.raw`\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\))`
+// taken out only between two key characters: a coloured path's own word break
+// and a trailing sequence after "ENOENT" are the text's, and joining what they
+// separate read "…1234 ENOENT" as one key
+const ANSI_IN_KEY = new RegExp(String.raw`(?<=[A-Za-z0-9+/=_.-])(?:${ANSI_ESCAPE})+(?=[A-Za-z0-9+/=_.-])`, "gu")
+const PRIVATE_BLOCK = /-----BEGIN ((?:[A-Z]+ )*PRIVATE KEY)-----([A-Za-z0-9+/=\s]+)-----END \1-----/g
+const DOTTED = /(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]+\.)[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+/g
+const ESC = "\u001b"
+const PRIVATE_LEAD = /-----BEGIN [A-Z ]*PRIVATE KEY-----/
+const maskStructured = (s) => {
+  // each shape is asked only when the text carries a sign of it: a page with
+  // no escape character, no dot and no BEGIN line has nothing these readings
+  // can take, and scanning it over spent the budget
+  if (!s.includes(".") && !s.includes(ESC) && !PRIVATE_LEAD.test(s)) return s
+  return s
+    .replace(ANSI_IN_KEY, "")
+    .replace(
+      PRIVATE_BLOCK,
+      (_, kind, body) => `-----BEGIN ${kind}-----${mask(body.replace(/\s/g, ""))}-----END ${kind}-----`
+    )
+    .replace(DOTTED, (word) => {
+      const parts = word.split(".")
+      const out = []
+      for (let i = 0; i < parts.length; i += 1) {
+        if (/^eyJ[A-Za-z0-9_-]{8,}$/.test(parts[i]) && /^eyJ[A-Za-z0-9_-]{8,}$/.test(parts[i + 1] ?? "") && (parts[i + 2]?.length ?? 0) >= 8) {
+          out.push(mask(parts.slice(i, i + 3).join(".")))
+          i += 2
+        } else out.push(parts[i])
+      }
+      return out.join(".")
+    })
+}
 // keyAt: a word is the front of a key when it is key-shaped on its own or
 // carries a vendor's front. A front like "ghp_" or "sk-" is under every word
 // floor, and a key cut by whitespace leaves it as a word of its own.
@@ -2073,7 +2111,7 @@ function argInner(v, allowGrid) {
   // same question of the same characters: it is removed once and handed to each
   // ("glue" is the value with an invisible character between two key characters
   // taken out, so a key cut by one is put back together)
-  const raw0 = orig.replace(GLUE, "")
+  const raw0 = maskStructured(orig).replace(GLUE, "")
   // a key the text wrote as a grid of equal cells ("Ab | Cd | 12 | …",
   // "AKIA    IOSF    ODNN    …", a bullet-cut AWS secret) is read first: the
   // readings below look for the ms- front, a frame or a run of words, and a
@@ -2578,7 +2616,11 @@ function joinFramed(s) {
     // as written — the per-word pass owns the word whole. Only a word with a
     // frame inside it is that case: with no frame the head IS the word, and
     // the walk below decides whether the words after it are the same key
-    if (cut >= 0 && isKey(t0)) continue
+    // ...but a front-led head goes to the walk below even when it reads as key
+    // material already: a key cut right after its frame's front
+    // ("token=ghp_AbCd1234  EfGh…") is one key, and skipping it here left the
+    // seam's eight characters in the clear.
+    if (cut >= 0 && isKey(t0) && !(VENDOR.test(head) || /^ms-/i.test(head))) continue
     // and a frame with key material in front of it is not that value's frame:
     // eight characters of it is longer than any word a name is, and a short
     // head behind it is the key's own next character, not a new value's start.
@@ -2626,7 +2668,11 @@ function joinFramed(s) {
       // behind one mask ("ms-aaaa…5555 ms-zzzz…5555" became one), and a
       // truncated key beside a whole one lost its own four ends (splitKey's
       // walk breaks at a front for the same reason)
-      if (VENDOR.test(stem) || /^(?:ms-|sk-)/i.test(stem) || (stem.length >= 12 && isKey(stem))) break
+      // (a whole key behind a frame is 40 characters for the ghp_/sk_/ms-
+      // shapes and 20 for an AKIA id: a front-led head shorter than 28 is a
+      // truncated piece, not a separate key)
+      const cutHead = (VENDOR.test(head) || /^ms-/i.test(head)) && head.length < 28
+      if (VENDOR.test(stem) || /^(?:ms-|sk-)/i.test(stem) || (stem.length >= 12 && isKey(stem) && !cutHead)) break
       // a word of prose ends the run: a value's body carries a digit or a
       // capital, a sentence's next word does not — unless the word is a piece
       // of a key cut into groups and the join so far already reads as one
@@ -3221,7 +3267,7 @@ export function scrub(out, ...secrets) {
   // than the shape pass can. Run the other way round, a key echo cut by
   // spaces was already masked as an anonymous run ("aaaa…5555") and the
   // better reading never saw it.
-  let s = out
+  let s = maskStructured(String(out ?? ""))
   for (const secret of secrets) {
     if (secret) s = maskEchoes(s.split(secret).join(mask(secret)), secret)
   }

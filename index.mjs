@@ -1070,6 +1070,38 @@ const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
 // character wide at each lookaround, so it is a linear pass.
 const GLUE = new RegExp(String.raw`(?<=[A-Za-z0-9+\/=_.-])${INV}(?=[A-Za-z0-9+\/=_.-])`, "gu")
 
+// These structures must be read before any per-word mask makes their seams opaque.
+const ANSI_ESCAPE = String.raw`\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\))`
+// taken out only between two key characters: a coloured path's own word break
+// and a trailing sequence after "ENOENT" are the text's, and joining what they
+// separate read "…1234 ENOENT" as one key
+const ANSI_IN_KEY = new RegExp(String.raw`(?<=[A-Za-z0-9+/=_.-])(?:${ANSI_ESCAPE})+(?=[A-Za-z0-9+/=_.-])`, "gu")
+const PRIVATE_BLOCK = /-----BEGIN ((?:[A-Z]+ )*PRIVATE KEY)-----([A-Za-z0-9+/=\s]+)-----END \1-----/g
+const DOTTED = /(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]+\.)[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+/g
+const ESC = "\u001b"
+const PRIVATE_LEAD = /-----BEGIN [A-Z ]*PRIVATE KEY-----/
+const maskStructured = (s) => {
+  // each shape is asked only when the text carries a sign of it: a page with
+  // no escape character, no dot and no BEGIN line has nothing these readings
+  // can take, and scanning it over spent the hook's budget (measured: a 32 KiB
+  // punctuation page went past its own linear-time ceiling)
+  if (!s.includes(".") && !s.includes(ESC) && !PRIVATE_LEAD.test(s)) return s
+  return s
+    .replace(ANSI_IN_KEY, "")
+    .replace(PRIVATE_BLOCK, (_, kind, body) => `-----BEGIN ${kind}-----${maskToken(body.replace(/\s/g, ""))}-----END ${kind}-----`)
+    .replace(DOTTED, (word) => {
+    const parts = word.split(".")
+    const out = []
+    for (let i = 0; i < parts.length; i += 1) {
+      if (/^eyJ[A-Za-z0-9_-]{8,}$/.test(parts[i]) && /^eyJ[A-Za-z0-9_-]{8,}$/.test(parts[i + 1] ?? "") && (parts[i + 2]?.length ?? 0) >= 8) {
+        out.push(maskToken(parts.slice(i, i + 3).join(".")))
+        i += 2
+      } else out.push(parts[i])
+    }
+    return out.join(".")
+  })
+}
+
 // tokenShaped is a ModelScope key seen in someone else's text. Every key
 // ModelScope issues starts with "ms-", and tokenOf only lets visible ASCII
 // out (SENDABLE), so the run it matches is the same character set — a key
@@ -1170,7 +1202,7 @@ const maskShaped = (m) => (keyBody.test(m) ? maskToken(m) : m)
 // behind it is not asked — a name that starts with one of these is a key first.
 // (a key can be echoed upper-cased — "SK-ANT-API03-…" — and that is the same
 // key; the letters are compared without case)
-const VENDOR = /^(?:sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|akia|asia|aida|aliyun|ssh-rsa|-----begin)/i
+const VENDOR = /^(?:sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|akia|asia|aida|aliyun|ssh-rsa|-----begin|sg\.|xapp-)/i
 const keyAt = (word, letters) => (MAYKEY(word) && isKeyWord(word, letters)) || VENDOR.test(word) || /^ms-/i.test(word)
 // maskSpaced is the other reading of a piece of text: a key cut by whitespace
 // is read as one key. Measured without it: a 40-character ghp_ token cut into
@@ -1201,7 +1233,7 @@ const WORD_MASK = /[A-Za-z0-9_+\/=-]{1,4}…[A-Za-z0-9]{1,4}(?![A-Za-z0-9_])/
 // and each was printed whole when this listed only vendor fronts and long
 // runs with a digit in them. A name beside the mask ("providerNickName=[")
 // reads as no key there either, so it stays skipped as before.
-const REST_VENDOR = /sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|ms-|akia|asia|aida|aliyun|ssh-rsa/i
+const REST_VENDOR = /sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|ms-|akia|asia|aida|aliyun|ssh-rsa|sg\.|xapp-/i
 // the value of a frame ("efg=" / "NickName=[") is the key's own span; the
 // name in front of it is what made the run read as one word, and isKeyWord
 // judges a word, so the name has to come off first
@@ -1245,7 +1277,7 @@ const tailOf = (w) => w.match(/[A-Za-z0-9]+$/)?.[0] ?? ""
 // "key=sk-ant-…"), or its last letters and digits. A front carries an
 // underscore or a hyphen, and a bare tail would cut "ghp_1234AbCd" at the
 // underscore, keeping what the front does not
-const FRONT_IN = /(?:sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|ms-|akia|asia|aida)[\x21-\x7e]*$/i
+const FRONT_IN = /(?:sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|ms-|akia|asia|aida|sg\.|xapp-)[\x21-\x7e]*$/i
 const keyFrontOf = (w) => (VENDOR.test(w) || /^ms-/i.test(w) ? w : w.match(FRONT_IN)?.[0] ?? tailOf(w))
 // a bare vendor stem cut off its punctuation ("ms", "sk", "ghp"): the key's
 // front, with the rest of the front in the next piece ("ms -vqmjh…")
@@ -1385,7 +1417,7 @@ function maskSpaced(s, letters) {
       /^[ \t\u00a0\u3000]+$/.test(gap(i + 1)) &&
       keyAt(words[i][0], letters) &&
       keyAt(words[i + 1][0], letters) &&
-      !(front(words[i][0]) && isKeyWord(words[i][0] + words[i + 1][0], letters))
+      !(front(keyFrontOf(words[i][0])) && isKeyWord(words[i][0] + words[i + 1][0], letters))
     let j = i
     let last = i
     // the last word the run read into its body: a piece read to keep a key in
@@ -1931,7 +1963,7 @@ const LISTY = /^(?:[a-z]+\d+)+$/
 // The vendor fronts the CLI reads as evidence on their own, unanchored (a key
 // can sit behind a frame or inside a URL). The span runs over key characters;
 // what it stops at is whitespace or a character no key carries.
-const VSPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida|aiza|aliyun|ms-)[\p{L}\p{N}\p{M}_+\/=.\-]*/iu
+const VSPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida|aiza|aliyun|ms-|sg\.|xapp-)[\p{L}\p{N}\p{M}_+\/=.\-]*/iu
 // vendorSpanOf is the CLI's test, word for word where it can be: the body
 // behind a vendor's front has to read as key material, not as a name's words.
 // What it returns is the key's own span — from the front to the last key
@@ -2528,7 +2560,7 @@ const maskCellCut = (s, letters = true) => {
   }
   return out + s.slice(at)
 }
-const maskAll = (s, letters) => maskKeys(maskSpaced(maskCut(maskSpaced(maskCells(maskCaps(maskWide(maskSep(maskCellCut(s, letters), letters), letters), letters), letters), letters), letters), letters), letters)
+const maskAll = (s, letters) => maskKeys(maskSpaced(maskCut(maskSpaced(maskCells(maskCaps(maskWide(maskSep(maskCellCut(typeof s === "string" ? maskStructured(s) : s, letters), letters), letters), letters), letters), letters), letters), letters), letters)
 
 // maskSep reads a key cut by punctuation: a comma, a bar, a full-width stop or
 // bar, an ideographic comma, a semicolon, a dash, or a joiner a copy left
@@ -3255,7 +3287,7 @@ const maskKeys = (s, letters = true) => {
 // looks like a key of ANOTHER vendor (keyShaped) — the server's own words are
 // not vetted by the shape of ours.
 const cardText = (value, token, max = 200) => {
-  let s = String(value ?? "").replace(GLUE, "")
+  let s = maskStructured(String(value ?? "")).replace(GLUE, "")
   if (typeof token === "string" && token) s = s.split(token).join(maskToken(token))
   // the punctuation-cut reading runs before the shape pass: tokenShaped stops
   // at a mark it does not read ("ms-alpha-0123-45、67-…") and writes a mask
@@ -3275,7 +3307,7 @@ const cardText = (value, token, max = 200) => {
 // matter — the key this process holds, the ms- shape, other vendors' key
 // shapes, a bare digest — only the "16+ characters with a case mix" arm is off.
 const nameText = (value, token, max = 200) => {
-  let s = String(value ?? "").replace(GLUE, "")
+  let s = maskStructured(String(value ?? "")).replace(GLUE, "")
   if (typeof token === "string" && token) s = s.split(token).join(maskToken(token))
   // with no token in hand the mask's shape pass is the only guard there is,
   // so the case-mix arm has to stay on. The punctuation-cut reading runs

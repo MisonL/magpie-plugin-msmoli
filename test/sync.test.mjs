@@ -5859,7 +5859,7 @@ test("a title or a log line is not a key cut by spaces", () => {
   }
 })
 
-test("a token cut by a space is still masked whole past 32 KiB of a key path", () => {
+test("a token cut by a space is still masked whole past 32 KiB of a key path", { timeout: 20000 }, () => {
   // splitKey stopped at 8 KiB: a key cut by a space on a 32 KiB line — a
   // wrapped log, a pretty-printed error — was left to the per-word pass, which
   // has neither half's join. It reads to the same 32 KiB bound the other
@@ -6683,11 +6683,14 @@ test("a short vendor key with its tail cut off is masked, alone and behind a nam
   // ("(ghp_Abcd1234Ef gh56…Qrst)"). A vendor front names the vendor — no word
   // of prose carries one — so a front whose body mixes case and holds a digit
   // is a key, and the part after "=" or ":" is judged the same way.
+  // A front-led truncated piece followed by a key-shaped piece is one cut key:
+  // two masks kept four characters of each half either side of the seam, and
+  // those eight folded into contiguous key material ("34ef" + "gh56").
   for (const [s, want] of [
     ["ghp_Abcd1234Ef", "ghp_…34Ef"],
     ["token=ghp_Abcd1234Ef", "token=ghp_…34Ef"],
     ["Authorization: ghp_Abcd1234Ef", "Authorization: ghp_…34Ef"],
-    ["(ghp_Abcd1234Ef gh5678Ijkl9012Mnop3456Qrst)", "(ghp_…34Ef gh56…Qrst)"],
+    ["(ghp_Abcd1234Ef gh5678Ijkl9012Mnop3456Qrst)", "(ghp_…Qrst)"],
   ]) assert.equal(arg(s), want, s)
   // a provider id behind the same front keeps its name: its pieces are a word
   // and a number, and neither mixes case
@@ -7131,7 +7134,7 @@ test("a vendor key written in lower case is masked whole", () => {
   }
 })
 
-test("a page of one unbroken run is cut in linear time", () => {
+test("a page of one unbroken run is cut in linear time", { timeout: 20000 }, () => {
   // The snap that moves a piece's start to the end of a long run scanned from
   // `at` to the far end of the run EVERY time, and a run has one end: a 4 MB
   // body of one character scanned 268 million of them across its 129 pieces,

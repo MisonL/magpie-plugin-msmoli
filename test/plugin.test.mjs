@@ -14555,6 +14555,93 @@ test("a cut one character a time behind a bar is masked on every sink", () => {
   }
 })
 
+const auditSinks = [
+  ["maskAll", (s) => testables.maskAll(s, true)],
+  ["card", (s) => testables.cardText(s, "", 4000)],
+  ["name", (s) => testables.nameText(s, "", 4000)],
+  ["host", (s) => testables.hostText(s)],
+  ["arg", arg],
+  ["scrub", scrub],
+]
+const auditLeaks = (cases) => cases.flatMap(([v, key]) => auditSinks.flatMap(([tag, sink]) => {
+  const out = sink(v)
+  const leak = leakOfKey(out, key)
+  return leak ? [`${tag}: ${JSON.stringify(v)} -> ${JSON.stringify(out)} (${leak})`] : []
+}))
+
+test("a framed vendor key cut once has no clear seam", () => {
+  // A key cut by one space/ tab / line break behind a NAME= frame was masked
+  // half by half, and the seam kept eight contiguous body characters in the
+  // clear ("token=ghp_…AbCd 1234E…3456" printed "abcd1234"). Every cut point
+  // is asked, because the reading that owns the seam depends on where the cut
+  // falls (a front-only head, a key-shaped pair, a long second piece).
+  const key = "ghp_AbCd1234EfGh5678IjKl9012MnOp3456"
+  const cases = []
+  for (const gap of [String.fromCharCode(32), "\t", "\n"]) {
+    for (let at = 8; at <= key.length - 8; at += 1) {
+      const cut = key.slice(0, at) + gap + key.slice(at)
+      for (const [pre, post] of [["token=", ""], ["aws_secret_access_key=", ""], ['{"token":"', '"}']]) cases.push([pre + cut + post, key])
+    }
+  }
+  assert.deepEqual(auditLeaks(cases), [])
+})
+
+test("terminal color and title sequences do not split a key", () => {
+  // The card's word readings take an escape sequence as a word break, so a
+  // colored key ("x=ghp_AbCd1234" ESC "[31m" "EfGh…") kept its tail whole
+  // (measured: 20 contiguous characters after the sequence, 11 after an OSC
+  // title). The sequence is stripped before any reading, so the key reads as
+  // one word; and a sequence with ordinary text around it still leaves only
+  // the text.
+  const key = "ghp_AbCd1234EfGh5678IjKl9012MnOp3456"
+  const esc = String.fromCharCode(27)
+  const cases = []
+  for (const seq of [esc + "[31m", esc + "]0;title" + String.fromCharCode(7), esc + "]0;title" + esc + String.fromCharCode(92)]) {
+    for (const at of [8, 12, 20]) cases.push(["x=" + key.slice(0, at) + seq + key.slice(at), key])
+  }
+  assert.deepEqual(auditLeaks(cases), [])
+  // a sequence outside a key stays with the text it decorates: the card
+  // sanitizes the control characters later, but the word "error" it framed
+  // is still the word, not a piece of a coloured key
+  for (const [, sink] of auditSinks) assert.ok(!sink(esc + "[31merror" + esc + "[0m").includes("AbCd"))
+})
+
+test("SendGrid and Slack application keys in queries are masked whole", () => {
+  // SendGrid's SG.xxxx.yyyy and Slack's xapp-… app tokens were not fronts any
+  // reading knew, so a key in a URL query went out with 18 and 33 contiguous
+  // characters in the clear (six sinks each). The fronts are in the lists now,
+  // and the whole value behind them is one mask.
+  const cases = []
+  for (const key of ["SG.AbCd1234EfGh.IjKl9012MnOp3456QrSt7890", "xapp-1-A012B3C4D5E-1111222233334-abcd1234efgh5678"]) {
+    // (the key is a word of its own after the frame, not glued to a path: a
+    // value that starts like a path keeps its shape, the README's own rule)
+    for (const frame of ["https://example.com/?token=", "open /var/log/app.log: denied "]) cases.push([frame + key + "&x=1", key])
+  }
+  assert.deepEqual(auditLeaks(cases), [])
+})
+
+test("a JWT query is not split at dots or an underscore in its signature", () => {
+  // header.payload.signature masked segment by segment kept the dots' four
+  // characters at each end beside the next segment ("…VCJ9.eyJz…"), and the
+  // signature's underscore seam read as 16 contiguous characters ("1p1rww1g…").
+  // The three-part shape is masked whole before any per-word pass runs.
+  const key = "eyJAbCd1234EfGh5678.eyJIjKl9012MnOp3456.AbCd1234EfGh5678IjKl9012MnOp3456_QrSt7890UvWx"
+  assert.deepEqual(auditLeaks([["https://example.com/?key=" + key + "&x=1", key]]), [])
+})
+
+test("a private key block is one mask across its line breaks", () => {
+  // Each body row was judged as its own words, and the row seam kept eight
+  // contiguous characters ("8ckbmyht") on arg and scrub. A BEGIN/END block is
+  // one value: its body's whitespace is the format's, not a cut.
+  const rows = ["AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890UvWx1234YzAb5678CdEf9012GhIj", "KlMn1234OpQr5678StUv9012WxYz3456"]
+  const cases = []
+  for (const gap of ["\n", "\r\n", "\n\n"]) {
+    const v = "-----BEGIN RSA PRIVATE KEY-----" + gap + rows.join(gap) + gap + "-----END RSA PRIVATE KEY-----"
+    cases.push([v, rows.join("")])
+  }
+  assert.deepEqual(auditLeaks(cases), [])
+})
+
 test("a grid whose first cell is folded is masked whole", () => {
   // Measured on 8031251: "ms-Ａ１ｂ２ | C3d4 | …" printed whole on all six
   // outputs — the cell walk stopped at the full-width characters and the fold
