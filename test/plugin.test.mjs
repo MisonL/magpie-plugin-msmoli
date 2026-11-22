@@ -14102,6 +14102,21 @@ test("a product name with its build number is not a key", () => {
   }
 })
 
+test("a build number with a short letter lead is not a key on the card", () => {
+  // The CLI's randomish has kept "v202610310001" since the serial
+  // exception (sync.test pins it); the card's copy never got the line,
+  // so the same build number came out "v202…0001" on every card sink.
+  for (const v of ["v202611210001", "r202610310001", "ab1234567890123"]) {
+    assert.equal(testables.maskAll(v, true), v, `the card masked a build number: ${JSON.stringify(v)}`)
+    assert.equal(testables.cardText(v, "", 600), v, `cardText: ${JSON.stringify(v)}`)
+    assert.equal(testables.hostText(v), v, `hostText: ${JSON.stringify(v)}`)
+    assert.equal(arg(v), v, `arg: ${JSON.stringify(v)}`)
+  }
+  // a key's letters do not stop after the lead: three letters then a
+  // digit, then letters again, is still masked
+  assert.notEqual(testables.maskAll("ab12cd34ef56gh78", true), "ab12cd34ef56gh78")
+})
+
 test("a grid is not skipped for the marks and prose around it", () => {
   // Measured on 35f9053: the continuation after a grid was judged by "has a
   // letter or digit", so a mark (" --") stopped the reading and the grid went

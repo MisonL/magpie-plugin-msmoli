@@ -1912,6 +1912,10 @@ const alternates = (w) => (w.match(/[a-z][A-Z]/g) ?? []).length >= 2
 const VOWELS = /[aeiouy]/g
 const randomish = (r) => {
   if (r.length < 12 || r.length > 40 || !/[a-z]/.test(r)) return false
+  // a short letter lead and then nothing but digits is a build number or a
+  // serial (the CLI randomish has kept this shape since round 32; a
+  // generated key spreads its letters through the run)
+  if (/^[a-z]{1,3}\d{8,}$/.test(r)) return false
   if ((r.match(VOWELS) ?? []).length / r.length >= 0.2) return false
   const digits = (r.match(/\d/g) ?? []).length
   const transitions = (r.match(/[a-z][0-9]|[0-9][a-z]/g) ?? []).length
