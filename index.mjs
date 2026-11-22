@@ -4971,6 +4971,7 @@ export async function MsmoliPlugin(input) {
               outcome: "inactive",
               message: "登录已触达，账本里还没有今天的到账；半小时后再核对一次",
               until: new Date(Date.now() + AGAIN_MS).toISOString(),
+              ...(marks.expired ? { signIn: "expired" } : {}),
             }
           }
           if (beforeDaily.length) {
@@ -4978,9 +4979,9 @@ export async function MsmoliPlugin(input) {
             // promise a re-check the host will not make. Today has credits of
             // other kinds and no check-in reward, which reads as an account
             // outside the activity rather than a grant still on its way.
-            return { outcome: "inactive", message: "登录已触达，今天有到账但没有签到奖励（账号可能不在活动范围）" }
+            return { outcome: "inactive", message: "登录已触达，今天有到账但没有签到奖励（账号可能不在活动范围）", ...(marks.expired ? { signIn: "expired" } : {}) }
           }
-          return { outcome: "inactive", message: "登录已触达，但今天没有到账记录（账号可能不在活动范围）" }
+          return { outcome: "inactive", message: "登录已触达，但今天没有到账记录（账号可能不在活动范围）", ...(marks.expired ? { signIn: "expired" } : {}) }
           }
         } catch (e) {
           return { outcome: "failed", message: cardText(whyOf(e), token) || "签到失败", ...(signedOut(e) ? { signIn: "expired" } : {}) }
@@ -4997,7 +4998,7 @@ export async function MsmoliPlugin(input) {
         // host showing a retry for a dead token. Say it here, once, for every
         // exit that marks the account expired.
         if (answer?.signIn === "expired" && !/重新登录/.test(answer.message ?? "")) {
-          return { ...answer, message: `${answer.message ?? ""}；登录已失效（HTTP401），请重新登录 msmoli`.replace(/^；/, "") }
+          return { ...answer, message: `${answer.message ?? ""}；登录已失效（HTTP 401），请重新登录 msmoli`.replace(/^；/, "") }
         }
         return answer
       },
