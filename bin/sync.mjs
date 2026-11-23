@@ -1100,7 +1100,7 @@ const VENDOR = /^(?:sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|akia|asia|aida
 // written. The span runs over letters, numbers and marks of any script; what
 // it stops at is whitespace, a quote and the ASCII punctuation that frames a
 // value.
-const VENDOR_SPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida|ms-|aiza|sg\.|xapp-)[\p{L}\p{N}\p{M}_+\/=.-]*/giu
+const VENDOR_SPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida|ms-|aiza|(?:glpat-|gr1348id-|rtg-yr25fp-|ya29\.|atlassian[-_]|dop_v1_|figd-|glsa[-_]|tfpat[-_]|shpat[-_]|rc_token_|sonar_|pypi-)|sg\.|xapp-)[\p{L}\p{N}\p{M}_+\/=.-]*/giu
 const MASKED = "…"
 
 // A key the terminal coloured, a private key block, a JWT: each is one value

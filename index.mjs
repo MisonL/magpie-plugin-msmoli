@@ -1963,7 +1963,7 @@ const LISTY = /^(?:[a-z]+\d+)+$/
 // The vendor fronts the CLI reads as evidence on their own, unanchored (a key
 // can sit behind a frame or inside a URL). The span runs over key characters;
 // what it stops at is whitespace or a character no key carries.
-const VSPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida|aiza|aliyun|ms-|sg\.|xapp-)[\p{L}\p{N}\p{M}_+\/=.\-]*/iu
+const VSPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida|aiza|aliyun|ms-|(?:glpat-|gr1348id-|rtg-yr25fp-|ya29\.|atlassian[-_]|dop_v1_|figd-|glsa[-_]|tfpat[-_]|shpat[-_]|rc_token_|sonar_|pypi-)|sg\.|xapp-)[\p{L}\p{N}\p{M}_+\/=.\-]*/iu
 // vendorSpanOf is the CLI's test, word for word where it can be: the body
 // behind a vendor's front has to read as key material, not as a name's words.
 // What it returns is the key's own span — from the front to the last key

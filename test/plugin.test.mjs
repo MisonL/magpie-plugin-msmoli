@@ -14620,6 +14620,31 @@ test("SendGrid and Slack application keys in queries are masked whole", () => {
   assert.deepEqual(auditLeaks(cases), [])
 })
 
+test("vendor fronts no reading knew are masked whole, ends not kept", () => {
+  // A long front outside the vendor lists went out as "glpat-AbCd…3456": the
+  // shape pass framed the front and kept the mask's own four at its end, so
+  // the front's last characters and the body's first folded into eight
+  // contiguous key characters ("glpatabc") on all three CLI sinks. The fronts
+  // join the lists now, and the mask covers the whole value — a front whose
+  // own letters fold to eight or more ("github_pat", "atlassian") cannot be
+  // kept in the clear either, which is why github_pat_ already masks whole.
+  const body = "AbCd1234EfGh5678IjKl9012MnOp3456"
+  const fronts = ["glpat-", "ya29.", "dop_v1_", "figd-", "glsa-", "tfpat_", "shpat_", "atlassian-ap_", "gr1348id-", "rtg-yr25fp-", "rc_token_", "sonar_", "pypi-"]
+  const cases = []
+  for (const f of fronts) {
+    for (const frame of ["token=", "https://x.io/v1?token=", "Authorization: "]) cases.push([frame + f + body + "&x=1", f + body])
+  }
+  assert.deepEqual(auditLeaks(cases), [])
+  // a front whose words are prose keeps them: a company, a path, a version
+  for (const s of [
+    "https://gitlab.com/groups/mygroup/-/edit",
+    "sonar_host = localhost:9000",
+    "figd config set theme dark",
+    "the atlassian-api docs at dev.atlassian.com",
+    "pypi.org/simple/ for the package index",
+  ]) assert.equal(arg(s), s, `ordinary text was masked: ${JSON.stringify(s)} -> ${JSON.stringify(arg(s))}`)
+})
+
 test("a JWT query is not split at dots or an underscore in its signature", () => {
   // header.payload.signature masked segment by segment kept the dots' four
   // characters at each end beside the next segment ("…VCJ9.eyJz…"), and the
