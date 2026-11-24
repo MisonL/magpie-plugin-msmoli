@@ -1055,7 +1055,12 @@ const maskEchoes = (s, token) => {
 // a shape is all that is known there, and run on across a line it would mask
 // the next line's words. maskEchoes no longer needs a separate predicate —
 // it keeps the alphanumeric characters and skips everything else.
-const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
+// (the class is the CLI's: a mark (Mn/Me), a no-break space or a thin space
+// (Zs) pasted into a key is just as invisible as a control character, and
+// leaving them out kept the halves of a key apart; a tab, a space, a no-break
+// space and an ideographic space are the text's separators, not a key's own
+// characters — the glue step used to delete a real tab between three words)
+const INV = String.raw`(?:(?![\n\r\t \u00A0\u3000])[\p{Cc}\p{Cf}\p{Mn}\p{Me}\p{Zs}])`
 // the one place a token-shaped run is turned into a mask is maskShaped, below:
 // the shape alone found a run; the body it carries is what decides.
 
@@ -1067,17 +1072,33 @@ const INV = String.raw`(?:(?![\n\r])[\p{Cc}\p{Cf}])`
 // the rest of the pipeline sees the text, but only where it sits between two
 // key-alphabet characters — a real space, a line break or a comma is not glued,
 // so a key is put back together and ordinary words are left alone. One
-// character wide at each lookaround, so it is a linear pass.
-const GLUE = new RegExp(String.raw`(?<=[A-Za-z0-9+\/=_.-])${INV}(?=[A-Za-z0-9+\/=_.-])`, "gu")
+// character wide at each lookaround, so it is a linear pass. A run of them is
+// taken together: two paste marks side by side cut a key just as well as one.
+const GLUE = new RegExp(String.raw`(?<=[A-Za-z0-9+\/=_.-])${INV}+(?=[A-Za-z0-9+\/=_.-])`, "gu")
 
 // These structures must be read before any per-word mask makes their seams opaque.
-const ANSI_ESCAPE = String.raw`\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\))`
+const ANSI_ESCAPE = String.raw`\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u009c\u001b]*(?:\u0007|\u009c|\u001b\\))`
 // taken out only between two key characters: a coloured path's own word break
 // and a trailing sequence after "ENOENT" are the text's, and joining what they
 // separate read "…1234 ENOENT" as one key
 const ANSI_IN_KEY = new RegExp(String.raw`(?<=[A-Za-z0-9+/=_.-])(?:${ANSI_ESCAPE})+(?=[A-Za-z0-9+/=_.-])`, "gu")
-const PRIVATE_BLOCK = /-----BEGIN ((?:[A-Z]+ )*PRIVATE KEY)-----([A-Za-z0-9+/=\s]+)-----END \1-----/g
-const DOTTED = /(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]+\.)[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+/g
+// an OSC that is never closed is a cut too, when key material sits right in
+// front of it: the rest of the line is the sequence's payload, and a payload
+// carrying a key's body did reach the card whole (measured: "ghp_AbCd1234"
+// ESC "]2;" "EfGh…3456", eight contiguous characters). The guard asks for key
+// material in front — eight characters with a digit or both cases — so an
+// ordinary coloured log line ("status" ESC "]2;loading") keeps its payload.
+const ANSI_OPEN_KEY = /([A-Za-z0-9+/=_.-]{8,})\u001b\][^\u0007\u009c\u001b\n\r]*/gu
+// the block is delimited by its BEGIN and END lines, and its interior may
+// carry the standard header fields ("Proc-Type:", "DEK-Info:"), a comment
+// line, or a blank line — a body read as base64 and whitespace alone made a
+// block with any of them invisible, and every row was masked on its own
+const PRIVATE_BLOCK = /-----BEGIN ((?:[A-Z]+ )*PRIVATE KEY)-----([\s\S]{0,65536}?)-----END \1-----/g
+// a dot inside a credential value is a cut's spelling as well as the value's
+// own, and one space either side of it was enough to put the two halves into
+// two masks ("eyJ…" ". " "eyJ…" kept eight characters on all four card
+// outputs). The match keeps the written separators for the rebuild below.
+const DOTTED = /(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]+[ \t]{0,2}\.)[A-Za-z0-9_-]+(?:[ \t]{0,2}\.[ \t]{0,2}[A-Za-z0-9_-]+)+/g
 const ESC = "\u001b"
 const PRIVATE_LEAD = /-----BEGIN [A-Z ]*PRIVATE KEY-----/
 const maskStructured = (s) => {
@@ -1086,19 +1107,46 @@ const maskStructured = (s) => {
   // can take, and scanning it over spent the hook's budget (measured: a 32 KiB
   // punctuation page went past its own linear-time ceiling)
   if (!s.includes(".") && !s.includes(ESC) && !PRIVATE_LEAD.test(s)) return s
-  return s
-    .replace(ANSI_IN_KEY, "")
+  let x = s.replace(ANSI_IN_KEY, "")
+  if (x.includes(ESC + "]")) {
+    x = x.replace(ANSI_OPEN_KEY, (m, run) => {
+      // the key material in front of the sequence is masked with it: dropping
+      // the payload alone left the value's first characters in the clear
+      // ("token=ghp_AbCd1234" printed the whole 12-character head)
+      return run.length >= 8 && (/[0-9]/.test(run) || (/[a-z]/.test(run) && /[A-Z]/.test(run))) ? maskToken(run) : m
+    })
+  }
+  return x
     .replace(PRIVATE_BLOCK, (_, kind, body) => `-----BEGIN ${kind}-----${maskToken(body.replace(/\s/g, ""))}-----END ${kind}-----`)
     .replace(DOTTED, (word) => {
-    const parts = word.split(".")
+    // the bodies sit at the even indexes, the written separators between them
+    // at the odd ones, so a rebuild keeps the text's own spelling around a
+    // value the reading does not take
+    const parts = word.split(/([ \t]{0,2}\.[ \t]{0,2})/)
     const out = []
-    for (let i = 0; i < parts.length; i += 1) {
-      if (/^eyJ[A-Za-z0-9_-]{8,}$/.test(parts[i]) && /^eyJ[A-Za-z0-9_-]{8,}$/.test(parts[i + 1] ?? "") && (parts[i + 2]?.length ?? 0) >= 8) {
-        out.push(maskToken(parts.slice(i, i + 3).join(".")))
-        i += 2
-      } else out.push(parts[i])
+    let i = 0
+    while (i < parts.length) {
+      if (
+        i % 2 === 0 &&
+        /^eyJ[A-Za-z0-9_-]{8,}$/.test(parts[i]) &&
+        /^eyJ[A-Za-z0-9_-]{8,}$/.test(parts[i + 2] ?? "") &&
+        (parts[i + 4]?.length ?? 0) >= 8
+      ) {
+        // a fourth (or fifth) segment written on the same value is masked with
+        // it: a corrupted four-part JWT left its last segment's four
+        // characters beside the mask's own tail ("3456demo")
+        let j = i + 4
+        while (parts[j + 2] !== undefined && /^[A-Za-z0-9_-]{4,}$/.test(parts[j + 2])) j += 2
+        const bodies = []
+        for (let k = i; k <= j; k += 2) bodies.push(parts[k])
+        out.push(maskToken(bodies.join(".")))
+        i = j + 1
+      } else {
+        out.push(parts[i])
+        i += 1
+      }
     }
-    return out.join(".")
+    return out.join("")
   })
 }
 
@@ -1277,8 +1325,22 @@ const tailOf = (w) => w.match(/[A-Za-z0-9]+$/)?.[0] ?? ""
 // "key=sk-ant-…"), or its last letters and digits. A front carries an
 // underscore or a hyphen, and a bare tail would cut "ghp_1234AbCd" at the
 // underscore, keeping what the front does not
-const FRONT_IN = /(?:sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|ms-|akia|asia|aida|sg\.|xapp-)[\x21-\x7e]*$/i
+const FRONT_IN = /(?:sk-|sk_(?:live|test)_|gh[pousr]_|github_pat_|xox[abposr]-|ms-|akia|asia|aida|sg\.|xapp-|glpat-|gr1348id-|rtg-yr25fp-|ya29\.|atlassian[-_]|dop_v1_|figd-|glsa[-_]|tfpat[-_]|shpat[-_]|rc_token_|sonar_|pypi-)[\x21-\x7e]*$/i
 const keyFrontOf = (w) => (VENDOR.test(w) || /^ms-/i.test(w) ? w : w.match(FRONT_IN)?.[0] ?? tailOf(w))
+// the fronts the 11-22 batch added to the span lists (glpat-, sonar_, pypi-),
+// read at a word's own start. Their front plus the four characters the mask
+// keeps already make eight after folding ("glpat-AbCd…" folds to
+// "glpatabcd"), so a run may begin here as it does at ghp_ — but only with key
+// material behind the front: a vendor's own word ("sonar_host", "pypi-index")
+// carries no digit and no capital there and stays the text's
+const SPAN_FRONT = /^(?:glpat-|gr1348id-|rtg-yr25fp-|ya29\.|atlassian[-_]|dop_v1_|figd-|glsa[-_]|tfpat[-_]|shpat[-_]|rc_token_|sonar_|pypi-|github_pat_)/i
+const spanFront = (w) => {
+  const m = SPAN_FRONT.exec(w)
+  if (!m) return false
+  const rest = w.slice(m[0].length)
+  return rest.length >= 4 && /[0-9A-Z]/.test(rest)
+}
+const frontLed = (w) => VENDOR.test(w) || /^ms-/i.test(w) || spanFront(w)
 // a bare vendor stem cut off its punctuation ("ms", "sk", "ghp"): the key's
 // front, with the rest of the front in the next piece ("ms -vqmjh…")
 const STEM = /^(?:ms|sk|gh[opusr]|xox[a-z]?|akia|asia|aida)$/i
@@ -1322,7 +1384,7 @@ function maskSpaced(s, letters) {
   const midOf = memo((i) => MIDDOT_GAP.test(gap(i)))
   const onlyMid = memo((i) => MIDDOT_ONLY.test(gap(i)))
   const sp = memo((i) => spaces(gap(i)))
-  const front = (w) => VENDOR.test(w) || /^ms-/i.test(w)
+  const front = (w) => VENDOR.test(w) || /^ms-/i.test(w) || spanFront(w)
   // a gap a run is read across: one space, a no-break or ideographic one, a
   // line break, or a middot or a bullet (one or two, with at most one space
   // each side). The middot is a cut's other spelling as well as a display's
@@ -1971,9 +2033,20 @@ const VSPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|
 // keeps as printed. A path keeps its shape (README: /tmp/ghp_16C7… leaves the
 // folder readable), so a value that starts like a path is not read here either.
 const vendorSpanOf = (w) => {
-  if (PATHY.test(w) || /^[\\/]/.test(w)) return null
   const m = VSPAN.exec(w)
   if (!m) return null
+  if (PATHY.test(w) || /^[\\/]/.test(w)) {
+    // a key at the end of a path is still a key, and only the folders the
+    // README promises to keep the reading away: a span that starts its own
+    // path segment and whose front carries four letters of its own — its
+    // front plus the four the mask keeps already make eight after folding
+    // ("glpat-AbCd…" folds to "glpatabcd") — is masked from the front. A short
+    // front ("ghp_16C7…", "ms-…") keeps the folder reading, because what the
+    // mask leaves of a four-letter front can never make eight on its own
+    const atSeg = m.index === 0 || /[\\/]/.test(w[m.index - 1])
+    const front = m[0].split(/[-_.\/]/)[0].replace(/[^A-Za-z0-9]/g, "")
+    if (!atSeg || front.length < 4) return null
+  }
   let span = m[0]
   // a colon inside a key ("sk-2OHPYFCORWVX0:MR0MACVP0D7Z", "ms-jr5cd8:q4x0a65…")
   // is not in VSPAN's alphabet — it frames a value more often than it joins one
@@ -2560,7 +2633,11 @@ const maskCellCut = (s, letters = true) => {
   }
   return out + s.slice(at)
 }
-const maskAll = (s, letters) => maskKeys(maskSpaced(maskCut(maskSpaced(maskCells(maskCaps(maskWide(maskSep(maskCellCut(typeof s === "string" ? maskStructured(s) : s, letters), letters), letters), letters), letters), letters), letters), letters), letters)
+// maskAll's own door runs the same glue step the message doors run: a mark
+// pasted between two key characters is no cut, and this exit is asked on its
+// own by the host's log line (measured: a thin space or a mark between a key's
+// halves kept them apart here while every other output masked the key)
+const maskAll = (s, letters) => maskKeys(maskSpaced(maskCut(maskSpaced(maskCells(maskCaps(maskWide(maskSep(maskCellCut(typeof s === "string" ? maskStructured(s).replace(GLUE, "") : s, letters), letters), letters), letters), letters), letters), letters), letters), letters)
 
 // maskSep reads a key cut by punctuation: a comma, a bar, a full-width stop or
 // bar, an ideographic comma, a semicolon, a dash, or a joiner a copy left
@@ -2958,7 +3035,7 @@ function maskCut(s, letters) {
   const at = (i) => words[i].index
   const end = (i) => words[i].index + words[i][0].length
   const gap = (i) => s.slice(end(i - 1), at(i))
-  const front = (w) => VENDOR.test(w) || /^ms-/i.test(w)
+  const front = (w) => VENDOR.test(w) || /^ms-/i.test(w) || spanFront(w)
   // the same gaps as the run reading: a space, a line break, or a middot or a
   // bullet with at most one space each side
   const runGap = (k, i) =>
@@ -3055,7 +3132,7 @@ function maskCut(s, letters) {
       if (/^[a-z]{1,3}$/.test(x) && (j > i || (body.length >= 12 && MAYKEY(body) && isKeyWord(body, letters)))) break
       // the same piece-versus-prose split as the run reading: four lower-case
       // letters end the run unless the run starts at a key's front
-      if (/^[a-z]{4,}$/.test(x) && body.length >= 4 && !/[0-9]/.test(body) && !/^[A-Z0-9]+$/.test(body) && (x.length > 4 || !(VENDOR.test(w) || /^ms-/i.test(w)))) break
+      if (/^[a-z]{4,}$/.test(x) && body.length >= 4 && !/[0-9]/.test(body) && !/^[A-Z0-9]+$/.test(body) && (x.length > 4 || !frontLed(w))) break
       // a word carrying a mask is the text's, not key material: the join
       // stops in front of it (the mask's own ellipsis was the last piece's
       // tail, and the run "4e5f 012345 abcdefgh" then read on into it)
@@ -4706,7 +4783,12 @@ export async function MsmoliPlugin(input) {
                 // at all — measured, zero login/info requests, every ask,
                 // forever. Once the claim has landed the row is not the fact
                 // either: the claimed branch reports the total as unsaid.)
-                if (r?.rule_key === "daily_active") throw e
+                // ...but only while the day is unclaimed. Once the claim has
+                // landed, this row's amount is not the fact the day turns on
+                // (the claimed branch below reports it as unsaid), and
+                // throwing here answered `failed` for a day that had already
+                // landed — the host then retried it every half hour.
+                if (r?.rule_key === "daily_active" && !claimed) throw e
                 continue
               }
               m.set(r?.rule_key, (m.get(r?.rule_key) ?? 0) + n)

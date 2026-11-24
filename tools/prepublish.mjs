@@ -19,7 +19,7 @@
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 
-// Today's suite is 845 tests (the plain run); the floor leaves room for a
+// Today's suite is 863 tests (the plain run); the floor leaves room for a
 // legitimate consolidation while still catching a whole file that vanished.
 // (Keep this number current: a stale one reads as a suite that shrank. It sat
 // at 600 while the comment said 726, so about 160 tests could have gone
@@ -39,7 +39,7 @@ const FILES = ["test/plugin.test.mjs", "test/sync.test.mjs", "test/style.test.mj
 // mode passed" at 762 — the line-ending, trailing-whitespace and indentation
 // checks had silently gone, and the publish went out on a suite missing a
 // file's worth of guards. So each file is also run on its own and held to a
-// floor of its own. The numbers are today's counts (512 / 326 / 7) less room
+// floor of its own. The numbers are today's counts (522 / 334 / 7) less room
 // for a legitimate consolidation; keep them current the way MIN_TESTS is.
 const PER_FILE = [
   { file: "test/plugin.test.mjs", min: 430 },
@@ -53,6 +53,24 @@ if (missing.length) {
   process.exit(1)
 }
 
+const FAKE_NOW = "1893456000000"
+// A passing row and a count are still not the probe's value: a probe edited
+// down to no assertions, or a shim replaced by a no-op class, prints both.
+// Each clock mode's probe also prints a value only its working shim produces,
+// and the gate holds it to that value — the shifted run's read must clear the
+// shift this file set, and the ticking run's two reads must differ. (The MARKER
+// is on the probe itself, beside its assertion; a probe that still prints it
+// without asserting would need both lines edited away at once.)
+const clockMarkers = {
+  shifted: (out, shift) => {
+    const m = /^MSMOLI-CLOCK-SHIFT (\d+)$/m.exec(out)
+    return m !== null && Number(m[1]) >= Number(shift)
+  },
+  ticking: (out) => {
+    const m = /^MSMOLI-CLOCK-TICK (\d+) (\d+)$/m.exec(out)
+    return m !== null && m[1] !== m[2]
+  },
+}
 const modes = [
   { name: "node --test", cmd: "node", args: ["--test"] },
   {
@@ -65,14 +83,16 @@ const modes = [
     // stray file in the folder contributes (a decoy *.test.mjs beside the
     // suite was measured passing the gate with the shim inert).
     probe: "the ticking clock shim is in effect for test files",
+    probeValue: (out) => clockMarkers.ticking(out),
     expectsExtraTest: true,
   },
   {
     name: "node --test (shifted clock)",
     cmd: "node",
     args: ["--test"],
-    env: { MSMOLI_FAKE_NOW: "1893456000000" },
+    env: { MSMOLI_FAKE_NOW: FAKE_NOW },
     probe: "the shifted clock is in effect for this run",
+    probeValue: (out) => clockMarkers.shifted(out, FAKE_NOW),
     expectsExtraTest: true,
   },
   { name: "bun test", cmd: "bun", args: ["test"], optional: true },
@@ -174,6 +194,10 @@ for (const m of modes) {
   // The probe test's own name has to appear in this mode's output.
   if (m.probe && !probeRan(out, m.probe)) {
     process.stdout.write(`FAILED: ${m.name}: the mode's probe test ${JSON.stringify(m.probe)} did not run; its clock shim may be inert.\n`)
+    failed = true
+  }
+  if (m.probe && m.probeValue && !m.probeValue(out)) {
+    process.stdout.write(`FAILED: ${m.name}: the mode's probe did not print the clock value only its shim produces; the probe's body or the shim was changed.\n`)
     failed = true
   }
 }

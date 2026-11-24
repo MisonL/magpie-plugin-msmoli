@@ -40,6 +40,10 @@ if (Number.isFinite(SHIFT)) {
     // that clears it can only be the shift. (After 2030 this proves less, and
     // the mode's own fixtures — built from the shifted clock — do the work.)
     assert.ok(Date.now() >= SHIFT, `MSMOLI_FAKE_NOW=${SHIFT} must move Date.now(), got ${Date.now()}`)
+    // prepublish reads this line and holds the number to the shift it set: a
+    // probe edited down to no assertions still leaves the gate a value only a
+    // working shift produces, not merely a passing row and a count
+    console.log(`MSMOLI-CLOCK-SHIFT ${Date.now()}`)
   })
 }
 if (Date.name === "TickingDate") {
@@ -49,6 +53,9 @@ if (Date.name === "TickingDate") {
     const a = Date.now()
     const b = Date.now()
     assert.notEqual(a, b, "the shim must tick between two reads from a test file")
+    // prepublish reads this line and requires the two reads to differ: a no-op
+    // shim cannot print them apart, whatever the assertions around it say
+    console.log(`MSMOLI-CLOCK-TICK ${a} ${b}`)
   })
 }
 
@@ -5306,9 +5313,14 @@ test("a ledger amount we cannot read fails the read, it does not become 0", asyn
       },
       async () => {
         const r = await auth.checkin(async () => ({ type: "api", key: "ms-test" }))
-        // failed, not `inactive`: the day must stay open for another ask
-        assert.equal(r.outcome, "failed", `amount ${JSON.stringify(amount)} must not settle the day: ${JSON.stringify(r)}`)
-        assert.match(r.message, /total_amount/)
+        // the row IS today's claim: the claim is the fact and the amount is
+        // not, so the day answers done with the amount left unsaid. (It
+        // answered failed while byRule threw for this row before the claimed
+        // branch could run, and the host retried a claim that had landed,
+        // every half hour, all morning.) An unclaimed day keeps failing
+        // below, and the usage card keeps refusing the row above.
+        assert.equal(r.outcome, "done", `amount ${JSON.stringify(amount)}: a claimed day stands: ${JSON.stringify(r)}`)
+        assert.match(r.message, /到账金额读不出来/)
       },
     )
   }
@@ -8086,8 +8098,10 @@ test("a finite amount too large to render is refused, not turned into Infinity",
     },
     async () => auth.checkin(async () => ({ type: "api", key: "ms-huge-chk" })),
   )
-  assert.equal(r.outcome, "failed", `an unreadable amount must not read as a claim: ${r.message}`)
-  assert.match(r.message, /total_amount 不是数字/)
+  // the row is a claim already on the page: done with the amount unsaid, not
+  // failed (see the test above for why)
+  assert.equal(r.outcome, "done", `an unreadable amount on a claimed day: ${r.message}`)
+  assert.match(r.message, /到账金额读不出来/)
 })
 
 test("a sum that overflows only after adding is refused too", async () => {
@@ -14682,4 +14696,154 @@ test("a grid whose first cell is folded is masked whole", () => {
   ]) {
     assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
   }
+})
+
+// --- 11-23 audit round: seams that survived the 11-22 batch ---------------
+
+test("an invisible mark of any class inside a key does not keep its body", () => {
+  // The card's glue step knew control and format characters, one at a time,
+  // and ran only on the message doors. Measured: a long stroke mark (Mn), a
+  // figure space (Zs), or two marks together left the halves on all four card
+  // outputs, and maskAll never ran the step at all.
+  const key = "ghp_AbCd1234EfGh5678IjKl9012MnOp3456"
+  const marks = ["‎", "​", "̶", "‮", "­", " ", " ", "️"]
+  const cases = []
+  for (const m of marks) for (const n of [1, 2]) for (const at of [12, 16, 24]) cases.push([key.slice(0, at) + m.repeat(n) + key.slice(at), key])
+  assert.deepEqual(auditLeaks(cases), [])
+})
+
+test("a tab between ordinary words stays a separator", () => {
+  // The glue step took a real tab for an invisible character and ran the
+  // three words together ("alphabetagamma"). A tab is the text's separator,
+  // not a key's own character.
+  assert.equal(testables.cardText("alpha\tbeta\tgamma", "", 4000), "alpha beta gamma")
+  const v = "alpha\tbeta\tgamma"
+  assert.equal(testables.maskAll(v, true), v)
+})
+
+test("a title sequence closed with the single-byte C1 ST does not split a key", () => {
+  // The OSC arm accepted BEL and ESC-backslash only; U+009C is the same
+  // terminator, and a key cut there kept its halves on three of the four card
+  // outputs.
+  const key = "ghp_AbCd1234EfGh5678IjKl9012MnOp3456"
+  const esc = String.fromCharCode(27)
+  const c1 = String.fromCharCode(0x9c)
+  const cases = [["token=" + key.slice(0, 12) + esc + "]2;title" + c1 + key.slice(12), key]]
+  assert.deepEqual(auditLeaks(cases), [])
+})
+
+test("a dotted credential separated by one space at the dot is one mask", () => {
+  // "eyJ…". " ". "eyJ…": the dotted reading only knew an unbroken dot, so the
+  // two halves were masked apart and the seam kept eight characters on all
+  // four card outputs. A dot inside a credential value is a cut's spelling.
+  const [a, b, c, d] = ["AbCd1234", "EfGh5678", "IjKl9012", "MnOp3456"]
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkZW1vIn0." + (a + b + c + d + a + b).slice(0, 43)
+  const spaced = jwt.replace(".", ". ")
+  const wide = jwt.split(".").join(" . ")
+  // a bare value is joined across the space by another reading; the frame is
+  // what pins this one — measured, with the dotted reading back on unbroken
+  // dots "key=eyJh…NiJ9. eyJz…" kept "nij9eyjz" on all four card outputs
+  assert.deepEqual(auditLeaks([[spaced, jwt], [wide, jwt], ["key=" + spaced, jwt], ["x=" + wide, jwt]]), [])
+})
+
+test("a fourth dotted segment beside a three-part credential is masked with it", () => {
+  // The dotted reading masked exactly three segments; a corrupted four-part
+  // value kept the fourth segment's four characters beside the mask's own
+  // tail, eight contiguous ("3456demo") on every output.
+  const [a, b, c] = ["AbCd1234", "EfGh5678", "IjKl9012"]
+  const four = "eyJ" + a + b + ".eyJ" + c + ".sig" + a + b + ".demo"
+  assert.deepEqual(auditLeaks([["x=" + four, four]]), [])
+})
+
+test("a private key block with header fields and comments is one mask", () => {
+  // The block reading took base64 and whitespace only, so the standard
+  // "Proc-Type:" / "DEK-Info:" headers, a comment line, or a blank line made
+  // the whole block invisible to it and every row was masked on its own, each
+  // keeping its four ends.
+  const rows = ["AbCd1234EfGh5678IjKl9012MnOp3456QrSt7890", "UvWx1234YzAb5678CdEf9012GhIj"]
+  const bodies = [
+    ["Proc-Type: 4,ENCRYPTED", "DEK-Info: AES-128-CBC," + "AbCd1234".repeat(4), "", ...rows],
+    ["# a note", "; another", ...rows],
+  ]
+  const cases = []
+  for (const body of bodies) cases.push(["-----BEGIN RSA PRIVATE KEY-----\n" + body.join("\n") + "\n-----END RSA PRIVATE KEY-----", rows.join("")])
+  const crlf = "-----BEGIN RSA PRIVATE KEY-----\r\nProc-Type: 4,ENCRYPTED\r\n\r\n" + rows.join("\r\n") + "\r\n-----END RSA PRIVATE KEY-----"
+  cases.push([crlf, rows.join("")])
+  assert.deepEqual(auditLeaks(cases), [])
+})
+
+test("a long vendor front the CLI's list gained is masked whole on the card too", () => {
+  // glpat-, sonar_, pypi-, xapp- and the rest entered the CLI's span list but
+  // not the card's front list: the card's readings started behind the front
+  // and kept its first four characters beside a mask ("sonar_abcd…1234",
+  // folding to "sonarabc"), and a key at the end of a path kept the whole
+  // front ("glpat-AbCd…5678").
+  const body = "abcd1234efgh5678ijkl9012mnop3456abcd1234"
+  const cases = [
+    ["access_token=sonar_" + body.slice(0, 16) + "·" + body.slice(16), "sonar_" + body],
+    // (the front plus sixteen: a twenty-character body after glpat- is the
+    // exact shape GitHub push protection reads as a live token, and a fixture
+    // is a fixture — what the test asks of the reading is the front's own
+    // letters beside the mask, which sixteen carries just as well)
+    ["token=glpat-AbCd1234EfGh5678", "glpat-AbCd1234EfGh5678"],
+    ["saved to /home/user/.config/app/glpat-AbCd1234EfGh5678", "glpat-AbCd1234EfGh5678"],
+    ["see /opt/app/xapp-1-AbCd1234EfGh5678IjKl now", "xapp-1-AbCd1234EfGh5678IjKl"],
+  ]
+  assert.deepEqual(auditLeaks(cases), [])
+  // the reverse control: a vendor's own name or a bare front is not a key
+  for (const v of ["sonar_host", "pypi.org is down", "dev.atlassian.com", "figd config", "/home/user/.config/app/releases"]) {
+    assert.deepEqual(auditSinks.map(([tag, sink]) => [tag, sink(v)]).filter(([, out]) => out !== v), [], `masked an ordinary word: ${v}`)
+  }
+})
+
+test("a claimed day whose amount will not read still answers done", () => {
+  // byRule threw for the claim's own row on every ask, before the claimed
+  // branch that reports the amount as unsaid could run: the day answered
+  // `failed` and the host retried a claim that had already landed, every half
+  // hour, all morning.
+  return withFetch(
+    {
+      "/openapi/v1/magicubes/transactions?page=1&page_size=50": {
+        body: { success: true, data: { records: [day({ total_amount: "1e400" })] } },
+      },
+      "/api/v1/users/login/info": { body: { Code: 200, Success: true, Data: { NickName: "Mison" } } },
+    },
+    async () => {
+      const r = await auth.checkin(async () => ({ type: "api", key: "ms-badamt-0000-0000-0000-00000001" }))
+      assert.equal(r.outcome, "done", `a claimed day was answered as ${r.outcome}: ${r.message}`)
+      assert.equal(r.credit, undefined, `the amount is unsaid, not a number: ${JSON.stringify(r)}`)
+      assert.match(r.message, /到账金额读不出来/)
+    },
+  )
+})
+
+test("a title sequence that never closes hides the key's tail", () => {
+  // The OSC arm wanted TERMINATOR (BEL, ESC-backslash, C1 ST); a sequence cut
+  // off by the log's own end has none, and its payload carried the key's
+  // body. The rest of the line is the sequence's payload, and the key material
+  // in front of it is part of the value — both are masked. An ordinary
+  // coloured log line keeps its payload.
+  const key = "ghp_AbCd1234EfGh5678IjKl9012MnOp3456"
+  const esc = String.fromCharCode(27)
+  const cases = [["token=" + key.slice(0, 12) + esc + "]2;" + key.slice(12), key], ["see " + key + esc + "]0;title", key]]
+  assert.deepEqual(auditLeaks(cases), [])
+  assert.ok(testables.cardText("status" + esc + "]2;loading", "", 400).includes("loading"), "an ordinary payload is not the key's")
+})
+
+test("a long vendor front cut by a space is masked whole, whatever the frame", () => {
+  // The run headings knew the anchored VENDOR list; glpat-, ya29. and the rest
+  // of the 11-22 additions live in the span lists. A cut right after such a
+  // front left the front and the mask's own kept characters in the clear
+  // ("glpat-AbCd1234" beside a mask for the tail).
+  const body = "AbCd1234EfGh5678IjKl9012"
+  const cases = []
+  for (const front of ["glpat-", "ya29.", "sonar_", "xapp-1-", "pypi-", "github_pat_"]) {
+    const key = front + body
+    for (const [pre, post] of [["token=", ""], ["", ""], ["saved to /home/user/app/", ""]]) {
+      for (const at of [front.length, front.length + 4, front.length + 8]) {
+        for (const gap of [" ", "　"]) cases.push([pre + key.slice(0, at) + gap + key.slice(at) + post, key])
+      }
+    }
+  }
+  assert.deepEqual(auditLeaks(cases), [])
 })

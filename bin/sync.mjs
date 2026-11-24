@@ -1100,21 +1100,35 @@ const VENDOR = /^(?:sk-|sk_(?:live|test)_|gh[pousr]_|xox[abposr]-|akia|asia|aida
 // written. The span runs over letters, numbers and marks of any script; what
 // it stops at is whitespace, a quote and the ASCII punctuation that frames a
 // value.
-const VENDOR_SPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida|ms-|aiza|(?:glpat-|gr1348id-|rtg-yr25fp-|ya29\.|atlassian[-_]|dop_v1_|figd-|glsa[-_]|tfpat[-_]|shpat[-_]|rc_token_|sonar_|pypi-)|sg\.|xapp-)[\p{L}\p{N}\p{M}_+\/=.-]*/giu
+const VENDOR_SPAN = /(?:sk_(?:live|test)_|sk-ant-|sk-proj-|sk-|gh[pousr]_|github_pat_|xox[abposr]-|akia|asia|aida|ms-|aiza|(?:glpat-|gr1348id-|rtg-yr25fp-|ya29\.|atlassian[-_]|dop_v1_|figd-|glsa[-_]|tfpat[-_]|shpat[-_]|rc_token_|sonar_|pypi-)|sg\.|xapp-)(?:[\p{L}\p{N}\p{M}_+\/=.-]|[\u00b7\u2022\u2219\u2027\u30fb\u22c5](?=[\p{L}\p{N}]))*/giu
 const MASKED = "…"
+// the fronts the join walk reads as a key's own start behind a frame, and the
+// ones VENDOR_SPAN gained on 11-22: a head that is one of these alone
+// ("token=glpat-" TAB "AbCd…") is a truncated key, not a value's name, and the
+// words after it are the same key's body whatever their length — unless one of
+// them opens a front of its own (the walk checks that first)
+const FRONTED = /^(?:sk-|sk_(?:live|test)_|gh[pousr]_|github_pat_|xox[abposr]-|ms-|akia|asia|aida|aliyun|sg\.|xapp-|glpat-|gr1348id-|rtg-yr25fp-|ya29\.|atlassian[-_]|dop_v1_|figd-|glsa[-_]|tfpat[-_]|shpat[-_]|rc_token_|sonar_|pypi-)/i
+const fronted = (t) => VENDOR.test(t) || /^ms-/i.test(t) || FRONTED.test(t)
 
 // A key the terminal coloured, a private key block, a JWT: each is one value
 // whose parts are cut by characters the word readings stop at (an escape
 // sequence, a line break, a dot). Asked piece by piece, the seam keeps eight
 // contiguous body characters, so these shapes are read whole before any
 // per-word pass writes a partial mask that hides them.
-const ANSI_ESCAPE = String.raw`\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\))`
+const ANSI_ESCAPE = String.raw`\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u009c\u001b]*(?:\u0007|\u009c|\u001b\\))`
 // taken out only between two key characters: a coloured path's own word break
 // and a trailing sequence after "ENOENT" are the text's, and joining what they
 // separate read "…1234 ENOENT" as one key
 const ANSI_IN_KEY = new RegExp(String.raw`(?<=[A-Za-z0-9+/=_.-])(?:${ANSI_ESCAPE})+(?=[A-Za-z0-9+/=_.-])`, "gu")
-const PRIVATE_BLOCK = /-----BEGIN ((?:[A-Z]+ )*PRIVATE KEY)-----([A-Za-z0-9+/=\s]+)-----END \1-----/g
-const DOTTED = /(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]+\.)[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+/g
+// an OSC that is never closed is a cut too when key material sits right in
+// front of it: the rest of the line is the sequence's payload, and a payload
+// carrying a key's body did reach the terminal whole. The guard asks for key
+// material in front, so an ordinary coloured log line keeps its payload
+const ANSI_OPEN_KEY = /([A-Za-z0-9+/=_.-]{8,})\u001b\][^\u0007\u009c\u001b\n\r]*/gu
+// the block is delimited by its BEGIN and END lines, and its interior may
+// carry the standard header fields, a comment line, or a blank line
+const PRIVATE_BLOCK = /-----BEGIN ((?:[A-Z]+ )*PRIVATE KEY)-----([\s\S]{0,65536}?)-----END \1-----/g
+const DOTTED = /(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]+[ \t]{0,2}\.)[A-Za-z0-9_-]+(?:[ \t]{0,2}\.[ \t]{0,2}[A-Za-z0-9_-]+)+/g
 const ESC = "\u001b"
 const PRIVATE_LEAD = /-----BEGIN [A-Z ]*PRIVATE KEY-----/
 const maskStructured = (s) => {
@@ -1122,22 +1136,46 @@ const maskStructured = (s) => {
   // no escape character, no dot and no BEGIN line has nothing these readings
   // can take, and scanning it over spent the budget
   if (!s.includes(".") && !s.includes(ESC) && !PRIVATE_LEAD.test(s)) return s
-  return s
-    .replace(ANSI_IN_KEY, "")
+  let x = s.replace(ANSI_IN_KEY, "")
+  if (x.includes(ESC + "]")) {
+    x = x.replace(ANSI_OPEN_KEY, (m, run) => {
+      // the key material in front of the sequence is masked with it: dropping
+      // the payload alone left the value's first characters in the clear
+      // ("token=ghp_AbCd1234" printed the whole 12-character head)
+      return run.length >= 8 && (/[0-9]/.test(run) || (/[a-z]/.test(run) && /[A-Z]/.test(run))) ? mask(run) : m
+    })
+  }
+  return x
     .replace(
       PRIVATE_BLOCK,
       (_, kind, body) => `-----BEGIN ${kind}-----${mask(body.replace(/\s/g, ""))}-----END ${kind}-----`
     )
     .replace(DOTTED, (word) => {
-      const parts = word.split(".")
+      // the bodies sit at the even indexes and the written separators between
+      // them at the odd ones, so a value the reading does not take rebuilds
+      // with the text's own spelling
+      const parts = word.split(/([ \t]{0,2}\.[ \t]{0,2})/)
       const out = []
-      for (let i = 0; i < parts.length; i += 1) {
-        if (/^eyJ[A-Za-z0-9_-]{8,}$/.test(parts[i]) && /^eyJ[A-Za-z0-9_-]{8,}$/.test(parts[i + 1] ?? "") && (parts[i + 2]?.length ?? 0) >= 8) {
-          out.push(mask(parts.slice(i, i + 3).join(".")))
-          i += 2
-        } else out.push(parts[i])
+      let i = 0
+      while (i < parts.length) {
+        if (
+          i % 2 === 0 &&
+          /^eyJ[A-Za-z0-9_-]{8,}$/.test(parts[i]) &&
+          /^eyJ[A-Za-z0-9_-]{8,}$/.test(parts[i + 2] ?? "") &&
+          (parts[i + 4]?.length ?? 0) >= 8
+        ) {
+          let j = i + 4
+          while (parts[j + 2] !== undefined && /^[A-Za-z0-9_-]{4,}$/.test(parts[j + 2])) j += 2
+          const bodies = []
+          for (let k = i; k <= j; k += 2) bodies.push(parts[k])
+          out.push(mask(bodies.join(".")))
+          i = j + 1
+        } else {
+          out.push(parts[i])
+          i += 1
+        }
       }
-      return out.join(".")
+      return out.join("")
     })
 }
 // keyAt: a word is the front of a key when it is key-shaped on its own or
@@ -1374,7 +1412,7 @@ const maskCut = (s) => {
     // a frame's fragment is key material when it carries a digit or a capital,
     // is too short to be a word ("key=g", "(AK"), or is long enough to be a
     // body; a word behind a frame ("failed:", "Session") is the text's
-    return { mat: VENDOR.test(tail) || /^ms-/i.test(tail) || digestTail || cutMid ? tail : framedSep && (/\d/.test(trailing) || /[A-Z]/.test(trailing) || trailing.length <= 3 || trailing.length >= 16) ? trailing : "" }
+    return { mat: fronted(tail) || digestTail || cutMid ? tail : framedSep && (/\d/.test(trailing) || /[A-Z]/.test(trailing) || trailing.length <= 3 || trailing.length >= 16) ? trailing : "" }
   }
   // a piece's own spelling may carry the text's punctuation ("0.", "1,")
   // a single hyphen a key was cut at ("… 7·-·e …") is a piece too
@@ -1446,7 +1484,7 @@ const maskCut = (s) => {
     // (a bare short numeral is no key's band either: "字ＡＢＣ12" carries a
     // "12", and reading that as a head made every word of a page one. A key
     // behind a frame is four characters at least, or carries a letter)
-    const band = /[\\/]/.test(w0) ? undefined : (w0.match(/[A-Za-z0-9]+/g) ?? []).find((b) => digestPiece(b) && (b.length >= 4 || /[A-Za-z]/.test(b)))
+    const band = /[\\/]/.test(w0) || fronted(w0) ? undefined : (w0.match(/[A-Za-z0-9]+/g) ?? []).find((b) => digestPiece(b) && (b.length >= 4 || /[A-Za-z]/.test(b)))
     // (a word that opens with a vendor front is the key's from its first
     // character: a digest band inside it — the "12" of "ghp_12" — is not a
     // frame, and the four characters the mask shows would be that band)
@@ -2592,7 +2630,7 @@ function joinFramed(s) {
     // or a body of some length that carries a capital after its first letter
     // ("wJalrXUtnFEMI"). A path segment ("q19jry150l16…") and a word
     // ("Documents") do not, and a value starting like a path is a folder.
-    if (cut < 0 && !VENDOR.test(head) && !/^ms-/i.test(head)) {
+    if (cut < 0 && !fronted(head)) {
       if (PATHY.test(head) || /^[\\/]/.test(head)) continue
       if (head.length < 8 || !/[A-Z]/.test(head.slice(1))) continue
       // a segment inside a path is a folder's name, not a key's start: joining
@@ -2620,7 +2658,7 @@ function joinFramed(s) {
     // material already: a key cut right after its frame's front
     // ("token=ghp_AbCd1234  EfGh…") is one key, and skipping it here left the
     // seam's eight characters in the clear.
-    if (cut >= 0 && isKey(t0) && !(VENDOR.test(head) || /^ms-/i.test(head))) continue
+    if (cut >= 0 && isKey(t0) && !fronted(head)) continue
     // and a frame with key material in front of it is not that value's frame:
     // eight characters of it is longer than any word a name is, and a short
     // head behind it is the key's own next character, not a new value's start.
@@ -2669,10 +2707,17 @@ function joinFramed(s) {
       // truncated key beside a whole one lost its own four ends (splitKey's
       // walk breaks at a front for the same reason)
       // (a whole key behind a frame is 40 characters for the ghp_/sk_/ms-
-      // shapes and 20 for an AKIA id: a front-led head shorter than 28 is a
-      // truncated piece, not a separate key)
-      const cutHead = (VENDOR.test(head) || /^ms-/i.test(head)) && head.length < 28
-      if (VENDOR.test(stem) || /^(?:ms-|sk-)/i.test(stem) || (stem.length >= 12 && isKey(stem) && !cutHead)) break
+      // shapes and 20 for an AKIA id, but the length was a guess at where one
+      // value ends: "token=<28-char ghp_ head> AbCd12+EfGh3" came out as two
+      // masks with eight contiguous characters at the seam. A front-led head
+      // is a key's own beginning at any length, and a key-shaped word after it
+      // is its body; only a word that opens a front of its own is a second
+      // value)
+      const frontHead = fronted(head)
+      // a slash between two pieces is the key's own cut (an AWS secret:
+      // "wJalr…/K7MDENG/bPxRfiCYEXAMPLEKEY"), not a second value's start
+      const slashGap = /^\/{1,3}$/.test(gap)
+      if (VENDOR.test(stem) || /^(?:ms-|sk-)/i.test(stem) || (stem.length >= 12 && isKey(stem) && !frontHead && !slashGap)) break
       // a word of prose ends the run: a value's body carries a digit or a
       // capital, a sentence's next word does not — unless the word is a piece
       // of a key cut into groups and the join so far already reads as one
@@ -2820,7 +2865,18 @@ const argWords = (x) =>
     // their key segment is a value, not a folder the user meant to see
     const urlShaped = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(w) || /[?#]/.test(w)
     const pathShaped = !urlShaped && /[\\/]/.test(w) && (PATHY.test(w) || w.split(/[\\/]/).filter((seg) => seg.length >= 4).length >= 3)
-    const vendorSpans = pathShaped ? [] : [...w.matchAll(VENDOR_SPAN)].filter((m) => {
+    // a path keeps its shape (README, and the /tmp/ghp_16C7… case): only a
+    // vendor front that starts its own path segment and carries four letters
+    // of its own is read there — its own letters plus the four the mask keeps
+    // already make eight after folding ("glpat-AbCd…" folds to "glpatabcd"),
+    // so the folder reading the README promises stays for the short fronts
+    // ("ghp_16C7…"); a segment at the end of a longer path is still a value
+    const shortFront = (span) => span.split(/[-_.\/]/)[0].replace(/[^\p{L}\p{N}]/gu, "").length < 4
+    const vendorSpans = [...w.matchAll(VENDOR_SPAN)].filter((m) => {
+      if (pathShaped) {
+        const atSeg = m.index === 0 || /[\\/]/.test(w[m.index - 1])
+        if (!atSeg || shortFront(m[0])) return false
+      }
       const span = m[0]
       const c = span.replace(/[^\p{L}\p{N}]/gu, "")
       // a vendor key's body is long enough to be a key, not a word. It used to
@@ -2835,7 +2891,7 @@ const argWords = (x) =>
       // a key whose body is several pieces of 8+ ("sk-ant-api03-…_kbwt") is
       // still no name if the pieces are all key material and the whole body
       // is 20+. A name's pieces are words of prose ("anti-fraud-review-team").
-      const pieces = body.split(/[-_./]/).filter(Boolean)
+      const pieces = body.split(/[-_.\/\u00b7\u2022\u2219\u2027\u30fb\u22c5]/).filter(Boolean)
       // a single piece of 12+ that carries a digit and both cases is a key's
       // head cut by a space ("ghp_Abcd1234Efgh567 8Ijk…"): a word of prose has
       // no digit, or is all one case.

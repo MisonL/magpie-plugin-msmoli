@@ -7047,7 +7047,10 @@ test("a key cut at its first letter by a slash is masked whole", () => {
   // and the segment behind it are one value ("O/F46xsMfa-…", "K9ymj/xp9-…").
   const cases = [
     ["token: O/F46xsMfa-f468b96a48b1-xweDH3KVWfnot found", "token: OF46…fnot found"],
-    ["key=K9ymj/x/p9-57db62da440b-3lO+mY9lc4", "key=K9ymj/xp9-…9lc4"],
+    // (the old expectation kept "K9ymj/x" and masked from "p9-": that printed
+    // eight contiguous characters of the key's own body beside the mask, so
+    // the whole value is masked from its first letter, slash included)
+    ["key=K9ymj/x/p9-57db62da440b-3lO+mY9lc4", "key=K9ym…9lc4"],
   ]
   for (const [input, want] of cases) {
     assert.equal(arg(input), want, `arg ${JSON.stringify(input)}`)
@@ -7655,6 +7658,123 @@ test("a single-character cut behind a bar and a folded first cell are masked", (
   ]) {
     for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
       assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    }
+  }
+})
+
+// --- 11-23 audit round: seams that survived the 11-22 batch ---------------
+
+test("a long vendor front cut by a tab is masked whole on the terminal", () => {
+  // The split walk's frame test knew the anchored VENDOR list only, and
+  // glpat- and the rest of the 11-22 additions live in VENDOR_SPAN alone. A
+  // key cut right after the front ("glpat- TAB AbCd…") printed the front and
+  // the first four body characters beside a mask, eight contiguous in the
+  // clear after folding.
+  const [a, b] = ["AbCd1234", "EfGh5678"]
+  const cases = []
+  for (const head of ["glpat-", "sonar_", "pypi-", "figd-", "shpat-", "rc_token_"]) {
+    const key = head + a + b + "IjKl9012"
+    for (const at of [head.length, head.length + 4, head.length + 8]) cases.push(["access_token=" + key.slice(0, at) + "\t" + key.slice(at), key])
+  }
+  for (const [v, key] of cases) {
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    }
+  }
+})
+
+test("a key cut by a space past its head is one mask, whatever the lengths", () => {
+  // A head under 28 characters counted as half a key and the value after the
+  // space as a second one: "token=<28-char ghp_ head> AbCd12+EfGh3" printed
+  // two masks with eight contiguous characters at the seam ("1234abcd").
+  const [a, b, c] = ["AbCd1234", "EfGh5678", "IjKl9012"]
+  const head = "ghp_" + a.repeat(3) + "mnop" // 28 characters
+  const second = "AbCd12+EfGh3"
+  for (const [v, key] of [["token=" + head + " " + second, head + second]]) {
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    }
+  }
+})
+
+test("a query string behind a key is not glued to it", () => {
+  // The walk carried "&x=1" on the end of a cut key's last word and the mask
+  // took it in, which is harmless; but a word's trailing punctuation was kept
+  // whole in the other reading. Both readings end the key at its last key
+  // character.
+  const key = "ghp_AbCd1234EfGh5678IjKl9012MnOp3456"
+  const v = "token=ghp_AbCd EfGh5678IjKl9012MnOp3456&x=1"
+  for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+    assert.ok(out.includes("&x=1"), `${tag} took the query string into the mask: ${JSON.stringify(out)}`)
+  }
+})
+
+test("an AWS secret key with slashes is masked whole", () => {
+  // PIECE splits on "/", so the walk stopped at the last segment (itself
+  // key-shaped) and the seam between the two masks kept "dengbpxr".
+  const key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  for (const v of ["aws_secret_access_key = " + key, "x=" + key]) {
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    }
+  }
+})
+
+test("a path with a vendor front on a folder keeps the folders readable", () => {
+  // The README promise: a key printed as part of a path keeps the path's
+  // shape. The folder names stay; the key is masked from its own front, not
+  // from four characters behind it.
+  const key = "glpat-AbCd1234EfGh5678"
+  const v = "saved to /home/user/.config/app/" + key
+  for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+    assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+    assert.ok(out.includes("saved to /home/user/.config/app/"), `${tag} lost the folders: ${JSON.stringify(out)}`)
+  }
+})
+
+test("a long vendor front cut by a middot is masked whole", () => {
+  // The middot reading's frame test used the anchored VENDOR list, took the
+  // word's trailing letters and digits for the key's material, and started the
+  // mask behind the front ("token=gr1348id-AbCd…9012" kept nine characters).
+  const body = "AbCd1234EfGh5678IjKl9012"
+  const cases = []
+  for (const front of ["glpat-", "gr1348id-", "rtg-yr25fp-", "ya29.", "dop_v1_", "rc_token_", "sonar_", "github_pat_", "pypi-"]) {
+    const key = front + body
+    for (const [pre, post] of [["token=", ""], ["", ""], ["see ", " now"]]) {
+      for (const at of [front.length, front.length + 4, front.length + 8]) cases.push([pre + key.slice(0, at) + "·" + key.slice(at) + post, key])
+    }
+  }
+  for (const [v, key] of cases) {
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    }
+  }
+})
+
+test("an AWS key id in a path cut by a middot is masked whole", () => {
+  // The per-word pass owns a path, and maskCut's digest band is where a run
+  // behind a frame begins: with the band read out of a front-led word the run
+  // starts behind the front and keeps its first characters. This shape is
+  // masked by the per-word reading either way; the case pins that a path
+  // stays whole when the band reading is narrowed.
+  const key = "AKIAIOSFODNN7EXAMPLE"
+  for (const v of ["/tmp/" + key.slice(0, 8) + "·" + key.slice(8), "saved /home/user/app/" + key.slice(0, 4) + "·" + key.slice(4)]) {
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+    }
+  }
+})
+
+test("a terminal title sequence that never closes hides the key's tail", () => {
+  // The other readings also mask this one; the sequence reading is what makes
+  // the whole value one mask instead of two, and an OSC whose payload carries
+  // the key's body must not be left to them alone.
+  const key = "ghp_AbCd1234EfGh5678IjKl9012MnOp3456"
+  const esc = String.fromCharCode(27)
+  for (const v of ["token=" + key.slice(0, 12) + esc + "]2;" + key.slice(12), "child: see " + key + esc + "]0;t"]) {
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(v)]]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
     }
   }
 })
