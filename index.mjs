@@ -1485,6 +1485,10 @@ function maskSpaced(s, letters) {
       /^[ \t\u00a0\u3000]+$/.test(gap(i + 1)) &&
       keyAt(words[i][0], letters) &&
       keyAt(words[i + 1][0], letters) &&
+      // a front on one of the two is what says they are two values; two bare
+      // halves are a cut key read on ("AbCd1234EfGh5678 AbCd1234EfGh5678"
+      // was masked apart, and the seam kept "5678ijkl")
+      (front(words[i][0]) || front(words[i + 1][0])) &&
       !(front(keyFrontOf(words[i][0])) && isKeyWord(words[i][0] + words[i + 1][0], letters))
     let j = i
     let last = i

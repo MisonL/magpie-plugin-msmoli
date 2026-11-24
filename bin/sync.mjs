@@ -1517,9 +1517,17 @@ const maskCut = (s) => {
     const framedOne = mat !== w0 && mat.length < 2
     if (!VENDOR.test(w0) && !capsPiece(w0) && !msHead && !tiny && !mixedHead && !frontish && !hexHead && !tailHead && !lcHead) continue
     if (framedOne && !VENDOR.test(w0) && !capsPiece(w0) && !msHead && !frontish && !hexHead && !lcHead) continue
-    // two key-shaped words are two keys: one mask for both would hide the
-    // second's front ("ms-aaaa… ms-zzzz…" is not one key)
-    const pairOfKeys = i + 1 < words.length && /^[ \t\u00a0\u3000]+$/.test(gap(i + 1)) && keyAt(words[i][0]) && keyAt(words[i + 1][0])
+    // two key-shaped words are two keys when a front shows on one of them:
+    // one mask for both would hide the second's front ("ms-aaaa… ms-zzzz…"
+    // is not one key). Two bare halves ("AbCd1234EfGh5678 AbCd1234EfGh5678")
+    // are read on instead — a cut key's halves have no front, and masking
+    // them apart kept eight characters at the seam
+    const pairOfKeys =
+      i + 1 < words.length &&
+      /^[ \t\u00a0\u3000]+$/.test(gap(i + 1)) &&
+      keyAt(words[i][0]) &&
+      keyAt(words[i + 1][0]) &&
+      (fronted(words[i][0]) || fronted(words[i + 1][0]))
     let j = i
     let head = i
     // the last word a run read, and whether anything in it was key material:
@@ -2735,11 +2743,12 @@ function joinFramed(s) {
       // is a key's own beginning at any length, and a key-shaped word after it
       // is its body; only a word that opens a front of its own is a second
       // value)
-      const frontHead = fronted(head)
-      // a slash between two pieces is the key's own cut (an AWS secret:
-      // "wJalr…/K7MDENG/bPxRfiCYEXAMPLEKEY"), not a second value's start
-      const slashGap = /^\/{1,3}$/.test(gap)
-      if (VENDOR.test(stem) || /^(?:ms-|sk-)/i.test(stem) || (stem.length >= 12 && isKey(stem) && !frontHead && !slashGap)) break
+      // ...and a key-shaped word after a bare head is joined too: two
+      // key-shaped halves of one cut key ("AbCd1234EfGh5678 IjKl9012MnOp3456")
+      // were masked apart, and the seam kept "5678ijkl"; joining is the safe
+      // direction, and a word with a front of its own is still the break that
+      // keeps "ms-a…5555 ms-z…5555" two masks
+      if (fronted(stem)) break
       // a word of prose ends the run: a value's body carries a digit or a
       // capital, a sentence's next word does not — unless the word is a piece
       // of a key cut into groups and the join so far already reads as one

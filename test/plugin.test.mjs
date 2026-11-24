@@ -14884,3 +14884,38 @@ test("a method name behind its field is not a key", () => {
     }
   }
 })
+
+// --- 11-24: a bare key cut into two key-shaped halves -----------------------
+
+test("a bare key cut into two key-shaped halves is one mask", () => {
+  // Neither half carries a front, so each read as a key on its own and the
+  // pair rule kept them apart: the seam printed "5678ijkl" on some outputs
+  // (space and tab on the card, a line break in scrub). A front is what says
+  // two values are two values; joining the halves is the safe direction.
+  const key = "AbCd1234EfGh5678IjKl9012MnOp3456"
+  const cases = []
+  for (const gap of [" ", "\t", "\n", "\r\n", "　"]) cases.push([key.slice(0, 16) + gap + key.slice(16), key])
+  assert.deepEqual(auditLeaks(cases), [])
+})
+
+// --- 11-24: the over-masks that cannot be lifted ---------------------------
+
+test("a key cut by a comma into word-shaped pieces stays masked", () => {
+  // This is why the model-list over-mask cannot be lifted: the same reading
+  // that masks "Qwen2.5-Coder-32B-Instruct,DeepSeek-R1-Distill-Qwen-32B" is
+  // what masks a key whose comma-cut pieces are each shaped like a word.
+  // (Measured on a relaxation that left a core with two capitalised words
+  // unfold: "Qwertyui,Asdfghjk,Zxcvbnm" printed whole on all four card
+  // outputs.)
+  const key = "QwertyuiAsdfghjkZxcvbnm"
+  const cases = [["Qwertyui,Asdfghjk,Zxcvbnm", key], ["Qwertyui、Asdfghjk、Zxcvbnm", key], ["Qwertyui,Asdfghjk,Zxcvbnm,Mnbvcxz", "QwertyuiAsdfghjkZxcvbnmMnbvcxz"]]
+  assert.deepEqual(auditLeaks(cases), [])
+})
+
+test("a key wrapped into two fields per line stays masked", () => {
+  // The table signature (two or more lines, several fields each) is the same
+  // signature a wrapped bare key has; a reading that left tables alone would
+  // leave this key alone too.
+  const key = "AbCd1234EfGh5678IjKl9012MnOp3456"
+  assert.deepEqual(auditLeaks([[key.slice(0, 8) + " " + key.slice(8, 16) + "\n" + key.slice(16, 24) + " " + key.slice(24), key]]), [])
+})

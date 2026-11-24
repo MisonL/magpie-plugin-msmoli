@@ -7812,3 +7812,28 @@ test("a method name behind its field is not a key", () => {
     }
   }
 })
+
+test("a bare key cut into two key-shaped halves is one mask on the terminal", () => {
+  // The pair rule kept two bare halves apart ("5678ijkl" at the seam): a front
+  // on one of them is what says two values are two values. Two fronted keys
+  // side by side stay two masks (the test above), and a bare pair is one.
+  const key = "AbCd1234EfGh5678IjKl9012MnOp3456"
+  for (const gap of [" ", "\t", "\n", "\r\n", "　"]) {
+    const v = key.slice(0, 16) + gap + key.slice(16)
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material across ${JSON.stringify(gap)}: ${JSON.stringify(out)}`)
+    }
+  }
+  assert.equal(arg("ms-aaaa1111-bbbb-2222-cccc-333344445555 ms-zzzz9999-yyyy-8888-xxxx-777766665555"), "ms-a…5555 ms-z…5555", "two fronted keys stay two masks")
+})
+
+test("a key cut by a comma into word-shaped pieces stays masked", () => {
+  // The reverse pin for the model-list over-mask: the reading that masks a
+  // comma-joined model list also masks a key of the same shape.
+  const key = "QwertyuiAsdfghjkZxcvbnm"
+  for (const v of ["Qwertyui,Asdfghjk,Zxcvbnm", "Qwertyui、Asdfghjk、Zxcvbnm"]) {
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+    }
+  }
+})

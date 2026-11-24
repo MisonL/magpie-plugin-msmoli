@@ -622,6 +622,17 @@ A key quoted in a frame keeps the frame: `(ghp_…Qrst)`, `[ghp_…]`, `"ghp_…
 The mask spends four characters at each end on the key's own, so the brackets
 are printed as written rather than eaten by it.
 
+Two key-shaped halves with no vendor front (`AbCd1234EfGh5678 IjKl9012MnOp3456`)
+are read as one cut key and masked once: they can be a cut key's halves, and
+two masks kept eight characters at the seam. Two keys that show their fronts
+(`ms-aaaa…5555 ms-zzzz…5555`) stay two masks.
+
+Some ordinary text is masked because it cannot be told from a key: a source
+line of capitalised words (`calculateMonthlyInvoiceTotal`), a comma-joined list
+of model names, and a table of columns all have the shape of a key cut up the
+same way, and a reading that left them alone would leave that key alone too.
+This is the mask's safe direction, and it is the trade it makes.
+
 The plugin writes two things, both onto the sign-in it already has and through
 the host's own `client.auth.set`: the nickname, as `accountId` (so the card
 reads "Mison" instead of "API key …a1b2"), and, for an international account,
