@@ -7769,12 +7769,46 @@ test("an AWS key id in a path cut by a middot is masked whole", () => {
 test("a terminal title sequence that never closes hides the key's tail", () => {
   // The other readings also mask this one; the sequence reading is what makes
   // the whole value one mask instead of two, and an OSC whose payload carries
-  // the key's body must not be left to them alone.
+  // the key's body must not be left to them alone. The reverse control is the
+  // same run with a prose payload: an identifier beside a title stays text.
   const key = "ghp_AbCd1234EfGh5678IjKl9012MnOp3456"
   const esc = String.fromCharCode(27)
   for (const v of ["token=" + key.slice(0, 12) + esc + "]2;" + key.slice(12), "child: see " + key + esc + "]0;t"]) {
     for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(v)]]) {
       assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(out)}`)
+    }
+  }
+  for (const v of ["render1234" + esc + "]0;title", "status" + esc + "]2;loading"]) {
+    const want = v.replace(esc, " ")
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(v)]]) assert.equal(out, want, `${tag} changed an ordinary title: ${JSON.stringify(out)}`)
+  }
+})
+
+test("a vendor id one letter into the word is masked from its front", () => {
+  // The walk's head had to start the word; with "x" in front the front was
+  // never a head and the body was masked alone ("xAKIA IOSF…MPLE" kept nine
+  // characters of the id).
+  const key = "AKIAIOSFODNN7EXAMPLE"
+  for (const v of ["x" + key.slice(0, 4) + " " + key.slice(4), "child: x" + key.slice(0, 5) + "\t" + key.slice(5)]) {
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, key), "", `${tag} left key material: ${JSON.stringify(v)} -> ${JSON.stringify(out)}`)
+    }
+  }
+  // a bare front is not a key, and a letter before one is not a word's start
+  assert.equal(arg("xAKIA"), "xAKIA")
+  assert.equal(arg("see xAKIA here"), "see xAKIA here")
+})
+
+test("a method name behind its field is not a key", () => {
+  const v = "method=calculateMonthlyInvoiceTotal"
+  for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(v)]]) assert.equal(out, v, `${tag} masked a method name: ${JSON.stringify(out)}`)
+  // the field that names a credential keeps its mask, whatever the spelling
+  // of the name ("apiKey", "client_secret", "providerKey"), and so does the
+  // bare word with no field at all
+  const secret = "CorrectHorseBatteryStaple"
+  for (const v of ["token=" + secret, "apiKey=" + secret, "client_secret=" + secret, "providerKey=" + secret, secret]) {
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(v)]]) {
+      assert.equal(leakOfKey(out, secret), "", `${tag} left a word-shaped secret in ${JSON.stringify(v)}: ${JSON.stringify(out)}`)
     }
   }
 })

@@ -14847,3 +14847,40 @@ test("a long vendor front cut by a space is masked whole, whatever the frame", (
   }
   assert.deepEqual(auditLeaks(cases), [])
 })
+
+// --- 11-24: the over-masks and the one leak left from the 11-23 round -----
+
+test("an ordinary identifier in front of a title sequence is left as written", () => {
+  // The unterminated-OSC reading masked whatever eight characters sat in
+  // front of the sequence, so a log identifier beside a title was drawn as
+  // one mask ("render1234" printed "…"). Only a cut whose two sides both read
+  // as key material is the key's: the run in front and the payload behind.
+  const esc = String.fromCharCode(27)
+  const v = "render1234" + esc + "]0;title"
+  assert.equal(testables.maskAll(v, true), v, "maskAll must not take an identifier for a key")
+  for (const [tag, out] of [["card", testables.cardText(v, "", 400)], ["name", testables.nameText(v, "", 400)], ["host", testables.hostText(v)], ["arg", arg(v)], ["scrub", scrub(v)]]) {
+    assert.equal(out, "render1234 ]0;title", `${tag} changed the text: ${JSON.stringify(out)}`)
+  }
+  // and a cut whose payload carries the key's body is still one mask
+  const key = "ghp_AbCd1234EfGh5678IjKl9012MnOp3456"
+  assert.deepEqual(auditLeaks([["token=" + key.slice(0, 12) + esc + "]2;" + key.slice(12), key]]), [])
+})
+
+test("a method name behind its field is not a key", () => {
+  // "calculateMonthlyInvoiceTotal" is capitalised words: the case-mix run arm
+  // masked it on all six outputs. A value of that shape behind a field that
+  // does not name a credential is prose; the field that does name one keeps
+  // the mask, because a word-shaped body there is still the secret.
+  const v = "method=calculateMonthlyInvoiceTotal"
+  for (const [tag, sink] of auditSinks) assert.equal(sink(v), v, `${tag} masked a method name: ${JSON.stringify(sink(v))}`)
+  // the field that names a credential keeps the mask, whatever its spelling
+  // of the name ("apiKey", "client_secret", "providerKey") — and so does the
+  // bare word with no field at all, as it always has
+  const secret = "CorrectHorseBatteryStaple"
+  for (const v of ["token=" + secret, "apiKey=" + secret, "client_secret=" + secret, "providerKey=" + secret, secret]) {
+    for (const [tag, sink] of auditSinks) {
+      const out = sink(v)
+      assert.equal(leakOfKey(out, secret), "", `${tag} left a word-shaped secret in ${JSON.stringify(v)}: ${JSON.stringify(out)}`)
+    }
+  }
+})

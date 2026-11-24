@@ -868,6 +868,21 @@ const keyRun = (r) =>
   // fragment of a key. Not a word (abcdefgh… carries letters that are not hex,
   // modelscope20261031 carries more than hex), and not a number
   (r.length >= 16 && /^[0-9a-fA-F]+$/.test(r) && /\d/.test(r) && /[a-fA-F]/.test(r)))
+// a field that names a credential: a value of capitalised words behind it is
+// still the secret (a passphrase), and keeps the mask. The test is a substring
+// one on purpose — "providerKey", "clientSecret", "apiToken" all name one, and
+// a field this reading does not know ("monkey") errs toward the mask
+const CRED_NAME = /(?:token|key|secret|pass|auth|credential|session|sig)/i
+// a run of capitalised words ("calculateMonthlyInvoiceTotal") is a method or a
+// class name, not key material: every hump is a word of three letters or more
+// with a vowel in it, the run carries no digit, and nothing but lower-case
+// words stands between the humps (a key's case flips inside short groups)
+const wordyCamel = (r) => {
+  if (!/^[A-Za-z]+$/.test(r) || !/[A-Z]/.test(r)) return false
+  const humps = r.match(/[A-Z][a-z]{2,}/g) ?? []
+  if (humps.length < 2 || !humps.every((h) => /[aeiouy]/i.test(h))) return false
+  return /^[a-z]*$/.test(r.replace(/[A-Z][a-z]{2,}/g, ""))
+}
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 // one word, and something in it looks like a key
 const PATHY = /^(?:[~/.]|[A-Za-z]:[\\/]|\\\\)/
@@ -1124,7 +1139,10 @@ const ANSI_IN_KEY = new RegExp(String.raw`(?<=[A-Za-z0-9+/=_.-])(?:${ANSI_ESCAPE
 // front of it: the rest of the line is the sequence's payload, and a payload
 // carrying a key's body did reach the terminal whole. The guard asks for key
 // material in front, so an ordinary coloured log line keeps its payload
-const ANSI_OPEN_KEY = /([A-Za-z0-9+/=_.-]{8,})\u001b\][^\u0007\u009c\u001b\n\r]*/gu
+const ANSI_OPEN_KEY = /([A-Za-z0-9+/=_.-]{8,})\u001b\](?:[^\u0007\u009c\u001b\n\r;]*;)?([^\u0007\u009c\u001b\n\r]*)/gu
+// one side of a cut by an unterminated sequence: key characters, and a digit
+// or both cases in them
+const keyishSide = (x) => x.length >= 8 && /^[A-Za-z0-9+/=_.-]+$/.test(x) && (/[0-9]/.test(x) || (/[a-z]/.test(x) && /[A-Z]/.test(x)))
 // the block is delimited by its BEGIN and END lines, and its interior may
 // carry the standard header fields, a comment line, or a blank line
 const PRIVATE_BLOCK = /-----BEGIN ((?:[A-Z]+ )*PRIVATE KEY)-----([\s\S]{0,65536}?)-----END \1-----/g
@@ -1138,11 +1156,11 @@ const maskStructured = (s) => {
   if (!s.includes(".") && !s.includes(ESC) && !PRIVATE_LEAD.test(s)) return s
   let x = s.replace(ANSI_IN_KEY, "")
   if (x.includes(ESC + "]")) {
-    x = x.replace(ANSI_OPEN_KEY, (m, run) => {
-      // the key material in front of the sequence is masked with it: dropping
-      // the payload alone left the value's first characters in the clear
-      // ("token=ghp_AbCd1234" printed the whole 12-character head)
-      return run.length >= 8 && (/[0-9]/.test(run) || (/[a-z]/.test(run) && /[A-Z]/.test(run))) ? mask(run) : m
+    x = x.replace(ANSI_OPEN_KEY, (m, run, payload) => {
+      // a cut is the key's only when the two sides of it both read as key
+      // material; an identifier beside a title is the text's, not the key's
+      const cut = keyishSide(payload) && (keyishSide(run) || /^[A-Z0-9]{8,}$/.test(run))
+      return cut ? mask(run) : m
     })
   }
   return x
@@ -2612,10 +2630,14 @@ function joinFramed(s) {
     // walk that began at the first word key material on its own began one word
     // late — the head printed as written beside the body's mask (measured,
     // eight body characters; the card and the host's log line did the same)
+    // ...and the same for a front a letter or two into the word ("xAKIA
+    // IOSFODNN7EXAMPLE", "ask-ant-…"): a word does not carry a front inside
+    // it, and reading the body behind one alone kept the front's first
+    // characters in the clear
     const lead = cut < 0 ? (() => {
       const m = VENDOR_SPAN.exec(t0)
       VENDOR_SPAN.lastIndex = 0
-      return m && m.index > 0 && /^[_\-.]+$/.test(t0.slice(0, m.index)) ? m.index : 0
+      return m && m.index > 0 && /^[A-Za-z_\-.]{1,3}$/.test(t0.slice(0, m.index)) ? m.index : 0
     })() : 0
     const head = t0.slice((cut >= 0 ? cut : lead - 1) + 1)
     if (!head || !KEYCH.test(head)) continue
@@ -2794,6 +2816,9 @@ const argWords = (x) =>
     // a doubled "=" ("key==<body>") is the frame's too
     const rawValue = w.slice(valueAt).replace(/^=+/, "")
     const value = rawValue
+    // a value of capitalised words behind a field that names no credential is
+    // a method or a class name, and the run reading below would mask it
+    if (eq > 0 && !CRED_NAME.test(left) && wordyCamel(value)) return w
     if (
       eq > 0 &&
       /^[A-Za-z_][A-Za-z0-9_]*$/.test(left) &&
