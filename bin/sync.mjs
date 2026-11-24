@@ -1230,7 +1230,10 @@ function splitKey(s) {
   // readings still run. The walk is linear — a head reads at most 48 pieces
   // on — and the piece scans below are one pass each
   if (s.length > 32 * 1024) return null
-  if (/(?:(?![\n\r])[\p{Cc}\p{Cf}])/u.test(s)) return null
+  // a tab is a cut's spelling here — the gap grammar below reads across one —
+  // and refusing the text for it left a key cut by a tab to the per-word pass,
+  // which kept the seam ("AbCd1" TAB "234E…" printed "abcd1234")
+  if (/(?:(?![\n\r\t])[\p{Cc}\p{Cf}])/u.test(s)) return null
   const pieces = [...s.matchAll(PIECE)].map((m) => ({ text: m[0], at: m.index }))
   if (pieces.length < 2) return null
   // a piece the cut left: key characters, under the width a cut's piece has

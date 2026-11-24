@@ -7813,6 +7813,22 @@ test("a method name behind its field is not a key", () => {
   }
 })
 
+test("a tab is a cut splitKey reads like a space", () => {
+  // splitKey's control-character guard refused any tab, though its own gap
+  // grammar accepts one: a bare key cut by a tab after five to seven
+  // characters was left to the per-word pass, which masked the second half
+  // alone ("AbCd1 234E…3456" kept "abcd1234").
+  const bare = "AbCd1234EfGh5678IjKl9012MnOp3456"
+  for (const at of [5, 6, 7]) {
+    const v = bare.slice(0, at) + "\t" + bare.slice(at)
+    for (const [tag, out] of [["arg", arg(v)], ["scrub", scrub(`child: ${v}`)]]) {
+      assert.equal(leakOfKey(out, bare), "", `${tag} left key material at ${at}: ${JSON.stringify(out)}`)
+    }
+  }
+  // a TSV of ordinary words keeps its shape
+  assert.equal(arg("alpha\tbeta\tgamma"), "alpha beta gamma")
+})
+
 test("a bare key cut into two key-shaped halves is one mask on the terminal", () => {
   // The pair rule kept two bare halves apart ("5678ijkl" at the seam): a front
   // on one of them is what says two values are two values. Two fronted keys
